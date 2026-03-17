@@ -1,56 +1,48 @@
-"""Utility helpers to clean and normalise life cycle inventory datasets."""
-
-from __future__ import annotations
+"""
+clean_datasets.py contains a number of functions that clean a list of
+datasets or databases. They perform operations like removing useless fields,
+filling missing exchange information, etc.
+"""
 
 import csv
 import pprint
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Tuple, Union
 
 import bw2io
 import numpy as np
 import wurst
-from wurst.brightway.extract_database import extract_brightway2_databases
-
-wurst.extract_brightway2_databases = extract_brightway2_databases
 import yaml
 from bw2data.database import DatabaseChooser
+from bw2io.errors import MultiprocessingError
 from wurst import searching as ws
 
 from .data_collection import get_delimiter
 from .filesystem_constants import DATA_DIR
 
 
-def load_methane_correction_list() -> List[str]:
-    """Load the ``biomethane_correction.yaml`` file distributed with Premise.
-
-    :return: Names of the biogas activities requiring methane corrections.
-    :rtype: List[str]
+def load_methane_correction_list():
     """
-
-    with open(
-        DATA_DIR / "fuels" / "biomethane_correction.yaml", encoding="utf-8"
-    ) as file:
-        methane_correction_list: List[str] = yaml.safe_load(file)
+    Load biomethane_correction.yaml file and return a list
+    """
+    with open(DATA_DIR / "fuels" / "biomethane_correction.yaml", encoding="utf-8") as f:
+        methane_correction_list = yaml.safe_load(f)
     return methane_correction_list
 
 
-def remove_uncertainty(database: List[dict]) -> List[dict]:
-    """Remove uncertainty information from database exchanges.
-
-    :param database: Inventory database to clean.
-    :type database: List[dict]
-    :return: The same database with uncertainty metadata reset.
-    :rtype: List[dict]
+def remove_uncertainty(database):
     """
-
+    Remove uncertainty information from database exchanges.
+    :param database:
+    :return:
+    """
     uncertainty_keys = ["scale", "shape", "minimum", "maximum"]
     nan_value = np.nan
 
     for dataset in database:
         for exchange in dataset["exchanges"]:
             exchange["uncertainty type"] = 0
-            exchange["loc"] = float(exchange["amount"])
+            exchange["loc"] = exchange["amount"]
             for key in uncertainty_keys:
                 exchange[key] = nan_value
 
@@ -58,22 +50,19 @@ def remove_uncertainty(database: List[dict]) -> List[dict]:
 
 
 def get_biosphere_flow_uuid(version: str) -> Dict[Tuple[str, str, str, str], str]:
-    """Return a mapping between biosphere flow descriptors and their UUIDs.
+    """
+    Retrieve a dictionary with biosphere flow (name, categories, unit) --> uuid.
 
-    :param version: Ecoinvent version number used to select the appropriate
-        lookup table.
-    :type version: str
-    :return: Mapping with keys ``(name, category, subcategory, unit)``.
-    :rtype: Dict[Tuple[str, str, str, str], str]
-    :raises FileNotFoundError: If the lookup table for the given version is missing.
+    :returns: dictionary with biosphere flow (name, categories, unit) --> uuid
+    :rtype: dict
     """
 
-    if version == "3.12":
-        fp = DATA_DIR / "utils" / "export" / "flows_biosphere_312.csv"
-    elif version == "3.11":
+    if version == "3.11":
         fp = DATA_DIR / "utils" / "export" / "flows_biosphere_311.csv"
     elif version == "3.10":
         fp = DATA_DIR / "utils" / "export" / "flows_biosphere_310.csv"
+    elif version == "3.11":
+        fp = DATA_DIR / "utils" / "export" / "flows_biosphere_311.csv"
     elif version == "3.9":
         fp = DATA_DIR / "utils" / "export" / "flows_biosphere_39.csv"
     else:
@@ -98,12 +87,11 @@ def get_biosphere_flow_uuid(version: str) -> Dict[Tuple[str, str, str, str], str
 def get_biosphere_flow_categories(
     version: str,
 ) -> Dict[str, Union[Tuple[str], Tuple[str, str]]]:
-    """Return biosphere flow categories keyed by flow UUID.
+    """
+    Retrieve a dictionary with biosphere flow uuids and categories.
 
-    :param version: Ecoinvent version number used to select the lookup table.
-    :type version: str
-    :return: Mapping between flow UUIDs and their category tuples.
-    :rtype: Dict[str, Union[Tuple[str], Tuple[str, str]]]
+    :returns: dictionary with biosphere flow uuids as keys and categories as values
+    :rtype: dict
     """
 
     data = get_biosphere_flow_uuid(version)
@@ -114,16 +102,17 @@ def get_biosphere_flow_categories(
 
 
 def remove_nones(database: List[dict]) -> List[dict]:
-    """Remove exchanges with ``None`` values from the database.
+    """
+    Remove empty exchanges in the datasets of the wurst inventory database.
+    Modifies in place (does not return anything).
 
-    :param database: Wurst inventory database.
-    :type database: List[dict]
-    :return: Database with every exchange cleaned from ``None`` values.
-    :rtype: List[dict]
+    :param database: wurst inventory database
+    :type database: list
+
     """
 
-    def exists(exchange: Dict[str, Any]) -> Dict[str, Any]:
-        return {key: value for key, value in exchange.items() if value is not None}
+    def exists(x):
+        return {k: v for k, v in x.items() if v is not None}
 
     for dataset in database:
         dataset["exchanges"] = [exists(exc) for exc in dataset["exchanges"]]
@@ -132,12 +121,13 @@ def remove_nones(database: List[dict]) -> List[dict]:
 
 
 def remove_categories(database: List[dict]) -> List[dict]:
-    """Remove category metadata from datasets and exchanges.
+    """
+    Remove categories from datasets in the wurst inventory database.
+    Modifies in place (does not return anything).
 
-    :param database: Wurst inventory database.
-    :type database: List[dict]
-    :return: Database without category fields.
-    :rtype: List[dict]
+    :param database: wurst inventory database
+    :type database: list
+
     """
     for dataset in database:
         if "categories" in dataset:
@@ -155,12 +145,13 @@ def remove_categories(database: List[dict]) -> List[dict]:
 
 
 def strip_string_from_spaces(database: List[dict]) -> List[dict]:
-    """Strip whitespace and special spacing characters from text fields.
+    """
+    Strip strings from spaces in the dataset of the wurst inventory database.
+    Modifies in place (does not return anything).
 
-    :param database: Wurst inventory database.
-    :type database: List[dict]
-    :return: Database with normalised string fields.
-    :rtype: List[dict]
+    :param database: wurst inventory database
+    :type database: list
+
     """
     for dataset in database:
         dataset["name"] = dataset["name"].strip()
@@ -190,28 +181,22 @@ def strip_string_from_spaces(database: List[dict]) -> List[dict]:
 
 
 class DatabaseCleaner:
-    """Clean datasets contained in inventory databases for further processing."""
+    """
+    Class that cleans the datasets contained in the inventory database for further processing.
+
+
+    :ivar source_type: type of the database source. Can be ´brightway´ or 'ecospold'.
+    :vartype source_type: str
+    :ivar source_db: name of the source database if `source_type` == 'brightway'
+    :vartype source_db: str
+    :ivar source_file_path: filepath of the database if `source_type` == 'ecospold'.
+    :vartype source_file_path: str
+
+    """
 
     def __init__(
-        self,
-        source_db: str,
-        source_type: str,
-        source_file_path: Optional[Path],
-        version: str,
+        self, source_db: str, source_type: str, source_file_path: Path, version: str
     ) -> None:
-        """Create a cleaner for Brightway or EcoSpold data sources.
-
-        :param source_db: Name of the source database or desired Brightway database key.
-        :type source_db: str
-        :param source_type: Type of the source database, either ``"brightway"`` or ``"ecospold"``.
-        :type source_type: str
-        :param source_file_path: Path to the EcoSpold directory when ``source_type`` is ``"ecospold"``.
-        :type source_file_path: Optional[pathlib.Path]
-        :param version: Version identifier of the ecoinvent data.
-        :type version: str
-        :raises NameError: If the Brightway database is empty.
-        """
-
         if source_type == "brightway":
             # Check that database exists
             if len(DatabaseChooser(source_db)) == 0:
@@ -224,15 +209,9 @@ class DatabaseCleaner:
             self.database = strip_string_from_spaces(self.database)
 
         if source_type == "ecospold":
-            if source_file_path is None:
-                raise ValueError(
-                    "`source_file_path` must be provided when using EcoSpold data."
-                )
             # The ecospold data needs to be formatted
             ecoinvent = bw2io.SingleOutputEcospold2Importer(
-                str(source_file_path),
-                source_db,
-                use_mp=False,
+                str(source_file_path), source_db, use_mp=False
             )
 
             ecoinvent.apply_strategies()
@@ -249,12 +228,14 @@ class DatabaseCleaner:
         self.version = version
 
     def find_product_given_lookup_dict(self, lookup_dict: Dict[str, str]) -> List[str]:
-        """Return products matching the filters in ``lookup_dict``.
+        """
+        Return a list of location names, given the filtering
+        conditions given in `lookup_dict`.
+        It is, for example, used to return a list of
+        location names based on the name and the unit of a dataset.
 
-        :param lookup_dict: Field/value pairs used to filter activities.
-        :type lookup_dict: Dict[str, str]
-        :return: List of product names corresponding to the filters.
-        :rtype: List[str]
+        :param lookup_dict: a dictionary with filtering conditions
+        :return: a list of location names
         """
         return [
             x["product"]
@@ -264,12 +245,16 @@ class DatabaseCleaner:
         ]
 
     def find_location_given_lookup_dict(self, lookup_dict: Dict[str, str]) -> List[str]:
-        """Return locations matching the filters in ``lookup_dict``.
+        """
+        Return a list of location names, given the
+        filtering conditions given in `lookup_dict`.
+        It is, for example, used to return a list
+        of location names based on the name
+        and the unit of a dataset.
 
-        :param lookup_dict: Field/value pairs used to filter activities.
-        :type lookup_dict: Dict[str, str]
-        :return: List of location identifiers corresponding to the filters.
-        :rtype: List[str]
+
+        :param lookup_dict: a dictionary with filtering conditions
+        :return: a list of location names
         """
         return [
             x["location"]
@@ -279,9 +264,13 @@ class DatabaseCleaner:
         ]
 
     def add_location_field_to_exchanges(self) -> None:
-        """Add the ``location`` key to production and technosphere exchanges.
+        """
+        Add the `location` key to the production and
+        technosphere exchanges in :attr:`database`.
 
-        :raises KeyError: If no matching activity can be found for an exchange input.
+        :raises IndexError: if no corresponding activity
+            (and reference product) can be found.
+
         """
         d_location = {(a["database"], a["code"]): a["location"] for a in self.database}
         for dataset in self.database:
@@ -291,9 +280,20 @@ class DatabaseCleaner:
                     exchange["location"] = d_location[exc_input]
 
     def add_product_field_to_exchanges(self) -> None:
-        """Populate the ``product`` key on production and technosphere exchanges.
+        """
 
-        :raises KeyError: If no corresponding activity can be found for an exchange input.
+        Add the `product` key to the production and
+        technosphere exchanges in :attr:`database`.
+
+        For production exchanges, use the value
+        of the `reference_product` field.
+        For technosphere exchanges, search the
+        activities in :attr:`database` and
+        use the reference product.
+
+        :raises IndexError: if no corresponding
+            activity (and reference product) can be found.
+
         """
         # Create a dictionary that contains the 'code' field as key and the 'product' field as value
         d_product = {
@@ -329,7 +329,9 @@ class DatabaseCleaner:
                     exchange["name"] = d_product[exchange["input"][1]][1]
 
     def transform_parameter_field(self) -> None:
-        """Transform the parameter field from lists to dictionaries."""
+        """
+        Transform the parameter field of the database to a dictionary.
+        """
         # When handling ecospold files directly, the parameter field is a list.
         # It is here transformed into a dictionary
         for dataset in self.database:
@@ -341,10 +343,15 @@ class DatabaseCleaner:
     def fix_unset_technosphere_and_production_exchange_locations(
         self, matching_fields: Tuple[str, str] = ("name", "unit")
     ) -> None:
-        """Fill missing locations for production and technosphere exchanges.
+        """
+        Give all the production and technopshere exchanges
+        with a missing location name the location of the dataset
+        they belong to.
+        Modifies in place (does not return anything).
 
-        :param matching_fields: Fields used to look up potential location matches.
-        :type matching_fields: Tuple[str, str]
+        :param matching_fields: filter conditions
+        :type matching_fields: tuple
+
         """
         for dataset in self.database:
             # collect production exchanges that simply do not have a location key and set it to
@@ -366,7 +373,8 @@ class DatabaseCleaner:
                         )
 
     def fix_biosphere_flow_categories(self) -> None:
-        """Ensure biosphere exchanges include category information."""
+        """Add a `categories` for biosphere flows if missing.
+        This happens when importing directly from ecospold files"""
 
         dict_bio_cat = get_biosphere_flow_categories(self.version)
         dict_bio_uuid = get_biosphere_flow_uuid(self.version)
@@ -422,8 +430,12 @@ class DatabaseCleaner:
                 exc for exc in dataset["exchanges"] if "delete" not in exc
             ]
 
-    def correct_biogas_activities(self) -> None:
-        """Balance carbon and energy flows for specific biogas activities."""
+    def correct_biogas_activities(self):
+        """
+        Some activities producing biogas are not given any
+        biogenic CO2 or energy input, leading to imbalanced carbon and energy flows
+        when combusted.
+        """
 
         list_biogas_activities = load_methane_correction_list()
         biosphere_codes = get_biosphere_flow_uuid(self.version)
@@ -500,13 +512,12 @@ class DatabaseCleaner:
                     }
                 )
 
-    def prepare_datasets(self, keep_uncertainty_data: bool) -> List[dict]:
-        """Run the standard cleaning pipeline on the loaded database.
+    def prepare_datasets(self, keep_uncertainty_data) -> List[dict]:
+        """
+        Clean datasets for all databases listed in
+        scenarios: fix location names, remove
+        empty exchanges, etc.
 
-        :param keep_uncertainty_data: Flag indicating whether to preserve uncertainty data.
-        :type keep_uncertainty_data: bool
-        :return: Cleaned database ready for further processing.
-        :rtype: List[dict]
         """
 
         # Set missing locations to ```GLO``` for datasets in ``database``

@@ -28,10 +28,10 @@ logger = create_logger("dac")
 CDR_ACTIVITIES = DATA_DIR / "cdr" / "cdr_activities.yaml"
 
 
-def fetch_mapping() -> dict:
+def fetch_mapping(filepath: str) -> dict:
     """Returns a dictionary from a YML file"""
 
-    with open(CDR_ACTIVITIES, "r", encoding="utf-8") as stream:
+    with open(filepath, "r", encoding="utf-8") as stream:
         mapping = yaml.safe_load(stream)
     return mapping
 
@@ -63,10 +63,6 @@ def _update_cdr(scenario, version, system_model):
         scenario["index"] = cdr.index
     else:
         print("No DAC information found in IAM data. Skipping.")
-
-    if "mapping" not in scenario:
-        scenario["mapping"] = {}
-    scenario["mapping"]["cdr"] = cdr.cdr_map
 
     return scenario
 
@@ -108,6 +104,7 @@ class CarbonDioxideRemoval(BaseTransformation):
         self.version = version
         self.system_model = system_model
         self.mapping = InventorySet(self.database)
+        self.cdr_map = self.mapping.generate_cdr_map(model=self.model)
 
     def regionalize_cdr_activities(self) -> None:
         """
@@ -118,20 +115,6 @@ class CarbonDioxideRemoval(BaseTransformation):
         modifies the original datasets to include the heat source, and adds the modified datasets to the database.
 
         """
-
-        # regionalize support activities
-        filters = fetch_mapping()
-
-        self.cdr_support_activities = self.mapping.generate_sets_from_filters(filters)
-
-        self.cdr_support_activities = {
-            x["name"]: v for v in self.cdr_support_activities.values() for x in v
-        }
-
-        if self.cdr_support_activities:
-            self.process_and_add_activities(mapping=self.cdr_support_activities)
-
-        self.cdr_map = self.mapping.generate_cdr_map(model=self.model)
 
         self.process_and_add_activities(
             efficiency_adjustment_fn=self.adjust_cdr_efficiency,

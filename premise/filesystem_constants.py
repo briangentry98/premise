@@ -3,26 +3,20 @@ This module contains constants for the filesystem paths used by Premise.
 """
 
 from pathlib import Path
-from typing import Any, Dict, Optional
 
 import platformdirs
 import yaml
 
 
-def load_var_file() -> Optional[Dict[str, Any]]:
-    """Load user-defined variables from ``variables.yaml`` if present.
-
-    :return: Dictionary of variables loaded from the file, or ``None`` when the
-        file does not exist.
-    :rtype: Optional[Dict[str, Any]]
-    """
-
+def load_var_file():
+    """Check if the variable file exists and load it."""
     var_file = Path.cwd() / "variables.yaml"
     if var_file.exists():
         print(f"Loading variables from {var_file}")
-        with open(var_file, "r", encoding="utf-8") as file:
-            return yaml.safe_load(file)
-    return None
+        with open(var_file, "r") as f:
+            return yaml.safe_load(f)
+    else:
+        return None
 
 
 VARIABLES = load_var_file() or {}

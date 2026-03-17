@@ -47,7 +47,7 @@ def find_iam_efficiency_change(
                 )
             ).values.item(0)
 
-        if np.isnan(scaling_factor) or np.isinf(scaling_factor):
+        if scaling_factor in (np.nan, np.inf):
             scaling_factor = 1
 
     return scaling_factor
@@ -77,6 +77,7 @@ def flag_activities_to_adjust(
                 variables=dataset_vars["production volume variable"]
             )
         except KeyError:
+            print(list(scenario_data.keys()))
             print(
                 f"Variable {dataset_vars['production volume variable']} not found in scenario data for scenario."
             )
@@ -306,10 +307,11 @@ def check_inventories(
             "replaces": val.get("replaces", []),
             "replaces in": val.get("replaces in", []),
             "replacement ratio": val.get("replacement ratio", 1),
-            "production volume variable": pathway,
-            "variable": pathway,
+            "production volume variable": val.get("production volume", {}).get(
+                "variable"
+            ),
         }
-        for pathway, val in configuration["production pathways"].items()
+        for val in configuration["production pathways"].values()
     }
 
     # direct regionalization
@@ -559,10 +561,8 @@ def check_inventories(
                     print(f"No candidate found for {key[0]} and {key[1]} for {region}.")
             return list(short_listed.values())
 
-    mapping = {}
-
     for key, val in d_datasets.items():
-        if val.get("exists in original database") is True:
+        if val.get("exists in original database"):
             mask = val.get("mask")
             duplicate_name = None
             if val.get("duplicate") is True:
@@ -598,51 +598,7 @@ def check_inventories(
                         exc["name"] = duplicate_name
                     database.append(ds)
 
-            if "variable" in val:
-                mapping[val["variable"]] = [
-                    {
-                        "name": val["original name"],
-                        "reference product": val["original reference product"],
-                        "unit": candidates[0]["unit"],
-                    }
-                ]
-        else:
-            # new dataset
-            unit = [
-                act
-                for act in inventory_data
-                if act["name"] == val["original name"]
-                and act["reference product"] == val["original reference product"]
-            ]
-            if len(unit) > 0:
-                unit = unit[0]["unit"]
-            else:
-                # dataset not yet created.
-                # we need to look into the `markets` section of the config file
-                for market in configuration.get("markets", {}):
-                    if (
-                        market["name"] == val["original name"]
-                        and market["reference product"]
-                        == val["original reference product"]
-                    ):
-                        unit = market["unit"]
-                        break
-
-            ds = {
-                "name": val["original name"],
-                "reference product": val["original reference product"],
-            }
-            if unit:
-                ds["unit"] = unit
-            else:
-                print(
-                    f"Could not find unit for {ds}. "
-                    f"Please make sure the unit is specified in the inventory data or in the markets section of the config file."
-                )
-
-            mapping[val["variable"]] = [ds]
-
-    return inventory_data, database, configuration, mapping
+    return inventory_data, database, configuration
 
 
 def check_datapackage(datapackage: datapackage.Package):

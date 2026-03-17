@@ -269,10 +269,6 @@ def _update_electricity(
     scenario["index"] = electricity.index
     scenario["cache"] = electricity.cache
 
-    if "mapping" not in scenario:
-        scenario["mapping"] = {}
-    scenario["mapping"]["electricity"] = electricity.powerplant_map
-
     validate = ElectricityValidation(
         model=scenario["model"],
         scenario=scenario["pathway"],
@@ -320,28 +316,15 @@ def select_or_interpolate(data, year, **kwargs):
 
 def compute_time_weighted_mix(mix, region, year, period):
     interp_range = np.arange(year, year + period + 1)
-
-    values = (
-        mix.sel(region=region)
-        .interp(year=interp_range, kwargs={"fill_value": "extrapolate"})
-        .mean(dim="year")
-        .values
-    )
-
-    # Remove negative contributions
-    values = np.where(values < 0, 0.0, values)
-
-    total = values.sum()
-
-    if total == 0:
-        raise ValueError(
-            "All mix components are zero or negative after filtering; "
-            "cannot compute a normalized mix."
+    return dict(
+        zip(
+            mix.variables.values,
+            mix.sel(region=region)
+            .interp(year=interp_range, kwargs={"fill_value": "extrapolate"})
+            .mean(dim="year")
+            .values,
         )
-
-    values = values / total
-
-    return dict(zip(mix.variables.values, values))
+    )
 
 
 def make_generic_market_dataset(
@@ -710,8 +693,8 @@ class Electricity(BaseTransformation):
                         new_exchanges.append(
                             {
                                 "uncertainty type": 0,
-                                "loc": float(amount * share),
-                                "amount": float(amount * share),
+                                "loc": (amount * share),
+                                "amount": (amount * share),
                                 "type": "technosphere",
                                 "product": supplier["reference product"],
                                 "name": supplier["name"],
@@ -794,7 +777,6 @@ class Electricity(BaseTransformation):
             regions=self.regions,
         )
         self.database.append(new_world_dataset)
-        self.add_to_index(new_world_dataset)
         self.write_log(new_world_dataset)
 
     def create_new_markets_medium_voltage(self) -> None:
@@ -993,7 +975,6 @@ class Electricity(BaseTransformation):
             regions=self.regions,
         )
         self.database.append(new_world_dataset)
-        self.add_to_index(new_world_dataset)
         self.write_log(new_world_dataset)
 
     def create_new_markets_high_voltage(self) -> None:
@@ -1176,8 +1157,8 @@ class Electricity(BaseTransformation):
                         new_exchanges.append(
                             {
                                 "uncertainty type": 0,
-                                "loc": float(amount * share),
-                                "amount": float(amount * share),
+                                "loc": (amount * share),
+                                "amount": (amount * share),
                                 "type": "technosphere",
                                 "product": supplier["reference product"],
                                 "name": supplier["name"],
@@ -1223,7 +1204,6 @@ class Electricity(BaseTransformation):
             regions=self.regions,
         )
         self.database.append(new_world_dataset)
-        self.add_to_index(new_world_dataset)
         self.write_log(new_world_dataset)
 
     def generate_world_market(
@@ -1341,7 +1321,6 @@ class Electricity(BaseTransformation):
 
             if np.isnan(share):
                 print("Incorrect market share for", dataset["name"], "in", r)
-                share = 0.0
 
             if share > 0:
                 # Add exchange for the region
@@ -1502,19 +1481,12 @@ class Electricity(BaseTransformation):
                         scaling_factor = float(current_eff / new_mean_eff)
                         exc["amount"] *= scaling_factor
                         exc["uncertainty type"] = 5
-                        exc["loc"] = float(exc["amount"])
-                        exc["minimum"] = float(
-                            exc["amount"] * (new_min_eff / new_mean_eff)
-                        )
-                        exc["maximum"] = float(
-                            exc["amount"] * (new_max_eff / new_mean_eff)
-                        )
+                        exc["loc"] = exc["amount"]
+                        exc["minimum"] = exc["amount"] * (new_min_eff / new_mean_eff)
+                        exc["maximum"] = exc["amount"] * (new_max_eff / new_mean_eff)
 
-                        if "comment" not in dataset:
-                            dataset["comment"] = ""
-
-                        dataset["comment"] += (
-                            f" `premise` has changed the efficiency "
+                        dataset["comment"] = (
+                            f"`premise` has changed the efficiency "
                             f"of this photovoltaic installation "
                             f"from {int(current_eff * 100)} pct. to {int(new_mean_eff * 100)} pt."
                         )
@@ -1733,8 +1705,10 @@ class Electricity(BaseTransformation):
                         )
 
                         scaling_factor = ei_eff / new_efficiency
+
                     else:
                         scaling_factor = 1
+
                 else:
                     new_efficiency = self.find_iam_efficiency_change(
                         data=self.iam_data.electricity_technology_efficiencies,
@@ -1773,6 +1747,8 @@ class Electricity(BaseTransformation):
                     )
 
                     # Rescale all the technosphere exchanges
+                    # according to the change in efficiency between `year`
+                    # and 2020 from the IAM efficiency values
                     rescale_exchanges(dataset, scaling_factor)
 
                     self.write_log(dataset=dataset, status="updated")

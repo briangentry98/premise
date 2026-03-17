@@ -122,12 +122,8 @@ class WindTurbine(BaseTransformation):
         dataset_copy = copy.deepcopy(dataset)
         dataset_copy["name"] += f", {suffix}"
         dataset_copy["code"] = str(uuid.uuid4().hex)
-
-        if "comment" not in dataset_copy:
-            dataset_copy["comment"] = ""
-
-        dataset_copy["comment"] += (
-            f" This dataset represents the {suffix} technology "
+        dataset_copy["comment"] = (
+            f"This dataset represents the {suffix} technology "
             "variant of the ecoinvent dataset."
         )
 

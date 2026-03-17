@@ -30,9 +30,10 @@ from wurst.filesystem import get_uuid
 from . import __version__
 from .data_collection import get_delimiter
 from .filesystem_constants import DATA_DIR
-from .inventory_imports import get_correspondence_bio_flows, normalize_version
+from .inventory_imports import get_correspondence_bio_flows
 from .utils import reset_all_codes, get_uuids
 from .validation import BaseDatasetValidator
+
 
 FILEPATH_SIMAPRO_UNITS = DATA_DIR / "utils" / "export" / "simapro_units.yml"
 FILEPATH_SIMAPRO_COMPARTMENTS = (
@@ -252,17 +253,12 @@ def biosphere_flows_dictionary(version):
     Create a dictionary with biosphere flows
     (name, category, sub-category, unit) -> code
     """
-    version = normalize_version(str(version))
     if version == "3.9":
         fp = DATA_DIR / "utils" / "export" / "flows_biosphere_39.csv"
     elif version == "3.10":
         fp = DATA_DIR / "utils" / "export" / "flows_biosphere_310.csv"
     elif version == "3.11":
         fp = DATA_DIR / "utils" / "export" / "flows_biosphere_311.csv"
-    elif version == "3.12":
-        fp = DATA_DIR / "utils" / "export" / "flows_biosphere_312.csv"
-    elif version == "3.7":
-        fp = DATA_DIR / "utils" / "export" / "flows_biosphere_37.csv"
     else:
         fp = DATA_DIR / "utils" / "export" / "flows_biosphere_38.csv"
 
@@ -346,22 +342,26 @@ def correct_biosphere_flow(name, cat, unit, version):
 
     bio_dict = biosphere_flows_dictionary(version)
 
-    if len(cat) > 1:
-        main_cat = cat[0]
-        sub_cat = cat[1]
-    else:
-        main_cat = cat[0]
-        sub_cat = "unspecified"
+    try:
+
+        if len(cat) > 1:
+            main_cat = cat[0]
+            sub_cat = cat[1]
+        else:
+            main_cat = cat[0]
+            sub_cat = "unspecified"
+
+        if (name, main_cat, sub_cat, unit) not in bio_dict:
+            if bio_flows_correspondence.get(main_cat, {}).get(name, {}):
+                name = bio_flows_correspondence[main_cat][name]
+                return bio_dict[(name, main_cat, sub_cat, unit)]
+    except:
+        print(f"{name, cat, unit, version} not found in biosphere dictionary.")
+        return None
 
     if (name, main_cat, sub_cat, unit) not in bio_dict:
-        if bio_flows_correspondence.get(main_cat, {}).get(name, {}):
-            name = bio_flows_correspondence[main_cat][name]
-            return bio_dict[(name, main_cat, sub_cat, unit)]
-
-    if (name, main_cat, sub_cat, unit) not in bio_dict:
-        raise ValueError(
-            f"{name, cat, unit, version} not found in biosphere dictionary."
-        )
+        print(f"{name, cat, unit, version} not found in biosphere dictionary.")
+        return None
 
     return bio_dict[(name, main_cat, sub_cat, unit)]
 
@@ -494,7 +494,7 @@ def build_datapackage(df, inventories, list_scenarios, ei_version, name):
         },
     ]
 
-    if len(list_scenarios[0].split(" - ")) == 3:
+    if len(list_scenarios[0]) == 3:
         package.descriptor["scenarios"] = [
             {
                 "name": s,
@@ -1254,7 +1254,6 @@ class Export:
                 delimiter=";",
                 lineterminator="\n",
             )
-            writer.writerow(["name", "reference product", "unit", "location", "index"])
             index_A = create_index_of_A_matrix(self.db)
             for d in index_A:
                 data = list(d) + [index_A[d]]
@@ -1295,7 +1294,6 @@ class Export:
                 delimiter=";",
                 lineterminator="\n",
             )
-            writer.writerow(["name", "compartment", "subcompartment", "unit", "index"])
             for d in index_B:
                 data = list(d) + [index_B[d]]
                 writer.writerow(data)
@@ -1535,12 +1533,6 @@ class Export:
                         string = ""
                         if "comment" in ds:
                             string = ds["comment"]
-
-                        if "source" in ds:
-                            if len(string) > 0:
-                                string += f" | Source: {ds['source']}"
-                            else:
-                                string = f"Source: {ds['source']}"
 
                         # Add dataset UUID to comment field
                         if len(string) > 0:

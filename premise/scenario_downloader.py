@@ -1,59 +1,36 @@
-"""Utilities to download scenario data files used for the application examples."""
-
-from __future__ import annotations
-
+from .filesystem_constants import DATA_DIR
 import os
-from pathlib import Path
-
 import requests
-from tqdm import tqdm
-
-from premise import __version__
+from pathlib import Path
+from tqdm import tqdm  # Import tqdm for the progress bar
 
 
 def download_csv(file_name: str, url: str, download_folder: Path) -> Path:
-    """Download a CSV file from Zenodo if it is not present locally.
-
-    A progress bar is displayed using :mod:`tqdm` while the file is being
-    downloaded. When the destination directory does not yet exist it is created
-    automatically.
-
-    :param file_name: Name of the file to save the downloaded content as.
-    :type file_name: str
-    :param url: Direct download URL of the target CSV file.
-    :type url: str
-    :param download_folder: Directory where the file should be stored.
-    :type download_folder: pathlib.Path
-    :return: Path to the downloaded file on disk.
-    :rtype: pathlib.Path
-    """
-
-    if not download_folder.exists():
-        download_folder.mkdir(parents=True, exist_ok=True)
+    """Downloads the CSV file from Zenodo if it is not present locally with a progress bar."""
+    if not os.path.exists(download_folder):
+        os.makedirs(download_folder)
 
     file_path = download_folder / file_name
 
-    if not file_path.exists():
+    # Check if the file exists locally
+    if not os.path.exists(file_path):
         print(f"{file_name} not found locally. Downloading...")
 
-        version_str = ".".join(map(str, __version__))
-        headers = {
-            "User-Agent": f"premise-lca/{version_str} (https://github.com/polca/premise)"
-        }
-        response = requests.get(url, stream=True, timeout=60, headers=headers)
+        # Download the CSV file with a progress bar
+        response = requests.get(url, stream=True)
 
         if response.status_code == 200:
             total_size = int(response.headers.get("Content-Length", 0))
             with (
-                open(file_path, "wb") as file_handle,
+                open(file_path, "wb") as f,
                 tqdm(
                     total=total_size, unit="B", unit_scale=True, desc=file_name
-                ) as progress,
+                ) as pbar,
             ):
                 for chunk in response.iter_content(chunk_size=1024):
                     if chunk:
-                        file_handle.write(chunk)
-                        progress.update(len(chunk))
+                        f.write(chunk)
+                        pbar.update(len(chunk))
             print(f"{file_name} downloaded successfully.")
         else:
             print(

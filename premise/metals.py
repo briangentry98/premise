@@ -7,7 +7,6 @@ Integrates projections regarding use of metals in the economy from:
 """
 
 import uuid
-import ast
 from functools import lru_cache
 from typing import Optional
 from collections import defaultdict
@@ -32,6 +31,14 @@ from .utils import DATA_DIR
 from .validation import MetalsValidation
 
 logger = create_logger("metal")
+
+EI311_NAME_CHANGES = {
+    "sodium borate mine operation and beneficiation": "sodium borates mine operation and beneficiation",
+    "gallium production, semiconductor-grade": "high-grade gallium production, from low-grade gallium",
+}
+
+EI311_PRODUCT_CHANGES = {"gallium, semiconductor-grade": "gallium, high-grade"}
+EI311_LOCATION_CHANGES = {"high-grade gallium production, from low-grade gallium": "CN"}
 
 
 def _update_metals(scenario, version, system_model):
@@ -62,8 +69,6 @@ def _update_metals(scenario, version, system_model):
         regions=scenario["iam data"].regions,
         database=metals.database,
         iam_data=scenario["iam data"],
-        system_model=metals.system_model,
-        version=metals.version,
     )
 
     validate.prim_sec_split = metals.prim_sec_split
@@ -117,21 +122,15 @@ def load_metals_transport():
     return df
 
 
-def load_mining_shares_mapping(ei_version="312"):
+def load_mining_shares_mapping():
     """
     Load mapping between mining shares from the different sources and ecoinvent
     """
 
     filepath = DATA_DIR / "metals" / "mining_shares_mapping.xlsx"
+    df = pd.read_excel(filepath, sheet_name="Shares_mapping")
 
-    if ei_version == "3.11":
-        df = pd.read_excel(filepath, sheet_name="ei311")
-    elif ei_version == "3.12":
-        df = pd.read_excel(filepath, sheet_name="ei312")
-    else:
-        df = pd.read_excel(filepath, sheet_name="ei310")
-
-    # replace all instances of "Year" in columns by ""
+    # replace all instances of "Year " in columns by ""
     df.columns = df.columns.str.replace("Year ", "")
 
     # remove suppliers whose markets share is below the cutoff
@@ -229,30 +228,13 @@ def get_ecoinvent_metal_factors():
     return ds
 
 
-def load_post_allocation_correction_factors(ei_version="3.12"):
+def load_post_allocation_correction_factors():
     """
     Load yaml file with post-allocation_correction factors
-    for a specific ecoinvent version.
 
     """
 
-    # Determine which correction file to use
-    if ei_version in ["3.11"]:
-        filename = "corrections_311.yaml"
-    elif ei_version in ["3.12"]:
-        filename = "corrections_312.yaml"
-    else:
-        # 3.10 and earlier
-        filename = "corrections_310.yaml"
-
-    filepath = DATA_DIR / "metals" / "post-allocation_correction" / filename
-
-    if not filepath.exists():
-        print(f"Warning: {filename} not found, using corrections_310.yaml as fallback")
-        filepath = (
-            DATA_DIR / "metals" / "post-allocation_correction" / "corrections_310.yaml"
-        )
-
+    filepath = DATA_DIR / "metals" / "post-allocation_correction" / "corrections.yaml"
     with open(filepath, "r", encoding="utf-8") as stream:
         factors = yaml.safe_load(stream)
     return factors
@@ -467,14 +449,11 @@ class Metals(BaseTransformation):
 
         self.metals = iam_data.metals_intensity_factors  # 1
         # Precompute the median values for each metal and origin_var for the year 2020
-        available_years = sorted(self.metals.coords["year"].values)
-        clamped_year = max(available_years[0], min(self.year, available_years[-1]))
-
-        if clamped_year in available_years:
-            self.precomputed_medians = self.metals.sel(year=clamped_year)
+        if self.year in self.metals.coords["year"].values:
+            self.precomputed_medians = self.metals.sel(year=self.year)
         else:
             self.precomputed_medians = self.metals.interp(
-                year=clamped_year, method="linear"
+                year=self.year, method="nearest", kwargs={"fill_value": "extrapolate"}
             )
 
         self.activities_mapping = load_activities_mapping()  # 4
@@ -730,7 +709,7 @@ class Metals(BaseTransformation):
         Correct for post-allocation in the database.
         """
 
-        factors_list = load_post_allocation_correction_factors(self.version)
+        factors_list = load_post_allocation_correction_factors()
 
         for dataset in factors_list:
             filters = [
@@ -882,14 +861,8 @@ class Metals(BaseTransformation):
         df["Reference_product_str"] = df["Reference product"].apply(str)
 
         for (_, _), group in df.groupby(["Process_str", "Reference_product_str"]):
-            try:
-                proc_filter = ast.literal_eval(group["Process"].iloc[0])
-                ref_prod_filter = ast.literal_eval(group["Reference product"].iloc[0])
-            except (ValueError, SyntaxError) as exc:
-                logger.error(
-                    f"[Metals] Invalid filter expression for process/reference product: {exc}"
-                )
-                continue
+            proc_filter = eval(group["Process"].iloc[0])
+            ref_prod_filter = eval(group["Reference product"].iloc[0])
 
             try:
                 filters = build_ws_filter("name", proc_filter) + build_ws_filter(
@@ -1274,7 +1247,7 @@ class Metals(BaseTransformation):
     def create_metal_markets(self):
         self.post_allocation_correction()
 
-        dataframe = load_mining_shares_mapping(self.version)
+        dataframe = load_mining_shares_mapping()
         dataframe = dataframe.loc[dataframe["Work done"] == "Yes"]
         dataframe = dataframe.loc[~dataframe["Country"].isnull()]
 

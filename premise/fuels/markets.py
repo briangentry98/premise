@@ -9,6 +9,7 @@ from .utils import (
     update_dataset,
     calculate_fuel_properties,
 )
+from .config import FUEL_MARKETS
 from ..transformation import ws, get_shares_from_production_volume
 
 
@@ -105,6 +106,6 @@ class FuelMarketsMixin:
             print(
                 f"Warning: incorrect fuel share for {fuel} in {region} (-> set to 0%)."
             )
-            fuel_share = 0.0
+            fuel_share = 0
 
         return float(fuel_share)

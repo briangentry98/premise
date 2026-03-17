@@ -4,7 +4,6 @@ This module contains classes for validating datasets after they have been transf
 
 import csv
 import math
-from functools import lru_cache
 
 import numpy as np
 import pandas as pd
@@ -14,18 +13,13 @@ from .filesystem_constants import DATA_DIR
 from .geomap import Geomap
 from .logger import create_logger
 from .utils import rescale_exchanges, get_uuids
-from .inventory_imports import (
-    get_biosphere_code,
-    get_classification_entry,
-    get_classifications,
-)
+from .inventory_imports import get_classifications, get_biosphere_code
 import country_converter as coco
 import wurst.searching as ws
 
 logger = create_logger("validation")
 
 
-@lru_cache(maxsize=1)
 def load_electricity_keys():
     # load electricity keys from data/utils/validation/electricity.yaml
 
@@ -35,7 +29,6 @@ def load_electricity_keys():
     return electricity_keys
 
 
-@lru_cache(maxsize=1)
 def load_waste_keys():
     # load waste keys from data/utils/validation/waste flows.yaml
 
@@ -45,7 +38,6 @@ def load_waste_keys():
     return waste_keys
 
 
-@lru_cache(maxsize=1)
 def load_waste_flows_exceptions():
     # load waste flows exceptions.yaml from data/utils/validation/waste flows exceptions.yaml
 
@@ -57,7 +49,6 @@ def load_waste_flows_exceptions():
     return waste_flows_exceptions
 
 
-@lru_cache(maxsize=1)
 def load_circular_exceptions():
     # load circular exceptions.yaml from data/utils/validation/circular exceptions.yaml.yaml
 
@@ -69,7 +60,6 @@ def load_circular_exceptions():
     return circular_exceptions
 
 
-@lru_cache(maxsize=1)
 def load_car_exhaust_pollutants():
     fp = DATA_DIR / "transport" / "car" / "EF_HBEFA42_exhaust.csv"
     nested_dict = {}
@@ -97,7 +87,6 @@ def load_car_exhaust_pollutants():
     return nested_dict
 
 
-@lru_cache(maxsize=1)
 def load_truck_exhaust_pollutants():
     fp = DATA_DIR / "transport" / "truck" / "EF_HBEFA42_exhaust.csv"
     nested_dict = {}
@@ -151,109 +140,15 @@ def clean_up(exc):
     return exc
 
 
-def _load_mining_shares_mapping_for_validation(ei_version):
+def _load_mining_shares_mapping_for_validation():
     """
     Minimal local loader to avoid importing metals.py and creating a cycle.
     Mirrors the basic behavior of load_mining_shares_mapping used for checks.
     """
     fp = DATA_DIR / "metals" / "mining_shares_mapping.xlsx"
-
-    if ei_version == "3.11":
-        df = pd.read_excel(fp, sheet_name="ei311")
-    elif ei_version == "3.12":
-        df = pd.read_excel(fp, sheet_name="ei312")
-    else:
-        df = pd.read_excel(fp, sheet_name="ei310")
-
+    df = pd.read_excel(fp, sheet_name="Shares_mapping")
     df.columns = df.columns.str.replace("Year ", "", regex=False)
     return df
-
-
-def convert_numpy_generics_to_float(
-    records, *, in_place: bool = False, convert_keys: bool = False
-) -> list:
-    """
-    Walk a list of dictionaries and convert any NumPy scalar (np.generic)
-    to a Python float. Nested dicts/lists/tuples/sets are handled.
-
-    :param records: List of dictionaries to sanitize.
-    :param in_place: If True, modify the input records in place. If False,
-        return a new sanitized copy.
-    :param convert_keys: If True, also convert dictionary keys that are
-        NumPy scalars to floats (and then to strings for JSON safety).
-    :return: Sanitized list of dictionaries.
-    """
-
-    def _to_float_if_np_scalar(x):
-        # Only convert NumPy scalars; leave arrays and other types alone.
-        if isinstance(x, np.generic):
-            # This will turn np.bool_(True) -> 1.0 and np.int64(3) -> 3.0
-            # which is what the user requested (everything to float).
-            return float(x)
-        return x
-
-    def _sanitize(obj):
-        # Convert NumPy scalar immediately
-        if isinstance(obj, np.generic):
-            return _to_float_if_np_scalar(obj)
-
-        # Dicts
-        if isinstance(obj, dict):
-            if in_place:
-                # Potentially rewrite keys if requested
-                if convert_keys:
-                    # Rebuild only if any key needs conversion
-                    needs_rebuild = any(isinstance(k, np.generic) for k in obj.keys())
-                    if needs_rebuild:
-                        new_obj = {}
-                        for k, v in obj.items():
-                            new_k = _to_float_if_np_scalar(k)
-                            if isinstance(new_k, float):
-                                # Keys must be strings for JSON, so cast to str
-                                new_k = str(new_k)
-                            new_obj[new_k] = _sanitize(v)
-                        obj.clear()
-                        obj.update(new_obj)
-                    else:
-                        for k in list(obj.keys()):
-                            obj[k] = _sanitize(obj[k])
-                else:
-                    for k in list(obj.keys()):
-                        obj[k] = _sanitize(obj[k])
-                return obj
-            else:
-                if convert_keys:
-                    new_obj = {}
-                    for k, v in obj.items():
-                        new_k = _to_float_if_np_scalar(k)
-                        if isinstance(new_k, float):
-                            new_k = str(new_k)  # JSON-safe key
-                        new_obj[new_k] = _sanitize(v)
-                    return new_obj
-                else:
-                    return {k: _sanitize(v) for k, v in obj.items()}
-
-        # Lists
-        if isinstance(obj, list):
-            if in_place:
-                for i in range(len(obj)):
-                    obj[i] = _sanitize(obj[i])
-                return obj
-            else:
-                return [_sanitize(v) for v in obj]
-
-        # Tuples: return same type
-        if isinstance(obj, tuple):
-            return tuple(_sanitize(v) for v in obj)
-
-        # Sets: keep as set (note: not JSON-serializable by default)
-        if isinstance(obj, set):
-            return {_sanitize(v) for v in obj}
-
-        # Anything else (including numpy arrays) left as-is
-        return obj
-
-    return _sanitize(records)
 
 
 class BaseDatasetValidator:
@@ -341,20 +236,20 @@ class BaseDatasetValidator:
                     try:
                         if exc.get("uncertainty type", 0) == 2 and "loc" not in exc:
                             if exc["amount"] < 0:
-                                exc["loc"] = float(math.log(exc["amount"] * -1))
+                                exc["loc"] = math.log(exc["amount"] * -1)
                                 exc["negative"] = True
                             else:
-                                exc["loc"] = float(math.log(exc["amount"]))
+                                exc["loc"] = math.log(exc["amount"])
 
                         if exc.get("uncertainty type", 0) == 3 and "loc" not in exc:
-                            exc["loc"] = float(exc["amount"])
+                            exc["loc"] = exc["amount"]
 
                         if exc.get("uncertainty type", 0) == 5:
                             if "loc" not in exc:
                                 print(
                                     f"'loc' not found in exchange {exc['name']} in dataset {ds['name']}{ds['location']}"
                                 )
-                                exc["loc"] = float(exc["amount"])
+                                exc["loc"] = exc["amount"]
                             if exc["minimum"] > exc["loc"]:
                                 message = (
                                     f"Exchange {exc['name']} - {exc['location']} has a minimum value greater than the loc value."
@@ -470,7 +365,7 @@ class BaseDatasetValidator:
         for dataset in self.database:
             key = (dataset["name"], dataset["reference product"], dataset["location"])
             if key not in consumed_datasets and not any(
-                x in dataset["name"] for x in ["market for", "market group for"]
+                x not in dataset["name"] for x in ["market for", "market group for"]
             ):
                 message = f"Orphaned dataset found: {dataset['name']}"
                 self.log_issue(dataset, "orphaned dataset", message)
@@ -672,7 +567,7 @@ class BaseDatasetValidator:
 
         for dataset in self.database:
             for key in list(dataset.keys()):
-                if dataset[key] is None:
+                if not dataset[key]:
                     del dataset[key]
 
     def correct_fields_format(self):
@@ -691,7 +586,7 @@ class BaseDatasetValidator:
             for exc in dataset["exchanges"]:
                 # check that `amount` is of type `float`
                 if np.isnan(exc["amount"]):
-                    raise ValueError(
+                    ValueError(
                         f"Amount is NaN in exchange {exc} in dataset {dataset['name'], dataset['location']}"
                     )
                 if not isinstance(exc["amount"], float):
@@ -701,10 +596,6 @@ class BaseDatasetValidator:
             for key, value in list(dataset.items()):
                 if value is None:
                     del dataset[key]
-
-        # we also want to remove any numpy generics
-        # that would prevent json serialization
-        self.database = convert_numpy_generics_to_float(self.database)
 
     def check_amount_format(self):
         """
@@ -732,39 +623,25 @@ class BaseDatasetValidator:
 
     def reformat_parameters(self):
         for ds in self.database:
-            params = ds.get("parameters", None)
-
-            if params is not None:
-                # Normalize to a list
-                if isinstance(params, dict):
-                    # dict of {name: amount}
-                    params = [{"name": k, "amount": v} for k, v in params.items()]
-
-                elif not isinstance(params, list):
-                    # single scalar / object -> wrap
-                    params = [params]
-
-                # Now params is a list (maybe empty)
-                if params:
-                    first = params[0]
-
-                    # Case A: list of dicts like [{"a": 1}, {"b": 2}]
-                    # but avoid reprocessing already-normalized [{"name": ..., "amount": ...}]
-                    if isinstance(first, dict) and not {"name", "amount"}.issubset(
-                        first
-                    ):
-                        params = [
+            if "parameters" in ds:
+                if not isinstance(ds["parameters"], list):
+                    if isinstance(ds["parameters"], dict):
+                        ds["parameters"] = [
                             {"name": k, "amount": v}
-                            for o in params
-                            if isinstance(o, dict)
+                            for k, v in ds["parameters"].items()
+                        ]
+                    else:
+                        ds["parameters"] = [ds["parameters"]]
+                else:
+                    if isinstance(ds["parameters"][0], dict):
+                        ds["parameters"] = [
+                            {"name": k, "amount": v}
+                            for o in ds["parameters"]
                             for k, v in o.items()
                         ]
 
-                ds["parameters"] = params
-
-            # Remove None-valued keys
             for key, value in list(ds.items()):
-                if value is None:
+                if not value:
                     del ds[key]
 
             ds["exchanges"] = [clean_up(exc) for exc in ds["exchanges"]]
@@ -775,18 +652,19 @@ class BaseDatasetValidator:
 
         for ds in self.database:
             if "classifications" not in ds:
-                classification = get_classification_entry(
-                    self.classifications, ds["name"], ds["reference product"]
-                )
-                if classification:
+                if (ds["name"], ds["reference product"]) in self.classifications:
                     ds["classifications"] = [
                         (
                             "ISIC rev.4 ecoinvent",
-                            classification["ISIC rev.4 ecoinvent"],
+                            self.classifications[(ds["name"], ds["reference product"])][
+                                "ISIC rev.4 ecoinvent"
+                            ],
                         ),
                         (
                             "CPC",
-                            classification["CPC"],
+                            self.classifications[(ds["name"], ds["reference product"])][
+                                "CPC"
+                            ],
                         ),
                     ]
                 else:
@@ -1083,7 +961,7 @@ class HeatValidation(BaseDatasetValidator):
                 # add input of light fuel oil
                 light_fue_oil = sum(
                     [
-                        exc["amount"] * 42.6
+                        exc["amount"] * 41.8
                         for exc in ds["exchanges"]
                         if "light fuel oil" in exc["name"]
                         and exc["type"] == "technosphere"
@@ -1096,7 +974,7 @@ class HeatValidation(BaseDatasetValidator):
                 # add input of heavy fuel oil
                 heavy_fuel_oil = sum(
                     [
-                        exc["amount"] * 38.5
+                        exc["amount"] * 41.8
                         for exc in ds["exchanges"]
                         if "heavy fuel oil" in exc["name"]
                         and exc["type"] == "technosphere"
@@ -1109,7 +987,7 @@ class HeatValidation(BaseDatasetValidator):
                 # add input of biomass
                 biomass = sum(
                     [
-                        exc["amount"] * 16.2
+                        exc["amount"] * 18
                         for exc in ds["exchanges"]
                         if any(x in exc["name"] for x in ["biomass", "wood", "timber"])
                         and "ethanol" not in exc["name"]
@@ -1615,19 +1493,19 @@ class ElectricityValidation(BaseDatasetValidator):
                     # matches the location of the dataset
                     # according to the geo-linking rules
                     self.check_geo_linking(
-                        input_exc[0]["location"], dataset["location"], dataset["name"]
+                        input_exc[0]["location"], dataset["location"]
                     )
 
-    def check_geo_linking(self, exc_loc, dataset_loc, dataset_name):
+    def check_geo_linking(self, exc_loc, dataset_loc):
         # check that the location of the input
         # matches the location of the dataset
         # according to the ecoinvent-IAM geo-linking rules
         if dataset_loc in ["RER", "Europe without Switzerland", "FR"]:
-            if exc_loc not in ["EUR", "WEU", "EU-15", "FRA"]:
+            if exc_loc not in ["EUR", "WEU", "EU-15"]:
                 message = "Electricity market input has incorrect location."
                 self.log_issue(
                     {"location": dataset_loc},
-                    f"{dataset_name} has incorrect old electricity market input: {exc_loc}",
+                    "incorrect old electricity market input",
                     message,
                 )
         if exc_loc != self.geo.ecoinvent_to_iam_location(dataset_loc):
@@ -1639,7 +1517,7 @@ class ElectricityValidation(BaseDatasetValidator):
             )
 
     def check_electricity_mix(self):
-        # check that the electricity mix in the market datasets
+        # check that the electricity mix in teh market datasets
         # corresponds to the IAM scenario projection
         vars = [
             x
@@ -1899,45 +1777,35 @@ class FuelsValidation(BaseDatasetValidator):
             "market for hydrogen, gaseous, low pressure",
         ]
 
-        for fuel in fuel_market_names:
-
-            regionalized_markets = [
-                d
-                for d in self.database
-                if d["name"] == fuel and d["location"] in self.regions
-            ]
-
-            if len(regionalized_markets) > 0:
-
-                for ds in self.database:
+        for ds in self.database:
+            if (
+                any(ds["name"].startswith(x) for x in fuel_market_names)
+                and ds["location"] not in self.regions
+            ):
+                if not all(
+                    e["location"] in self.regions
+                    for e in ds["exchanges"]
+                    if e["type"] == "technosphere"
+                ):
                     if (
-                        ds["name"].startswith(fuel)
-                        and ds["location"] not in self.regions
+                        len(
+                            [
+                                d
+                                for d in self.database
+                                if d["name"] == ds["name"]
+                                and d["location"] in self.regions
+                            ]
+                        )
+                        > 0
                     ):
-                        if not all(
-                            e["location"] in self.regions
-                            for e in ds["exchanges"]
-                            if e["type"] == "technosphere"
-                        ):
-                            if (
-                                len(
-                                    [
-                                        d
-                                        for d in self.database
-                                        if d["name"] == ds["name"]
-                                        and d["location"] in self.regions
-                                    ]
-                                )
-                                > 0
-                            ):
 
-                                message = f"Inputs may have incorrect location."
-                                self.log_issue(
-                                    ds,
-                                    "Non-regionalized inputs",
-                                    message,
-                                    issue_type="major",
-                                )
+                        message = f"Inputs may have incorrect location."
+                        self.log_issue(
+                            ds,
+                            "Non-regionalized inputs",
+                            message,
+                            issue_type="major",
+                        )
 
     def check_electrolysis_electricity_input(self):
         # check that the input of electricity for hydrogen production
@@ -1976,15 +1844,6 @@ class FuelsValidation(BaseDatasetValidator):
             "market group for diesel, low-sulfur",
         ]
 
-        regions_with_fuel_markets = set()
-        for market_name in [
-            "market for petrol, low-sulfur",
-            "market for diesel, low-sulfur",
-        ]:
-            for ds in self.database:
-                if ds["name"] == market_name and ds["location"] in self.regions:
-                    regions_with_fuel_markets.add(ds["location"])
-
         for ds in self.database:
             if ds["location"] not in ["RoW", "GLO", "World"]:
                 for e in ds["exchanges"]:
@@ -1994,22 +1853,9 @@ class FuelsValidation(BaseDatasetValidator):
                         # check that the location of the input
                         # matches the location of the dataset
                         # according to the geo-linking rules
-                        if ds["location"] in regions_with_fuel_markets:
-                            if ds["location"] in self.regions and ds["location"]:
-                                if e["location"] != ds["location"]:
-                                    if e["location"] != "World":
-                                        message = f"Fuel market input {e['name']} in {e['location']} has incorrect location for dataset {ds['name']} in {ds['location']}."
-                                        self.log_issue(
-                                            ds,
-                                            "incorrect fuel market input location",
-                                            message,
-                                            issue_type="major",
-                                        )
-                            else:
-                                # check that the location of the input
-                                if e["location"] != self.geo.ecoinvent_to_iam_location(
-                                    ds["location"]
-                                ):
+                        if ds["location"] in self.regions:
+                            if e["location"] != ds["location"]:
+                                if e["location"] != "World":
                                     message = f"Fuel market input {e['name']} in {e['location']} has incorrect location for dataset {ds['name']} in {ds['location']}."
                                     self.log_issue(
                                         ds,
@@ -2017,6 +1863,18 @@ class FuelsValidation(BaseDatasetValidator):
                                         message,
                                         issue_type="major",
                                     )
+                        else:
+                            # check that the location of the input
+                            if e["location"] != self.geo.ecoinvent_to_iam_location(
+                                ds["location"]
+                            ):
+                                message = f"Fuel market input {e['name']} in {e['location']} has incorrect location for dataset {ds['name']} in {ds['location']}."
+                                self.log_issue(
+                                    ds,
+                                    "incorrect fuel market input location",
+                                    message,
+                                    issue_type="major",
+                                )
 
     def run_fuel_checks(self):
         self.check_fuel_market_composition()
@@ -2076,35 +1934,26 @@ class SteelValidation(BaseDatasetValidator):
 
                 eaf_steel = 0
                 if "steel - secondary" in self.iam_data.steel_technology_mix.variables:
-                    steel_variables = [
-                        v
-                        for v in self.iam_data.production_volumes.variables.values
-                        if str(v).lower().startswith("steel")
-                    ]
-                    if steel_variables:
-                        steel_prod = self.iam_data.production_volumes.sel(
-                            variables=steel_variables,
-                            region=ds["location"],
+                    if (
+                        self.year
+                        in self.iam_data.steel_technology_mix.coords["year"].values
+                    ):
+
+                        eaf_steel = (
+                            self.iam_data.steel_technology_mix.sel(
+                                variables="steel - secondary",
+                                region=ds["location"],
+                                year=self.year,
+                            )
+                        ).values.item(0)
+                    else:
+                        eaf_steel = (
+                            self.iam_data.steel_technology_mix.sel(
+                                variables="steel - secondary", region=ds["location"]
+                            )
+                            .interp(year=self.year)
+                            .values.item(0)
                         )
-
-                        if (
-                            self.year
-                            in self.iam_data.steel_technology_mix.coords["year"].values
-                        ):
-                            steel_prod = steel_prod.sel(year=self.year)
-                        else:
-                            steel_prod = steel_prod.interp(year=self.year)
-
-                        # Production volumes can occasionally be negative in IAM inputs.
-                        # For a market share check, use non-negative steel volumes.
-                        steel_prod = steel_prod.clip(min=0)
-                        total_steel_prod = steel_prod.sum(dim="variables")
-
-                        if float(total_steel_prod.values.item(0)) > 0:
-                            eaf_steel = (
-                                steel_prod.sel(variables="steel - secondary")
-                                / total_steel_prod
-                            ).values.item(0)
 
                 total = sum(
                     [
@@ -2328,9 +2177,7 @@ class SteelValidation(BaseDatasetValidator):
 
         if len(self.major_issues_log) > 0:
             print(
-                "---> MAJOR anomalies found during steel update "
-                f"({self.model} | {self.scenario} | {self.year}): "
-                "check the change report."
+                "---> MAJOR anomalies found during steel update: check the change report."
             )
 
 
@@ -2554,9 +2401,7 @@ class BiomassValidation(BaseDatasetValidator):
 
         for ds in self.database:
             if (
-                ds["name"].startswith(
-                    "market for lignocellulosic biomass, used as fuel"
-                )
+                ds["name"].startswith("market for biomass, used as fuel")
                 and ds["location"] in self.regions
                 and ds["location"] != "World"
             ):
@@ -2607,8 +2452,6 @@ class BiomassValidation(BaseDatasetValidator):
                             "storage",
                             "methanol",
                             "hydrogen",
-                            " residual ",
-                            "light fuel oil",
                         ]
                     ]
                 )
@@ -2631,16 +2474,15 @@ class BiomassValidation(BaseDatasetValidator):
                                 e
                                 for e in dataset["exchanges"]
                                 if e["type"] == "technosphere"
-                                and e["name"]
-                                == "market for lignocellulosic biomass, used as fuel"
+                                and e["name"] == "market for biomass, used as fuel"
                             ]
                         )
                         >= 1
                     ), (
                         f"Dataset {dataset['name']} in {dataset['location']} "
                         f"should have one or more exchanges to "
-                        f"'market for lignocellulosic biomass, used as fuel'. "
-                        f"Currently has {len([e for e in dataset['exchanges'] if e['type'] == 'technosphere' and e['name'] == 'market for lignocellulosic biomass, used as fuel'])}."
+                        f"'market for biomass, used as fuel'. "
+                        f"Currently has {len([e for e in dataset['exchanges'] if e['type'] == 'technosphere' and e['name'] == 'market for biomass, used as fuel'])}."
                     )
 
     def check_residual_biomass_share(self):
@@ -2651,7 +2493,7 @@ class BiomassValidation(BaseDatasetValidator):
 
         for ds in self.database:
             if (
-                ds["name"] == "market for lignocellulosic biomass, used as fuel"
+                ds["name"] == "market for biomass, used as fuel"
                 and ds["location"] in self.regions
                 and ds["location"] != "World"
             ):
@@ -2719,15 +2561,9 @@ class BiomassValidation(BaseDatasetValidator):
 
 
 class MetalsValidation(BaseDatasetValidator):
-    def __init__(
-        self, model, scenario, year, regions, database, iam_data, system_model, version
-    ):
-        super().__init__(
-            model, scenario, year, regions, database, system_model, version
-        )
+    def __init__(self, model, scenario, year, regions, database, iam_data):
+        super().__init__(model, scenario, year, regions, database)
         self.iam_data = iam_data
-        self.system_model = system_model
-        self.version = version
 
     def run_metals_checks(self):
         self.check_market_balance()
@@ -2735,7 +2571,6 @@ class MetalsValidation(BaseDatasetValidator):
         self.check_interpolation()
         self.check_excel_shares_preserved()
         self.save_log()
-
         if self.major_issues_log:
             print(
                 "---> MAJOR anomalies found during metals update: check the change report."
@@ -2823,7 +2658,7 @@ class MetalsValidation(BaseDatasetValidator):
         This should catch normalization bugs
         """
 
-        mining_shares_df = _load_mining_shares_mapping_for_validation(self.version)
+        mining_shares_df = _load_mining_shares_mapping_for_validation()
 
         country_codes = dict(
             zip(
@@ -2845,7 +2680,7 @@ class MetalsValidation(BaseDatasetValidator):
                     ws.equals("location", "World"),
                     ws.equals("unit", "kilogram"),
                 )
-            except ws.NoResults:
+            except:
                 continue
 
             # Find year
@@ -2897,9 +2732,7 @@ class MetalsValidation(BaseDatasetValidator):
                 expected = expected_shares.get(country_long, 0) * primary_share
                 actual = actual_shares.get(country_short, 0)
 
-                if (
-                    expected > 0.01 and self.system_model != "consequential"
-                ):  # Only check significant shares
+                if expected > 0.01:  # Only check significant shares
                     relative_error = (
                         abs(actual - expected) / expected
                         if expected > 0

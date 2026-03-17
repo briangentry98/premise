@@ -26,6 +26,7 @@ from .external_data_validation import check_inventories, find_iam_efficiency_cha
 from .filesystem_constants import DATA_DIR
 from .inventory_imports import (
     AdditionalInventory,
+    generate_migration_maps,
     get_biosphere_code,
     get_correspondence_bio_flows,
 )
@@ -85,24 +86,17 @@ def _update_external_scenarios(
             resource = data_package.get_resource("config")
             config_file = yaml.safe_load(resource.raw_read())
 
-            checked_inventories, checked_database, configuration, mapping = (
-                check_inventories(
-                    configuration=config_file,
-                    inventory_data=inventories,
-                    scenario_data=scenario["external data"][d],
-                    database=scenario["database"],
-                    year=scenario["year"],
-                    model=scenario["model"],
-                )
+            checked_inventories, checked_database, configuration = check_inventories(
+                configuration=config_file,
+                inventory_data=inventories,
+                scenario_data=scenario["external data"][d],
+                database=scenario["database"],
+                year=scenario["year"],
+                model=scenario["model"],
             )
 
             scenario["database"] = checked_database
             scenario["database"].extend(checked_inventories)
-
-            if "mapping" not in scenario:
-                scenario["mapping"] = {}
-            scenario["mapping"][f"external_{d}"] = mapping
-
             configurations[d] = configuration
 
         external_scenario = ExternalScenario(
@@ -336,7 +330,7 @@ def adjust_efficiency(dataset: dict, fuels_specs: dict, fuel_map_reverse: dict) 
                     else:
                         # adjust biosphere flows
                         # all of them if a filter is not provided
-                        dataset.setdefault("log parameters", {})[
+                        dataset["log parameters"][
                             "biosphere scaling factor"
                         ] = scaling_factor
 
@@ -387,6 +381,7 @@ def fetch_dataset_description_from_production_pathways(
                 v["ecoinvent alias"]["regionalize"],
                 v["ecoinvent alias"].get("ratio", 1),
             )
+    return
 
 
 def fetch_var(config_file: dict, list_vars: list) -> list:
@@ -418,7 +413,7 @@ class ExternalScenario(BaseTransformation):
         configurations: dict = None,
     ):
         """
-        :param database: list of datasets representing the database
+        :param database: list of datasets representing teh database
         :param iam_data: IAM data: production volumes, efficiency, etc.
         :param external_scenarios: list of data packages representing the external scenarios
         :param external_scenarios_data: IAM data: production volumes, efficiency, etc.
@@ -1027,6 +1022,17 @@ class ExternalScenario(BaseTransformation):
         Add additional exchanges to a dataset.
         """
 
+        # we need to ensure that the dataset exists
+        # to do so, we need to load migration.csv
+        # and check if the dataset is there
+        # if it is there, we need to use instead the new values
+
+        mapping = get_mapping_between_ei_versions(str(ei_version), self.version)
+
+        if (name, ref_prod) in mapping:
+            name = mapping[(name, ref_prod)]["name"]
+            ref_prod = mapping[(name, ref_prod)]["reference product"]
+
         if ref_prod is not None:
             # this is a technosphere exchange
             if region in self.geo.iam_regions:
@@ -1157,6 +1163,7 @@ class ExternalScenario(BaseTransformation):
                     # fetch all scenario file variables that
                     # relate to this market
                     pathways = market_vars["includes"]
+                    production_variables = fetch_var(configuration, pathways)
                     waste_market = market_vars.get("waste market", False)
                     isfuel = {}
                     market_status = {}
@@ -1165,7 +1172,7 @@ class ExternalScenario(BaseTransformation):
                     # create a market for
 
                     regions = self.get_region_for_non_null_production_volume(
-                        i=i, variables=pathways
+                        i=i, variables=production_variables
                     )
 
                     if "except regions" in market_vars:
@@ -1193,7 +1200,7 @@ class ExternalScenario(BaseTransformation):
                             production_volume = (
                                 self.external_scenarios_data[i]["production volume"]
                                 .sel(
-                                    variables=pathways,
+                                    variables=production_variables,
                                     region=region,
                                     year=self.year,
                                 )
@@ -1208,7 +1215,7 @@ class ExternalScenario(BaseTransformation):
                             ):
                                 production_volume = (
                                     self.external_scenarios_data[i]["production volume"]
-                                    .sel(variables=pathways, region=region)
+                                    .sel(variables=production_variables, region=region)
                                     .sum(dim="variables")
                                     .interp(
                                         year=min(
@@ -1228,7 +1235,7 @@ class ExternalScenario(BaseTransformation):
                             ):
                                 production_volume = (
                                     self.external_scenarios_data[i]["production volume"]
-                                    .sel(variables=pathways, region=region)
+                                    .sel(variables=production_variables, region=region)
                                     .sum(dim="variables")
                                     .interp(
                                         year=max(
@@ -1244,7 +1251,7 @@ class ExternalScenario(BaseTransformation):
                             else:
                                 production_volume = (
                                     self.external_scenarios_data[i]["production volume"]
-                                    .sel(variables=pathways, region=region)
+                                    .sel(variables=production_variables, region=region)
                                     .sum(dim="variables")
                                     .interp(year=self.year)
                                     .values.item(0)
@@ -1256,10 +1263,11 @@ class ExternalScenario(BaseTransformation):
 
                         new_excs = []
                         for pathway in pathways:
+                            var = fetch_var(configuration, [pathway])[0]
 
                             # fetch the dataset name/ref corresponding to this item
                             # under `production pathways`
-                            name, ref_prod, _, _, _, ratio = (
+                            (name, ref_prod, _, _, _, ratio) = (
                                 fetch_dataset_description_from_production_pathways(
                                     configuration, pathway
                                 )
@@ -1293,7 +1301,7 @@ class ExternalScenario(BaseTransformation):
 
                             try:
                                 supply_share = self.fetch_supply_share(
-                                    i, region, pathway, pathways
+                                    i, region, var, production_variables
                                 )
                                 # we should not use `ratio` here
                                 # otherwise it messes up with the shares
@@ -1442,7 +1450,7 @@ class ExternalScenario(BaseTransformation):
                             market=market_vars,
                             regions=regions,
                             i=i,
-                            pathways=pathways,
+                            pathways=production_variables,
                             waste_market=waste_market,
                         )
                         self.database.append(world_market)

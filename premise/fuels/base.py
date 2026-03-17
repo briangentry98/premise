@@ -49,10 +49,6 @@ def _update_fuels(scenario, version, system_model):
         scenario["cache"] = fuels.cache
         scenario["index"] = fuels.index
 
-        if "mapping" not in scenario:
-            scenario["mapping"] = {}
-        scenario["mapping"]["fuels"] = fuels.fuel_map
-
     else:
         print("No fuel scenario data available -- skipping")
 

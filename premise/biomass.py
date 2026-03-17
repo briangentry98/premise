@@ -8,6 +8,7 @@ the newly created biomass markets.
 """
 
 import yaml
+from collections import defaultdict
 
 from .export import biosphere_flows_dictionary
 from .filesystem_constants import VARIABLES_DIR, DATA_DIR
@@ -21,7 +22,7 @@ from .transformation import (
     uuid,
     ws,
 )
-from .activity_maps import InventorySet, act_fltr, get_mapping
+from .activity_maps import InventorySet, get_mapping
 from .validation import BiomassValidation
 
 IAM_BIOMASS_VARS = VARIABLES_DIR / "biomass.yaml"
@@ -70,9 +71,6 @@ def _update_biomass(scenario, version, system_model):
     scenario["database"] = biomass.database
     scenario["index"] = biomass.index
     scenario["cache"] = biomass.cache
-    if "mapping" not in scenario:
-        scenario["mapping"] = {}
-    scenario["mapping"]["biomass"] = biomass.biomass_activities
 
     return scenario
 
@@ -125,52 +123,6 @@ class Biomass(BaseTransformation):
             get_mapping(filepath=BIOMASS_ACTIVITIES, var="ecoinvent_aliases")
         )
 
-    def _build_ordered_biomass_activity_mapping(self) -> dict:
-        """Build biomass activities mapping in the exact order listed in YAML."""
-        with open(BIOMASS_ACTIVITIES, "r", encoding="utf-8") as stream:
-            config = yaml.safe_load(stream)
-
-        ordered_mapping = {}
-
-        for entry in config.values():
-            aliases = entry.get("ecoinvent_aliases", {})
-            fltr = aliases.get("fltr", {})
-            mask = aliases.get("mask")
-
-            if not isinstance(fltr, dict):
-                fltr = {"name": fltr}
-
-            names = fltr.get("name")
-            if isinstance(names, list):
-                ordered_names = names
-            elif names is None:
-                ordered_names = [None]
-            else:
-                ordered_names = [names]
-
-            ordered_activities = []
-            seen = set()
-            for name in ordered_names:
-                current_fltr = dict(fltr)
-                if name is not None:
-                    current_fltr["name"] = name
-
-                for activity in act_fltr(self.database, current_fltr, mask):
-                    key = (
-                        activity["name"],
-                        activity["reference product"],
-                        activity["location"],
-                    )
-                    if key not in seen:
-                        ordered_activities.append(activity)
-                        seen.add(key)
-
-            for activity in ordered_activities:
-                activity_key = (activity["name"], activity["reference product"])
-                ordered_mapping.setdefault(activity_key, []).append(activity)
-
-        return ordered_mapping
-
     def regionalize_wood_chips_activities(self):
         """
         Regionalize wood chips and forestry-related activities,
@@ -178,14 +130,10 @@ class Biomass(BaseTransformation):
         available in RER, CA and RoW.
         """
 
-        # Build mapping in YAML order so regionalization is deterministic and user-defined.
-        self.biomass_activities = self._build_ordered_biomass_activity_mapping()
-
         self.process_and_add_activities(
             mapping=self.biomass_activities,
             production_volumes=self.iam_data.production_volumes,
         )
-
         self.process_and_add_activities(
             mapping={
                 k: v
@@ -195,26 +143,11 @@ class Biomass(BaseTransformation):
             production_volumes=self.iam_data.production_volumes,
         )
 
-        # Second pass: now that all candidate suppliers have been regionalized,
-        # relink biomass activities again to replace temporary RoW links.
-        activity_keys = set(self.biomass_activities.keys())
-        for dataset in self.database:
-            if (
-                dataset.get("regionalized", False)
-                and dataset.get("location") in self.regions
-                and (dataset["name"], dataset["reference product"]) in activity_keys
-            ):
-                # Invalidate cached linking decisions from the first pass (often RoW),
-                # so links can be recalculated with newly regionalized providers.
-                if dataset["location"] in self.cache:
-                    self.cache[dataset["location"]].pop(self.model, None)
-                self.relink_technosphere_exchanges(dataset)
-
     def create_regional_biomass_markets(self):
 
         self.process_and_add_markets(
-            name="market for lignocellulosic biomass, used as fuel",
-            reference_product="lignocellulosic biomass",
+            name="market for biomass, used as fuel",
+            reference_product="biomass, used as fuel",
             unit="kilogram",
             mapping=self.biomass_map,
             production_volumes=self.iam_data.biomass_mix,
@@ -229,8 +162,8 @@ class Biomass(BaseTransformation):
     def replace_biomass_inputs(self):
 
         new_candidate = {
-            "name": "market for lignocellulosic biomass, used as fuel",
-            "reference product": "lignocellulosic biomass",
+            "name": "market for biomass, used as fuel",
+            "reference product": "biomass, used as fuel",
             "unit": "kilogram",
         }
 
@@ -239,26 +172,17 @@ class Biomass(BaseTransformation):
             ws.either(
                 *[
                     ws.equals("unit", u)
-                    for u in ["kilowatt hour", "megajoule", "kilogram", "cubic meter"]
+                    for u in ["kilowatt hour", "megajoule", "kilogram"]
                 ]
             ),
             ws.either(
                 *[
                     ws.contains("name", n)
-                    for n in [
-                        "electricity",
-                        "heat",
-                        "power",
-                        "hydrogen production",
-                        "biomethane production",
-                        "ethanol production",
-                        "synthetic gas",
-                    ]
+                    for n in ["electricity", "heat", "power", "hydrogen production"]
                 ]
             ),
-            ws.doesnt_contain_any("name", ["logs", " residual ", "oil"]),
+            ws.exclude(ws.contains("name", "logs")),
         ):
-
             for exc in ws.technosphere(
                 dataset,
                 ws.either(
@@ -276,8 +200,8 @@ class Biomass(BaseTransformation):
                     location = self.ecoinvent_to_iam_loc.get(dataset["location"], "GLO")
 
                 if self.is_in_index(new_candidate, location):
-                    exc["name"] = "market for lignocellulosic biomass, used as fuel"
-                    exc["product"] = "lignocellulosic biomass"
+                    exc["name"] = "market for biomass, used as fuel"
+                    exc["product"] = "biomass, used as fuel"
                     exc["location"] = location
 
     def write_log(self, dataset, status="created"):

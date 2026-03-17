@@ -3,11 +3,8 @@ This module contains the PathwaysDataPackage class, which is
 used to create a data package for scenario analysis.
 """
 
-import gc
 import json
-import csv
 import shutil
-from io import StringIO
 from datetime import date
 from pathlib import Path
 from typing import List
@@ -17,9 +14,10 @@ import yaml
 from datapackage import Package
 
 from . import __version__
+from .activity_maps import act_fltr
+from .final_energy import FinalEnergy
 from .new_database import NewDatabase
-from .inventory_imports import get_classification_entry, get_classifications
-from .utils import clear_runtime_caches, delete_all_pickles, end_of_process
+from .utils import dump_database, load_database
 
 
 class PathwaysDataPackage:
@@ -27,7 +25,7 @@ class PathwaysDataPackage:
         self,
         scenarios: List[dict],
         years: List[int] = range(2005, 2105, 5),
-        source_version: str = "3.12",
+        source_version: str = "3.10",
         source_type: str = "brightway",
         key: bytes = None,
         source_db: str = None,
@@ -38,7 +36,6 @@ class PathwaysDataPackage:
         gains_scenario="CLE",
         use_absolute_efficiency=False,
         biosphere_name="biosphere3",
-        generate_reports: bool = True,
     ):
         self.years = years
         self.scenarios = []
@@ -65,11 +62,9 @@ class PathwaysDataPackage:
             gains_scenario=gains_scenario,
             use_absolute_efficiency=use_absolute_efficiency,
             biosphere_name=biosphere_name,
-            generate_reports=generate_reports,
         )
 
         self.scenario_names = []
-        self.classifications = get_classifications()
 
     def create_datapackage(
         self,
@@ -77,24 +72,24 @@ class PathwaysDataPackage:
         contributors: list = None,
         transformations: list = None,
     ):
-        try:
-            if transformations:
-                self.datapackage.update(transformations)
-            else:
-                self.datapackage.update()
+        if transformations:
+            self.datapackage.update(transformations)
+        else:
+            self.datapackage.update()
 
-            self._export_datapackage(
-                name=name,
-                contributors=contributors,
-            )
-        finally:
-            self._cleanup_after_export()
+        self.export_datapackage(
+            name=name,
+            contributors=contributors,
+        )
 
-    def _export_datapackage(
+    def export_datapackage(
         self,
         name: str,
         contributors: list = None,
     ):
+
+        for scenario in self.datapackage.scenarios:
+            load_database(scenario, self.datapackage.database)
 
         # first, delete the content of the "pathways_temp" folder
         shutil.rmtree(Path.cwd() / "pathways_temp", ignore_errors=True)
@@ -103,285 +98,288 @@ class PathwaysDataPackage:
         self.datapackage.write_db_to_matrices(
             filepath=str(Path.cwd() / "pathways_temp" / "inventories"),
         )
-        self.variables_name_change = {}
-        self._add_variables_mapping()
-        self._add_scenario_data()
-        self._add_classifications_file()
-        self._build_datapackage(name, contributors)
+        self.add_scenario_data()
+        self.add_variables_mapping()
+        self.build_datapackage(name, contributors)
 
-    def _add_variables_mapping(self):
+    def find_activities(
+        self, filters: [str, list], database, mask: [str, list, None] = None
+    ):
+        """
+        Find activities in the database.
+
+        :param filters: value(s) to filter with.
+        :type filters: Union[str, lst, dict]
+        :param mask: value(s) to filter with.
+        :type mask: Union[str, lst, dict]
+        :param database: A lice cycle inventory database
+        :type database: brightway2 database object
+        :return: list dictionaries with activity names, reference products and units
+        """
+        # remove unwanted keys, anything other than "name", "reference product" and "unit"
+        if isinstance(filters, dict):
+            filters = {
+                k: v
+                for k, v in filters.items()
+                if k in ["name", "reference product", "unit"]
+            }
+
+        return [
+            {
+                "name": act["name"],
+                "reference product": act["reference product"],
+                "unit": act["unit"],
+            }
+            for act in act_fltr(
+                database=database,
+                fltr=filters,
+                mask=mask or {},
+            )
+        ]
+
+    def add_variables_mapping(self):
         """
         Add variables mapping in the "pathways" folder.
 
         """
 
-        mappings = {}
-        for scenario in self.datapackage.scenarios:
-            for sector, mapping in scenario["mapping"].items():
-                if sector == "final energy":
-                    prefix = "FE"
-                elif sector.startswith("external"):
-                    prefix = "EXT"
-                else:
-                    prefix = "SE"
-
-                for k, v in mapping.items():
-                    datasets = []
-                    for x in v:
-                        data = {
-                            "name": x["name"],
-                            "reference product": x["reference product"],
-                            "unit": x["unit"],
-                        }
-                        if "lhv" in x:
-                            data["lhv"] = x["lhv"]
-                        datasets.append(data)
-
-                    if len(datasets) == 0:
-                        continue
-                    else:
-                        # if existing datasets already, we just add
-                        key = f"{prefix} - {sector.replace('external_', '')} - {k}"
-
-                        if key in mappings:
-                            existing_datasets = mappings[
-                                f"{prefix} - {sector.replace('external_', '')} - {k}"
-                            ]["dataset"].copy()
-                        else:
-                            mappings[
-                                f"{prefix} - {sector.replace('external_', '')} - {k}"
-                            ] = {"dataset": []}
-                            existing_datasets = []
-
-                        if len(existing_datasets) > 0:
-                            for dataset in datasets:
-                                if dataset not in existing_datasets:
-                                    mappings[key]["dataset"].append(dataset)
-
-                        else:
-                            mappings[key]["dataset"] = [
-                                json.loads(s)
-                                for s in {
-                                    json.dumps(d, sort_keys=True) for d in datasets
-                                }
-                            ]
-
-                    self.variables_name_change[k] = f"{prefix} - {sector} - {k}"
-
         # create a "mapping" folder inside "pathways"
         (Path.cwd() / "pathways_temp" / "mapping").mkdir(parents=True, exist_ok=True)
 
-        with open(Path.cwd() / "pathways_temp" / "mapping" / "mapping.yaml", "w") as f:
-            yaml.dump(mappings, f)
-
-    def _add_scenario_data(self):
-        """
-        Add scenario data in the "pathways_temp" folder.
-        """
-
-        def _prefix_vars(arr, prefix: str):
-            # prefix the variables coordinate
-            new_vars = [
-                f"{prefix} - {v}" for v in arr.coords["variables"].values.tolist()
-            ]
-            return arr.assign_coords(variables=("variables", new_vars))
-
-        data_list, extra_units = [], {}
-        outfile = None
-
-        for scenario in self.datapackage.scenarios:
-            # --- base: production volumes
-            pv = scenario["iam data"].production_volumes.interp(year=scenario["year"])
-            old_vars = pv.coords["variables"].values.tolist()
-            # translate model var -> final mapping key; fallback to readable default
-            new_vars = [self.variables_name_change.get(v, v) for v in old_vars]
-            pv = pv.assign_coords(variables=("variables", new_vars))
-            # same for units
-            units = {
-                self.variables_name_change.get(k, k): v
-                for k, v in pv.attrs.get("unit", {}).items()
-            }
-
-            scenario_name = f"{scenario['model']} - {scenario['pathway']}"
-
-            # --- optional: external data blocks
-            if "external data" in scenario:
-                for ext_key, external in scenario["external data"].items():
-                    ext = external["production volume"].interp(year=scenario["year"])
-                    # prefix includes the external block key so different externals don't collide
-                    ext_prefix = f"EXT - {ext_key}"
-                    ext = _prefix_vars(ext, ext_prefix)
-                    ext_units = {
-                        f"{ext_prefix} - {k}": v
-                        for k, v in external["production volume"]
-                        .attrs.get("unit", {})
-                        .items()
-                    }
-
-                    pv = xr.concat([pv, ext], dim="variables")
-                    units.update(ext_units)
-                    extra_units.update(ext_units)
-                    scenario_name += (
-                        f" - {scenario['external scenarios'][ext_key]['scenario']}"
-                    )
-
-            # add scenario dimension
-            pv = pv.expand_dims("scenario")
-            pv = pv.assign_coords(scenario=[scenario_name])
-
-            # keep the merged units on the array (xarray may drop attrs on concat later)
-            pv.attrs["unit"] = units
-
-            data_list.append(pv)
-
-        # ensure output dir
-        outdir = Path.cwd() / "pathways_temp" / "scenario_data"
-        outdir.mkdir(parents=True, exist_ok=True)
-
-        outfile = outdir / "scenario_data.csv"
-        if outfile.exists():
-            outfile.unlink()
-
-        self.scenario_names = []
-
-        # write per-scenario to reduce peak memory
-        for pv in data_list:
-            df = pv.to_dataframe().reset_index()
-            unit_map = dict(pv.attrs.get("unit", {}))
-            unit_map.update(extra_units)
-            df["unit"] = df["variables"].map(unit_map)
-            df[["model", "pathway"]] = df["scenario"].str.split(" - ", n=1, expand=True)
-            df = df.drop(columns=["scenario"])
-            self.scenario_names.extend(df["pathway"].unique().tolist())
-            df = df.dropna(subset=["value"])
-            df.to_csv(outfile, mode="a", header=not outfile.exists(), index=False)
-
-        self.scenario_names = sorted(set(self.scenario_names))
-
-    def _add_classifications_file(self):
-        """
-        Export activity classifications to a CSV file in the datapackage.
-
-        Each row is one activity–classification pair with columns:
-        - name
-        - reference product
-        - unit
-        - location
-        - classification_system  (e.g. "CPC", "ISIC")
-        - classification_code    (e.g. "xxxx: manufacture of ...")
-
-        Databases are taken from each scenario dict under key "database",
-        where "database" is a list of activity dictionaries.
-        """
-
-        outdir = Path.cwd() / "pathways_temp" / "classifications"
-        outdir.mkdir(parents=True, exist_ok=True)
-
-        outfile = outdir / "classifications.csv"
-
-        fieldnames = [
-            "name",
-            "reference product",
-            "classification_system",
-            "classification_code",
+        # make a list of unique variables
+        vars = [
+            self.datapackage.scenarios[s]["iam data"]
+            .data.coords["variables"]
+            .values.tolist()
+            for s in range(len(self.scenarios))
         ]
 
-        seen = set()
-        missing_classifications = set()
+        # extend to variables in external scenarios
+        for scenario in self.scenarios:
+            if "external scenarios" in scenario:
+                for s in scenario["external data"]:
+                    vars.extend(
+                        [
+                            scenario["external data"][s]["production volume"]
+                            .coords["variables"]
+                            .values.tolist()
+                        ]
+                    )
 
-        with open(outfile, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
+        # remove efficiency and emissions variables
+        vars = [
+            [
+                v
+                for v in var
+                if "efficiency" not in v.lower() and "emission" not in v.lower()
+            ]
+            for var in vars
+        ]
 
-            for scenario in self.datapackage.scenarios:
-                db = scenario.get("database") or []
-                for ds in db:
-                    name = ds["name"]
-                    ref = ds["reference product"]
+        # concatenate the list
+        vars = list(set([item for sublist in vars for item in sublist]))
 
-                    # classifications is a list of tuples:
-                    classifications = ds.get("classifications") or []
+        mapping = {}
 
-                    if not classifications:
-                        classification = get_classification_entry(
-                            self.classifications,
-                            ds["name"],
-                            ds["reference product"],
-                        )
-                        if classification:
-                            ds["classifications"] = [
-                                (
-                                    "ISIC rev.4 ecoinvent",
-                                    classification["ISIC rev.4 ecoinvent"],
-                                ),
-                                (
-                                    "CPC",
-                                    classification["CPC"],
-                                ),
+        # iterate through all YAML files contained in the "iam_variables_mapping" folder
+        # the folder is located in the same folder as this module
+
+        model_variables = []
+
+        for file in (
+            Path(__file__).resolve().parent.glob("iam_variables_mapping/*.yaml")
+        ):
+            # open the file
+            with open(file, "r") as f:
+                # load the YAML file
+                data = yaml.full_load(f)
+            # iterate through all variables in the YAML file
+            for var, val in data.items():
+                if all(x in val for x in ["iam_aliases", "ecoinvent_aliases"]):
+                    for model, model_var in val["iam_aliases"].items():
+                        if model_var in vars and model in [
+                            s["model"] for s in self.scenarios
+                        ]:
+
+                            model_variables.append(model_var)
+                            mapping[var] = {"scenario variable": model_var}
+                            mapping[var]["dataset"] = self.find_activities(
+                                filters=val["ecoinvent_aliases"].get("fltr"),
+                                database=self.datapackage.scenarios[0]["database"],
+                                mask=val["ecoinvent_aliases"].get("mask"),
+                            )
+                            mapping[var]["dataset"] = [
+                                dict(t)
+                                for t in {
+                                    tuple(sorted(d.items()))
+                                    for d in mapping[var]["dataset"]
+                                }
                             ]
-                            classifications = ds.get("classifications")
-                        else:
-                            missing_classifications.add((name, ref))
+                            if "lhv" in val:
+                                mapping[var]["lhv"] = val["lhv"]
 
-                    for system, code in classifications:
-                        key = (name, ref, system, code)
-                        if key in seen:
-                            continue
-                        seen.add(key)
-
-                        writer.writerow(
-                            {
-                                "name": name,
-                                "reference product": ref,
-                                "classification_system": system,
-                                "classification_code": code,
+        # if external scenarios, extend mapping with external data
+        for scenario in self.datapackage.scenarios:
+            if "configurations" in scenario:
+                configurations = scenario["configurations"]
+                for key, val in configurations.items():
+                    for variable, variable_details in val.get(
+                        "production pathways", {}
+                    ).items():
+                        if variable not in mapping:
+                            variable_scenario_name = variable_details.get(
+                                "production volume", {}
+                            ).get("variable", 0)
+                            mapping[variable] = {
+                                "scenario variable": variable_scenario_name
                             }
-                        )
+                            filters = variable_details.get("ecoinvent alias")
+                            mask = variable_details.get("ecoinvent alias").get("mask")
 
-        if missing_classifications:
-            rows = sorted(missing_classifications)
-            tsv_buffer = StringIO()
-            tsv_writer = csv.writer(
-                tsv_buffer,
-                delimiter="\t",
-                lineterminator="\n",
-                quoting=csv.QUOTE_MINIMAL,
-            )
-            tsv_writer.writerow(["name", "reference product"])
-            for name, ref in rows:
-                tsv_writer.writerow([name, ref])
+                            mapping[variable]["dataset"] = self.find_activities(
+                                filters=filters,
+                                database=scenario["database"],
+                                mask=mask,
+                            )
 
-            missing_outfile = outdir / "missing_classifications.tsv"
-            with open(missing_outfile, "w", encoding="utf-8", newline="") as f:
-                f.write(tsv_buffer.getvalue())
+                            mapping[variable]["dataset"] = [
+                                dict(t)
+                                for t in {
+                                    tuple(sorted(d.items()))
+                                    for d in mapping[variable]["dataset"]
+                                }
+                            ]
 
-            print(
-                f"Missing classifications for {len(rows)} unique activities "
-                f"(TSV, also saved to {missing_outfile}):"
-            )
-            print(tsv_buffer.getvalue().rstrip())
+                            if len(mapping[variable]["dataset"]) == 0:
+                                print(
+                                    f"No dataset found for {variable} in {variable_scenario_name}"
+                                )
+                                print(f"Filters: {filters}")
+                                print(f"Mask: {mask}")
+                                continue
 
-    def _build_datapackage(self, name: str, contributors: list = None):
+                            variables = list(val["production pathways"].keys())
+                            variables.remove(variable)
+                            # remove datasets which names are in list of variables
+                            # except for the current variable
+                            if (
+                                len(
+                                    [
+                                        d
+                                        for d in mapping[variable]["dataset"]
+                                        if not any(v in d["name"] for v in variables)
+                                    ]
+                                )
+                                > 0
+                            ):
+                                mapping[variable]["dataset"] = [
+                                    d
+                                    for d in mapping[variable]["dataset"]
+                                    if not any(v in d["name"] for v in variables)
+                                ]
+
+        with open(Path.cwd() / "pathways_temp" / "mapping" / "mapping.yaml", "w") as f:
+            yaml.dump(mapping, f)
+
+    def add_scenario_data(self):
+        """
+        Add scenario data in the "pathways_temp" folder.
+
+        """
+        # concatenate xarray across IAM scenarios
+
+        data_list, extra_units = [], {}
+        for scenario in self.datapackage.scenarios:
+            data = scenario["iam data"].production_volumes.interp(year=scenario["year"])
+
+            # concatenate the final_energy array if it exists
+            if hasattr(scenario["iam data"], "final_energy_use"):
+                data = xr.concat(
+                    [
+                        data,
+                        scenario["iam data"].final_energy_use.interp(
+                            year=scenario["year"]
+                        ),
+                    ],
+                    dim="variables",
+                )
+                extra_units.update(scenario["iam data"].final_energy_use.attrs["unit"])
+
+            scenario_name = f"{scenario['model']} - {scenario['pathway']}"
+            if "external data" in scenario:
+                for ext, external in scenario["external data"].items():
+                    data = xr.concat(
+                        [
+                            data,
+                            external["production volume"].interp(year=scenario["year"]),
+                        ],
+                        dim="variables",
+                    )
+                    extra_units.update(external["production volume"].attrs["unit"])
+                    scenario_name += (
+                        f" - {scenario['external scenarios'][ext]['scenario']}"
+                    )
+
+            # add a scenario dimension
+            data = data.expand_dims("scenario")
+            data.coords["scenario"] = [scenario_name]
+
+            data_list.append(data)
+
+        array = xr.concat(data_list, dim="scenario")
+
+        # make sure pathways/scenario_data directory exists
+        (Path.cwd() / "pathways_temp" / "scenario_data").mkdir(
+            parents=True, exist_ok=True
+        )
+        # save the xarray as csv
+        df = array.to_dataframe().reset_index()
+
+        # add a unit column
+        # units are contained as an attribute of the xarray
+        df["unit"] = df["variables"].map(data.attrs["unit"])
+        # add units from extra_units if variable is in extra_units
+        df["unit"] = df.apply(
+            lambda row: (
+                extra_units[row["variables"]]
+                if row["variables"] in extra_units
+                else row["unit"]
+            ),
+            axis=1,
+        )
+
+        # split the columns "scenarios" into "model" and "pathway"
+        df[["model", "pathway"]] = df["scenario"].str.split(" - ", n=1, expand=True)
+        # remove any spaces in the "pathway" column
+        # df["pathway"] = df["pathway"].str.replace(" ", "")
+        df = df.drop(columns=["scenario"])
+
+        self.scenario_names = df["pathway"].unique().tolist()
+
+        # remove rows with empty values under "value"
+        df = df.dropna(subset=["value"])
+
+        # if scenario_data file already exists, delete it
+        if (
+            Path.cwd() / "pathways_temp" / "scenario_data" / "scenario_data.csv"
+        ).exists():
+            (
+                Path.cwd() / "pathways_temp" / "scenario_data" / "scenario_data.csv"
+            ).unlink()
+
+        df.to_csv(
+            Path.cwd() / "pathways_temp" / "scenario_data" / "scenario_data.csv",
+            index=False,
+        )
+
+    def build_datapackage(self, name: str, contributors: list = None):
         """
         Create and export a scenario datapackage.
         """
         # create a new datapackage
         package = Package(base_path=Path.cwd().as_posix())
-        # Find all CSV files manually
-        csv_files = list((Path.cwd() / "pathways_temp").glob("**/*.csv"))
-
-        for file in csv_files:
-            relpath = file.relative_to(Path.cwd()).as_posix()
-            package.add_resource(
-                {
-                    "path": relpath,
-                    "profile": "tabular-data-resource",
-                    "encoding": "utf-8",
-                }
-            )
-
+        package.infer("pathways_temp/**/*.csv")
         package.infer("pathways_temp/**/*.yaml")
-        package.infer()
 
         package.descriptor["name"] = name.replace(" ", "_").lower()
         package.descriptor["title"] = name.capitalize()
@@ -451,12 +449,3 @@ class PathwaysDataPackage:
         shutil.make_archive(name, "zip", str(Path.cwd() / "pathways_temp"))
 
         print(f"Data package saved at {str(Path.cwd() / f'{name}.zip')}")
-
-    def _cleanup_after_export(self):
-        for scenario in getattr(self.datapackage, "scenarios", []):
-            if "database" in scenario:
-                end_of_process(scenario)
-
-        delete_all_pickles()
-        clear_runtime_caches()
-        gc.collect()

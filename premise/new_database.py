@@ -340,16 +340,16 @@ def check_additional_inventories(inventories_list: List[dict]) -> List[dict]:
                 )
 
         if not all(
-            i for i in inventory.keys() if i in ["filepath", "ecoinvent version"]
+            i for i in inventory.keys() if i in ["inventories", "ecoinvent version"]
         ):
             raise TypeError(
-                "Both `filepath` and `ecoinvent version` "
+                "Both `inventories` and `ecoinvent version` "
                 "must be present in the list of inventories to import."
             )
 
         if not Path(inventory["filepath"]).is_file():
             raise FileNotFoundError(
-                f"Cannot find the inventory file: {inventory['filepath']}."
+                f"Cannot find the inventory file: {inventory['inventories']}."
             )
 
         if inventory["ecoinvent version"] not in config["SUPPORTED_EI_VERSIONS"]:
@@ -494,22 +494,15 @@ def _export_to_olca(obj):
 def check_presence_biosphere_database(biosphere_name: str) -> str:
     """
     Check that the biosphere database is present in the current project.
-
-    This validation is only required when exporting to Brightway.
     """
 
     if biosphere_name not in bw2data.databases:
-        current_project = getattr(bw2data.projects, "current", None)
-        project_message = (
-            f" in the current Brightway project '{current_project}'"
-            if current_project
-            else " in the current Brightway project"
+        print("premise requires the name of your biosphere database.")
+        print(
+            "Please enter the name of your biosphere database as it appears in your project."
         )
-        raise ValueError(
-            "Brightway export requires a biosphere database "
-            f"named '{biosphere_name}'{project_message}. "
-            f"Available databases: {list(bw2data.databases)}."
-        )
+        print(bw2data.databases)
+        biosphere_name = input("Name of the biosphere database: ")
 
     return biosphere_name
 
@@ -523,21 +516,13 @@ class NewDatabase:
     :vartype source_db: str
     :ivar system_model: Can be `cutoff` (default) or `consequential`.
     :vartype system_model: str
-    :ivar system_model_args: arguments for the system model.
-    :vartype system_model_args: dict
-    :ivar version: ecoinvent database version.
-    :vartype version: str
-    :ivar biosphere_name: name to use for biosphere exchanges during export.
-    :vartype biosphere_name: str
-    :ivar generate_reports: whether to generate change and summary reports.
-    :vartype generate_reports: bool
 
     """
 
     def __init__(
         self,
         scenarios: List[dict],
-        source_version: str = "3.12",
+        source_version: str = "3.11",
         source_type: str = "brightway",
         key: Union[bytes, str] = None,
         source_db: str = None,
@@ -554,33 +539,7 @@ class NewDatabase:
         gains_scenario="CLE",
         use_absolute_efficiency=False,
         biosphere_name: str = "biosphere3",
-        generate_reports: bool = True,
     ) -> None:
-        """
-        Initialize the NewDatabase class.
-
-        :param scenarios: list of IAM scenarios to use.
-        :param source_version: ecoinvent database version. Default is "3.12".
-        :param source_type: source of the ecoinvent database. Can be `brightway` or `ecospold`. Default is `brightway`.
-        :param key: decryption key for encrypted IAM data files. Default is None.
-        :param source_db: name of the source ecoinvent database in the current project. Default is None.
-        :param source_file_path: file path to the ecospold files, if source_type is `ecospold`. Default is None.
-        :param additional_inventories: list of additional inventories to import. Default is None.
-        :param system_model: system model to use. Can be `cutoff` (default) or `consequential`. Default is `cutoff`.
-        :param system_args: arguments for the system model. Default is None.
-        :param use_cached_inventories: whether to use cached inventories. Default is True.
-        :param use_cached_database: whether to use a cached database. Default is True.
-        :param external_scenarios: list of external scenarios to use. Default is None.
-        :param quiet: whether to suppress output messages. Default is False.
-        :param keep_imports_uncertainty: whether to keep uncertainty in imported inventories. Default is True.
-        :param keep_source_db_uncertainty: whether to keep uncertainty in the source database. Default is False.
-        :param gains_scenario: gains scenario to use. Can be either 'CLE' or 'MFR'. Default is 'CLE'.
-        :param use_absolute_efficiency: whether to use absolute efficiency values. Default is False.
-        :param biosphere_name: name to use for biosphere exchanges during export.
-            It must match a biosphere database in the current Brightway project
-            only when exporting to Brightway. Default is "biosphere3".
-        :param generate_reports: whether to generate change and summary reports. Default is True.
-        """
         self.sector_update_methods = None
         self.source = source_db
         self.version = check_db_version(source_version)
@@ -590,19 +549,17 @@ class NewDatabase:
         self.use_absolute_efficiency = use_absolute_efficiency
         self.keep_imports_uncertainty = keep_imports_uncertainty
         self.keep_source_db_uncertainty = keep_source_db_uncertainty
-        self.biosphere_name = biosphere_name
-        self.generate_reports = generate_reports
+        self.biosphere_name = check_presence_biosphere_database(biosphere_name)
 
         # if version is anything other than 3.8 or 3.9
         # and system_model is "consequential"
         # raise an error
         if (
-            self.version
-            not in ["3.8", "3.9", "3.9.1", "3.10", "3.10.1", "3.11", "3.12"]
+            self.version not in ["3.8", "3.9", "3.9.1", "3.10", "3.11"]
             and self.system_model == "consequential"
         ):
             raise ValueError(
-                "Consequential system model is only available for ecoinvent 3.8, 3.9, 3.10, 3.11, 3.12."
+                "Consequential system model is only available for ecoinvent 3.8, 3.9, 3.10 or 3.11."
             )
 
         if gains_scenario not in ["CLE", "MFR"]:
@@ -894,13 +851,13 @@ class NewDatabase:
             if filepath[0] in [
                 FILEPATH_OIL_GAS_INVENTORIES,
                 FILEPATH_BATTERIES_NMC_NCA_LFP,
-            ] and self.version in ["3.9", "3.9.1", "3.10", "3.10.1", "3.11", "3.12"]:
+            ] and self.version in ["3.9", "3.9.1", "3.10", "3.11"]:
                 continue
 
             if filepath[0] in [
                 FILEPATH_BATTERIES_NMC622_532,
                 FILEPATH_GRAPHITE,
-            ] and self.version in ["3.11", "3.12"]:
+            ] and self.version in ["3.11"]:
                 continue
 
             inventory = DefaultInventory(
@@ -1122,8 +1079,6 @@ class NewDatabase:
                 "create a super-structure database."
             )
 
-        check_presence_biosphere_database(self.biosphere_name)
-
         for scenario in self.scenarios:
             scenario = load_database(
                 scenario=scenario, original_database=self.database, load_metadata=True
@@ -1173,11 +1128,10 @@ class NewDatabase:
             name=name,
         )
 
-        if self.generate_reports:
-            # generate scenario report
-            self.generate_scenario_report()
-            # generate change report from logs
-            self.generate_change_report()
+        # generate scenario report
+        self.generate_scenario_report()
+        # generate change report from logs
+        self.generate_change_report()
 
         for scenario in self.scenarios:
             end_of_process(scenario)
@@ -1218,8 +1172,6 @@ class NewDatabase:
                 "The number of databases does not match the number of `name` given."
             )
 
-        check_presence_biosphere_database(self.biosphere_name)
-
         print("Write new database(s) to Brightway.")
 
         for s, scenario in enumerate(self.scenarios):
@@ -1250,11 +1202,10 @@ class NewDatabase:
             end_of_process(scenario)
 
         delete_all_pickles()
-        if self.generate_reports:
-            # generate scenario report
-            self.generate_scenario_report()
-            # generate change report from logs
-            self.generate_change_report()
+        # generate scenario report
+        self.generate_scenario_report()
+        # generate change report from logs
+        self.generate_change_report()
 
     def write_db_to_matrices(self, filepath: str = None):
         """
@@ -1307,7 +1258,7 @@ class NewDatabase:
             )
 
             try:
-                scenario = _prepare_database(
+                _prepare_database(
                     scenario=scenario,
                     db_name="database",
                     original_database=self.database,
@@ -1327,11 +1278,13 @@ class NewDatabase:
                 system_model=self.system_model,
             ).export_db_to_matrices()
 
-        if self.generate_reports:
-            # generate scenario report
-            self.generate_scenario_report()
-            # generate change report from logs
-            self.generate_change_report()
+            # end_of_process(scenario)
+
+        # delete_all_pickles()
+        # generate scenario report
+        self.generate_scenario_report()
+        # generate change report from logs
+        self.generate_change_report()
 
     def write_db_to_simapro(self, filepath: str = None):
         """
@@ -1382,11 +1335,10 @@ class NewDatabase:
             end_of_process(scenario)
 
         delete_all_pickles()
-        if self.generate_reports:
-            # generate scenario report
-            self.generate_scenario_report()
-            # generate change report from logs
-            self.generate_change_report()
+        # generate scenario report
+        self.generate_scenario_report()
+        # generate change report from logs
+        self.generate_change_report()
 
     def write_db_to_olca(self, filepath: str = None):
         """
@@ -1433,11 +1385,10 @@ class NewDatabase:
             end_of_process(scenario)
 
         delete_all_pickles()
-        if self.generate_reports:
-            # generate scenario report
-            self.generate_scenario_report()
-            # generate change report from logs
-            self.generate_change_report()
+        # generate scenario report
+        self.generate_scenario_report()
+        # generate change report from logs
+        self.generate_change_report()
 
     def write_datapackage(
         self,
@@ -1497,11 +1448,10 @@ class NewDatabase:
             name=name,
         )
 
-        if self.generate_reports:
-            # generate scenario report
-            self.generate_scenario_report()
-            # generate change report from logs
-            self.generate_change_report()
+        # generate scenario report
+        self.generate_scenario_report()
+        # generate change report from logs
+        self.generate_change_report()
 
     def generate_scenario_report(
         self,
