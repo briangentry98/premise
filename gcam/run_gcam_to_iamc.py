@@ -9,18 +9,30 @@ def run_step(command: list[str], cwd: Path) -> None:
     subprocess.run(command, cwd=str(cwd), check=True)
 
 
-def run_pipeline(scenario: str, dbpath: str) -> None:
+def run_pipeline(
+    dbfile: str,
+    dbpath: str,
+    scenario: str | None = None,
+    output_name: str | None = None,
+) -> None:
     gcam_dir = Path(__file__).resolve().parent
     iamc_dir = gcam_dir / "iamc_template"
+    scenario_output_name = output_name or scenario or dbfile
+
+    query_command = [
+        sys.executable,
+        "GCAM-Query.py",
+        dbfile,
+        "--dbpath",
+        dbpath,
+    ]
+    if scenario:
+        query_command.extend(["--scenario", scenario])
+    if output_name:
+        query_command.extend(["--output-name", output_name])
 
     run_step(
-        [
-            sys.executable,
-            "GCAM-Query.py",
-            scenario,
-            "--dbpath",
-            dbpath,
-        ],
+        query_command,
         cwd=gcam_dir,
     )
 
@@ -28,7 +40,7 @@ def run_pipeline(scenario: str, dbpath: str) -> None:
         [
             sys.executable,
             "run_iamctemplatecreator.py",
-            scenario,
+            scenario_output_name,
         ],
         cwd=iamc_dir,
     )
@@ -43,10 +55,25 @@ def parse_args() -> argparse.Namespace:
         )
     )
     parser.add_argument(
-        "scenario",
+        "dbfile",
         nargs="?",
         default="SSP2",
-        help="Scenario/database name to process (default: SSP2).",
+        help="GCAM database file name to process (default: SSP2).",
+    )
+    parser.add_argument(
+        "--scenario",
+        help=(
+            "Scenario name inside the database to query. Accepts either the "
+            "scenario name if it is unique or the fully qualified name "
+            "'<name> <date>'."
+        ),
+    )
+    parser.add_argument(
+        "--output-name",
+        help=(
+            "Directory name to use under gcam/queries/queryresults and gcam/output. "
+            "Defaults to the requested scenario name, or the database file name if omitted."
+        ),
     )
     parser.add_argument(
         "--dbpath",
@@ -59,7 +86,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    run_pipeline(scenario=args.scenario, dbpath=args.dbpath)
+    run_pipeline(
+        dbfile=args.dbfile,
+        dbpath=args.dbpath,
+        scenario=args.scenario,
+        output_name=args.output_name,
+    )
 
 
 if __name__ == "__main__":

@@ -18,10 +18,25 @@ def first_existing_path(candidates: list[Path]) -> Path:
     raise FileNotFoundError(f"None of the IAM files were found: {candidates}")
 
 
-def ensure_biosphere_database(name: str) -> None:
-    if name not in bw2data.databases:
-        print(f"Creating missing biosphere database: {name}")
-        bi.create_default_biosphere3()
+def ensure_biosphere_database(name: str, source_version: str) -> str:
+    if name in bw2data.databases:
+        return name
+
+    preferred_names = [f"ecoinvent-{source_version}-biosphere", "biosphere3"]
+    for candidate in preferred_names:
+        if candidate in bw2data.databases:
+            print(
+                f"Requested biosphere database '{name}' not found. "
+                f"Using existing '{candidate}' instead."
+            )
+            return candidate
+
+    print(
+        f"No compatible biosphere database found for '{name}'. "
+        "Creating default 'biosphere3'."
+    )
+    bi.create_default_biosphere3()
+    return "biosphere3"
 
 
 def _parse_dotenv_line(line: str) -> tuple[str, str] | None:
@@ -125,7 +140,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
     print("=" * 60)
     print("STEP 2: Ensure biosphere database")
     print("=" * 60)
-    ensure_biosphere_database(args.biosphere_db)
+    biosphere_name = ensure_biosphere_database(args.biosphere_db, args.source_version)
 
     print("=" * 60)
     print("STEP 3: Set up and process GCAM scenario")
@@ -145,7 +160,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
         ],
         source_db=args.source_db,
         source_version=args.source_version,
-        biosphere_name=args.biosphere_db,
+        biosphere_name=biosphere_name,
         keep_source_db_uncertainty=args.keep_source_db_uncertainty,
         keep_imports_uncertainty=args.keep_imports_uncertainty,
     )
