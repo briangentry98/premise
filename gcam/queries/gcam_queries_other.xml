@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<queries>
+    <!--This query is written by NREL for extracting data from GCAM results for integration with premise-->
+
+    <!--The queries have been copied from the GCAM main queries file and edited to match with the gcamreader in Python. -->
+    <aQuery>
+        <demographicsQuery title="population by region">
+            <axis1 name="region">region</axis1>
+            <axis2 name="Year">populationMiniCAM</axis2>
+            <xPath buildList="true" dataName="total-population" group="false" sumAll="false">demographics/populationMiniCAM/total-population/node()</xPath>
+            <comments/>
+        </demographicsQuery>
+    </aQuery>
+
+    <aQuery>
+        <gdpQueryBuilder title="GDP per capita PPP by region">
+            <axis1 name="region">region</axis1>
+            <axis2 name="Year">nationalAccount[@year]</axis2>
+            <xPath buildList="true" dataName="gdp-per-capita-ppp" group="false" sumAll="false">nationalAccount/account[@name = 'gdp-per-capita-ppp']/node()</xPath>
+            <comments/>
+        </gdpQueryBuilder>
+    </aQuery>
+
+    <aQuery>
+        <ClimateQuery title="global mean temperature">
+            <axis1 name="temperature">none</axis1>
+            <axis2 name="Year">global-mean-surface-temperature-native[@year]</axis2>
+            <xPath buildList="true" dataName="global-mean-temperature" group="false" sumAll="false">climate-model/global-mean-surface-temperature-native/text()</xPath>
+            <comments>Returns global mean surface temp anomaly relative to the 1850-1900 mean.
+Also available is global mean air temperature; in both climate model native or relative to 1850-1900 mean.
+A user can adjust the query to search for any of:
+  * global-mean-surface-temperature
+  * global-mean-air-temperature
+  * global-mean-surface-temperature-native
+  * global-mean-air-temperature-native</comments>
+        </ClimateQuery>
+    </aQuery>
+
+    <aQuery>
+        <emissionsQueryBuilder title="CO2 emissions by region">
+            <axis1 name="region">region</axis1>
+            <axis2 name="Year">emissions</axis2>
+            <xPath buildList="true" dataName="emissions" group="false" sumAll="false">*[@type = 'sector' (:collapse:) or @type = 'resource' (:collapse:)](: / *[@type = 'subresource' (: collapse :)] :)//*[((@name='CO2' or @name = 'CO2_FUG'))]/emissions/node()</xPath>
+            <comments/>
+        </emissionsQueryBuilder>
+    </aQuery>
+
+
+</queries>

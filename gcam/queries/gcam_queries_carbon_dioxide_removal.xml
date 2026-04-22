@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<queries>
+    <!--This query is written by NREL for extracting data from GCAM output files for integration with premise-->
+
+    <!--The queries have been copied from the GCAM main queries file and edited to match with gcamreader in Python. -->
+    <aQuery>
+        <emissionsQueryBuilder title="co2 sequestration">
+            <axis1 name="subsector">subsector</axis1>
+            <axis2 name="Year">emissions-sequestered</axis2>
+            <xPath buildList="true" dataName="emissions" group="false" sumAll="false">*[@type = 'sector' ]/*[@type='subsector' and @name='dac']//*[@type='technology']//
+        CO2/emissions-sequestered/node()</xPath>
+            <comments/>
+        </emissionsQueryBuilder>
+    </aQuery>
+
+    <aQuery>
+        <supplyDemandQuery title="cdr final energy">
+            <axis1 name="technology">technology</axis1>
+            <axis2 name="Year">demand-physical[@vintage]</axis2>
+            <xPath buildList="true" dataName="input" group="false" sumAll="false">*[@type='sector' and (@name='CO2 removal')]/
+    *[@type='subsector']/*[@type='technology']/
+    *[@type='input' and (@name='delivered biomass' or @name='delivered coal' or
+    @name='H2 enduse' or @name='elect_td_ind' or @name='wholesale gas' or
+    @name='refined liquids industrial')]/demand-physical/node()</xPath>
+            <comments/>
+        </supplyDemandQuery>
+    </aQuery>
+</queries>

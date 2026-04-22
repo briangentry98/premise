@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<queries>
+    <!--This query is written by NREL for extracting data from GCAM results for integration with premise-->
+
+    <!--The queries have been copied from the GCAM main queries file and edited to match with the gcamreader in Python. -->
+    <aQuery>
+        <supplyDemandQuery title="refined liquids production by tech">
+            <axis1 name="technology">technology</axis1>
+            <axis2 name="Year">physical-output[@vintage]</axis2>
+            <xPath buildList="true" dataName="output" group="false" sumAll="false">*[@type='sector' and contains(@name,'refining')]/*[@type='subsector']/
+        *[@type='technology']/output-primary[@type='output']/physical-output/node()</xPath>
+            <comments/>
+        </supplyDemandQuery>
+    </aQuery>
+
+    <aQuery>
+        <supplyDemandQuery title="refined liquids inputs by tech">
+                <axis1 name="input">input</axis1>
+                <axis2 name="Year">demand-physical[@vintage]</axis2>
+                <xPath buildList="true" dataName="output" group="false" sumAll="false">*[@type='sector' and (@name='refining' or @name='regional oil' or
+            @name='regional corn for ethanol' or @name='regional sugar for ethanol')]/
+            *[@type='subsector']/*[@type='technology']/
+            *[@type='input' and not(contains(@name,'water'))]/demand-physical/node()</xPath>
+        </supplyDemandQuery>
+    </aQuery>
+
+    <aQuery>
+        <supplyDemandQuery title="gas production by tech">
+            <axis1 name="technology">technology</axis1>
+            <axis2 name="Year">physical-output[@vintage]</axis2>
+            <xPath buildList="true" dataName="output" group="false" sumAll="false">*[@type='sector' and (@name='gas processing')]/*[@type='subsector']/
+        *[@type='technology']/*[@type='output' (:collapse:)]/physical-output/node()</xPath>
+            <comments/>
+        </supplyDemandQuery>
+    </aQuery>
+
+    <aQuery>
+        <supplyDemandQuery title="gas inputs by tech">
+            <axis1 name="fuel">input</axis1>
+            <axis2 name="Year">demand-physical[@vintage]</axis2>
+            <xPath buildList="true" dataName="input" group="false" sumAll="false">*[@type='sector' and (@name='gas processing')]/*[@type='subsector']/
+        *[@type='technology']/*[@type='input']/demand-physical/node()</xPath>
+            <comments/>
+        </supplyDemandQuery>
+    </aQuery>
+
+    <aQuery>
+        <supplyDemandQuery title="hydrogen production by tech">
+            <axis1 name="technology">technology</axis1>
+            <axis2 name="Year">physical-output[@vintage]</axis2>
+            <xPath buildList="true" dataName="output" group="false" sumAll="false">*[@type='sector' and (@name='H2 central production' or @name='H2 wholesale dispensing' or @name='H2 industrial')]/
+        *[@type='subsector' and not (@name='H2 delivery')]/*[@type='technology']/*[@type='output' (:collapse:)]/
+        physical-output/node()</xPath>
+            <comments/>
+        </supplyDemandQuery>
+    </aQuery>
+
+    <aQuery>
+        <supplyDemandQuery title="hydrogen inputs by tech">
+            <axis1 name="fuel">input</axis1>
+            <axis2 name="Year">demand-physical[@vintage]</axis2>
+            <xPath buildList="true" dataName="input" group="false" sumAll="false">*[@type='sector' and contains(@name,'H2')]/
+        *[@type='subsector']/*[@type='technology']/*[@type='input']/
+        demand-physical/node()</xPath>
+            <comments/>
+        </supplyDemandQuery>
+    </aQuery>
+
+</queries>

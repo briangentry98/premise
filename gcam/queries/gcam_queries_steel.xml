@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<queries>
+    <!--This query is written by NREL for extracting data from GCAM results for integration with premise-->
+
+    <!--The queries have been copied from the GCAM main queries file and edited to match with the gcamreader in Python. -->
+    <aQuery>
+        <supplyDemandQuery title="iron and steel production by tech">
+            <axis1 name="technology">technology</axis1>
+            <axis2 name="Year">physical-output[@vintage]</axis2>
+            <xPath buildList="true" dataName="output" group="false" sumAll="false">*[@type='sector' and (@name='iron and steel')]/
+    *[@type='subsector' and not(@name='Imports')]/*[@type='technology']/
+    *[@type='output']/physical-output/node()</xPath>
+            <comments/>
+        </supplyDemandQuery>
+    </aQuery>
+
+    <aQuery>
+        <supplyDemandQuery title="iron and steel final energy by tech and fuel">
+            <axis1 name="technology">technology</axis1>
+            <axis2 name="Year">demand-physical[@vintage]</axis2>
+            <xPath buildList="true" dataName="input" group="false" sumAll="false">*[@type='sector' and (@name='iron and steel')]/
+    *[@type='subsector']/*[@type='technology']/
+    *[@type='input' and (@name='delivered biomass' or @name='delivered coal' or @name='district heat' or
+    @name='H2 wholesale delivery' or @name='H2 wholesale dispensing' or @name='H2 industrial' or
+    @name='elect_td_ind' or @name='wholesale gas' or @name='regional woodpulp for energy' or
+    @name='refined liquids industrial' or @name='global solar resource')]/demand-physical/node()</xPath>
+        </supplyDemandQuery>
+    </aQuery>
+</queries>

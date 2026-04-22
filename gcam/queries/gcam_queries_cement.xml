@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<queries>
+    <!--This query is written by NREL for extracting data from GCAM results for integration with premise-->
+
+    <!--The queries have been copied from the GCAM main queries file and edited to match with the gcamreader in Python. -->
+    <aQuery>
+        <supplyDemandQuery title="cement production by tech">
+            <axis1 name="sector">sector</axis1>
+            <axis2 name="Year">physical-output[@vintage]</axis2>
+            <xPath buildList="true" dataName="output" group="false" sumAll="false">*[@type='sector' and (@name='cement')]/*[@type='subsector']/*[@type='technology']/
+               *[@type='output' (:collapse:)]/physical-output/node()</xPath>
+            <comments/>
+        </supplyDemandQuery>
+    </aQuery>
+
+    <aQuery>
+        <supplyDemandQuery title="cement final energy by tech and fuel">
+                    <axis1 name="technology">technology</axis1>
+                    <axis2 name="Year">demand-physical[@vintage]</axis2>
+                    <xPath buildList="true" dataName="input" group="false" sumAll="false">*[@type='sector' and (@name='cement' or @name='process heat cement' or (exists(child::keyword[@final-energy='cement'])) or (exists(child::keyword[@final-energy='process heat cement'])))]/
+            *[@type='subsector']/*[@type='technology']/
+            *[@type='input' and (@name='delivered biomass' or @name='delivered coal' or
+            @name='H2 enduse' or @name='elect_td_ind' or @name='wholesale gas' or
+            @name='refined liquids industrial')]/demand-physical/node()</xPath>
+                    <comments/>
+        </supplyDemandQuery>         
+    </aQuery>
+</queries>

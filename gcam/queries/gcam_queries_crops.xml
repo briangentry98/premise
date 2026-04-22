@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<queries>
+    <!--This query is written by NREL for extracting data from GCAM results for integration with premise-->
+
+    <!--The queries have been copied from the GCAM main queries file and edited to match with the gcamreader in Python. -->
+    <aQuery>
+        <query title="land allocation by crop">
+            <axis1 name="LandLeaf">LandLeaf[@crop]</axis1>
+            <axis2 name="Year">land-allocation[@year]</axis2>
+            <xPath buildList="true" dataName="LandLeaf" group="false" sumAll="false">/LandNode[@name='root' or @type='LandNode' (:collapse:)]//land-allocation/text()</xPath>
+            <comments/>
+        </query>
+    </aQuery>
+
+    <aQuery>
+        <query title="LUC emissions by LUT">
+            <axis1 name="LandLeaf">LandLeaf</axis1>
+            <axis2 name="Year">land-use-change-emission[@year]</axis2>
+            <xPath buildList="true" dataName="land-use-change-emission" group="false" sumAll="false">/LandNode[@name='root' or @type='LandNode' (:collapse:)]//
+            land-use-change-emission[@year&gt;1970]/text()</xPath>
+            <comments/>
+        </query>
+    </aQuery>
+</queries>

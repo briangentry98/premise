@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<queries>
+    <!--This query is written by NREL for extracting data from GCAM output files for integration with premise-->
+
+    <!--The queries have been copied from the GCAM main queries file and edited to match with gcamreader in Python. -->
+    <aQuery>
+        <supplyDemandQuery title="purpose-grown biomass production">
+            <axis1 name="sector">sector[@name]</axis1>
+            <axis2 name="Year">physical-output[@vintage]</axis2>
+            <xPath buildList="false" dataName="output" group="false" sumAll="false">*[@type='sector' and (@name='biomass')]//*[@type='output' (:collapse:)]/
+        physical-output/node()</xPath>
+            <comments/>
+        </supplyDemandQuery>
+    </aQuery>
+
+    <aQuery>
+        <supplyDemandQuery title="residue biomass production">
+            <axis1 name="sector">sector[@name]</axis1>
+            <axis2 name="Year">physical-output[@vintage]</axis2>
+            <xPath buildList="false" dataName="output" group="false" sumAll="false">*[@type='sector' and not(@name='biomass')]//*[@type='output' and @name='biomass']/physical-output/node()</xPath>
+            <comments/>
+        </supplyDemandQuery>
+    </aQuery>
+</queries>

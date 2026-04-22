@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<queries>
+    <!--This query is written by NREL for extracting data from GCAM results for integration with premise-->
+
+    <!--The queries have been copied from the GCAM main queries file and edited to match with the gcamreader in Python. -->
+    <aQuery>
+        <supplyDemandQuery title="transport service output by tech">
+            <axis1 name="technology">technology</axis1>
+            <axis2 name="Year">physical-output[@vintage]</axis2>
+            <xPath buildList="true" dataName="output" group="false" sumAll="false">*[@type='sector' and (@name='transportation' or (exists(child::keyword[@final-energy='transportation'])))]/
+        *[@type='subsector']/*[@type='technology']/*[@type='output' (:collapse:) and not (@name='CAFEcredit')]/
+        physical-output/node()</xPath>
+            <comments/>
+        </supplyDemandQuery>
+    </aQuery>
+
+    <aQuery>
+        <supplyDemandQuery title="transport final energy by tech and fuel">
+            <axis1 name="mode">subsector</axis1>
+            <axis2 name="Year">demand-physical[@vintage]</axis2>
+            <xPath buildList="true" dataName="input" group="false" sumAll="false">*[@type='sector' and (@name='transportation' or (exists(child::keyword[@final-energy='transportation'])))]/
+        *[@type='subsector']/*[@type='technology']/*[@type='input' and not(@name='renewable')]/
+        demand-physical[@unit='EJ']/node()</xPath>
+            <comments/>
+        </supplyDemandQuery>
+    </aQuery>
+</queries>
