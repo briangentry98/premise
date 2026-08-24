@@ -9,12 +9,14 @@ import copy
 import logging.config
 import math
 import uuid
+from bisect import bisect_left
 from collections import defaultdict
 from collections.abc import ValuesView
 from copy import deepcopy
+from functools import lru_cache
 from itertools import groupby, product
 from pathlib import Path
-from typing import Any, Dict, List, Set, Tuple, Union
+from typing import Any, Dict, List, NamedTuple, Sequence, Set, Tuple, Union
 
 import numpy as np
 import xarray as xr
@@ -443,12 +445,58 @@ def calculate_input_energy(
     return fuel_amount * lhv
 
 
+_FUEL_NAME_PARTS_TO_REMOVE = (
+    "market for ",
+    "market group for ",
+    ", high pressure",
+    ", low pressure",
+    ", used as fuel",
+)
+
+
+@lru_cache(maxsize=8192)
+def _sanitize_fuel_filter_name(name: str) -> str:
+    """Return the canonical name used to identify fuel exchanges."""
+    for item in _FUEL_NAME_PARTS_TO_REMOVE:
+        name = name.replace(item, "")
+    return name
+
+
+class FuelFilterIndex(NamedTuple):
+    """Immutable prefix index for the fuel filters used by transformations."""
+
+    filters: Tuple[str, ...]
+    sorted_filters: Tuple[str, ...]
+
+    def matches(self, exchange_name: str) -> bool:
+        """Return whether a filter starts with the sanitized exchange name."""
+        exchange_name = _sanitize_fuel_filter_name(exchange_name)
+        position = bisect_left(self.sorted_filters, exchange_name)
+        return position < len(self.sorted_filters) and self.sorted_filters[
+            position
+        ].startswith(exchange_name)
+
+
+@lru_cache(maxsize=64)
+def _prepare_fuel_filter_tuple(fuel_filters: Tuple[str, ...]) -> FuelFilterIndex:
+    sanitized = tuple(_sanitize_fuel_filter_name(name) for name in fuel_filters)
+    return FuelFilterIndex(
+        filters=sanitized,
+        sorted_filters=tuple(sorted(set(sanitized))),
+    )
+
+
+def prepare_fuel_filters(fuel_filters: Sequence[str]) -> FuelFilterIndex:
+    """Compile fuel filters once for repeated efficiency calculations."""
+    return _prepare_fuel_filter_tuple(tuple(fuel_filters))
+
+
 def find_fuel_efficiency(
     dataset: dict,
     energy_out: float,
     fuel_specs: dict,
     fuel_map_reverse: dict,
-    fuel_filters: List[str] = None,
+    fuel_filters: Union[Sequence[str], FuelFilterIndex] = None,
 ) -> float:
     """
     This method calculates the efficiency value set initially, in case it is not specified in the parameter
@@ -460,29 +508,24 @@ def find_fuel_efficiency(
     :return: the efficiency value set initially
     """
 
-    def _sanitize_fuel_name(name: str) -> str:
-        """Sanitize fuel name by removing market prefixes."""
-        items_to_remove = [
-            "market for ",
-            "market group for ",
-            ", high pressure",
-            ", low pressure",
-            ", used as fuel",
-        ]
-        for item in items_to_remove:
-            name = name.replace(item, "")
-        return name
-
     if fuel_filters is None:
-        fuel_filters = list(fuel_map_reverse.keys())
-        fuel_filters = [_sanitize_fuel_name(x) for x in fuel_filters]
+        fuel_filter_index = prepare_fuel_filters(tuple(fuel_map_reverse))
+    elif isinstance(fuel_filters, FuelFilterIndex):
+        if not fuel_filters.filters:
+            raise ValueError(
+                "No fuel filters configured for "
+                f"{dataset['name']!r} in {dataset['location']!r}."
+            )
+        fuel_filter_index = fuel_filters
     else:
-        fuel_filters = [_sanitize_fuel_name(x) for x in fuel_filters]
         if not fuel_filters:
             raise ValueError(
                 "No fuel filters configured for "
                 f"{dataset['name']!r} in {dataset['location']!r}."
             )
+        fuel_filter_index = prepare_fuel_filters(fuel_filters)
+
+    sanitized_fuel_filters = fuel_filter_index.filters
 
     energy_input = np.sum(
         np.sum(
@@ -496,10 +539,7 @@ def find_fuel_efficiency(
                         fuel_map_reverse,
                     )
                     for exc in dataset["exchanges"]
-                    if any(
-                        fuel.startswith(_sanitize_fuel_name(exc["name"]))
-                        for fuel in fuel_filters
-                    )
+                    if fuel_filter_index.matches(exc["name"])
                     and exc["type"] == "technosphere"
                     and exc["amount"] > 0.0
                 ]
@@ -530,7 +570,7 @@ def find_fuel_efficiency(
             raise ValueError(
                 "No fuel input found for "
                 f"{dataset['name']!r} in {dataset['location']!r}. "
-                f"Fuel filters: {fuel_filters}. "
+                f"Fuel filters: {list(sanitized_fuel_filters)}. "
                 f"Technosphere inputs: {technosphere_inputs}."
             )
 

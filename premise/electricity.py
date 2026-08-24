@@ -29,6 +29,7 @@ from .transformation import (
     find_fuel_efficiency,
     get_suppliers_of_a_region,
     np,
+    prepare_fuel_filters,
     uuid,
     ws,
 )
@@ -1712,6 +1713,7 @@ class Electricity(BaseTransformation):
 
         for technology in technologies_map:
             dict_technology = technologies_map[technology]
+            fuel_filter_index = prepare_fuel_filters(dict_technology["fuel filters"])
 
             for dataset in self.powerplant_map[technology]:
                 if not self.is_in_index(dataset):
@@ -1720,7 +1722,7 @@ class Electricity(BaseTransformation):
                 # Find current efficiency
                 ei_eff = find_fuel_efficiency(
                     dataset=dataset,
-                    fuel_filters=dict_technology["fuel filters"],
+                    fuel_filters=fuel_filter_index,
                     energy_out=3.6,
                     fuel_specs=self.fuels_specs,
                     fuel_map_reverse=self.fuel_map_reverse,
@@ -1826,13 +1828,16 @@ class Electricity(BaseTransformation):
         for tech in coal_techs:
             if tech in self.powerplant_map:
                 datasets = self.powerplant_map[tech]
+                fuel_filter_index = prepare_fuel_filters(
+                    self.powerplant_fuels_map[tech]
+                )
                 for dataset in datasets:
                     loc = dataset["location"][:2]
                     if loc in self.iam_data.coal_power_plants.country.values:
                         # Find current efficiency
                         ei_eff = find_fuel_efficiency(
                             dataset=dataset,
-                            fuel_filters=self.powerplant_fuels_map[tech],
+                            fuel_filters=fuel_filter_index,
                             energy_out=3.6,
                             fuel_specs=self.fuels_specs,
                             fuel_map_reverse=self.fuel_map_reverse,

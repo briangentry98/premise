@@ -7,8 +7,8 @@
 > warm IMAGE SSP2-M 2050 all-sector differential run it produced the exact same
 > semantic hash as the legacy store (`39efcf273da6b52e6c6bdfce8a6546a9a0819a054340fee9062ac2a7fddf808c`),
 > with 50,938 datasets and 1,597,616 exchanges. A matched diagnostic run (not
-> the five-run acceptance median) reduced wall time from 82.67 to 51.59 seconds
-> (37.6%) and sampled peak RSS from 2.692 to 1.945 GB (27.8%). This is well
+> the five-run acceptance median) reduced wall time from 82.67 to 49.77 seconds
+> (39.8%) and sampled peak RSS from 2.692 to 1.935 GB (28.1%). This is well
 > short of the required 50%/50% activation gate.
 > The default therefore remains `legacy`; transformation hot paths still need
 > to move off their private mutable working materialization.
@@ -46,8 +46,8 @@ includes the full all-sector update and compact checkpoint write.
 
 | Metric | Legacy oracle | Compact | Change |
 | --- | ---: | ---: | ---: |
-| End-to-end wall time | 82.67 s | 51.59 s | -37.6% |
-| Sampled peak RSS | 2.692 GB | 1.945 GB | -27.8% |
+| End-to-end wall time | 82.67 s | 49.77 s | -39.8% |
+| Sampled peak RSS | 2.692 GB | 1.935 GB | -28.1% |
 | Datasets | 50,938 | 50,938 | exact |
 | Exchanges | 1,597,616 | 1,597,616 | exact |
 
@@ -133,6 +133,17 @@ share frame rather than reopening the Excel sheet. Metals fell from 5.73 to
 4.74 seconds, the full update to 48.98 seconds, and end-to-end time to 51.59
 seconds. Metals-end RSS was about 28 MB lower; the later sampled process peak
 was 1.945 GB. Canonical output remained exact.
+
+Fuel-efficiency matching now compiles each electricity technology's sanitized
+fuel names into an immutable sorted prefix index. A binary search preserves the
+legacy `filter.startswith(exchange_name)` rule while avoiding millions of
+repeated string replacements and Python generator iterations; accepted
+exchanges and their numerical reduction order remain unchanged. In the scoped
+profile, `find_fuel_efficiency` fell from 3.04 to 0.13 seconds and the enclosing
+efficiency update from 3.36 to 1.05 seconds. The matched unprofiled run reduced
+electricity from 4.59 to 3.53 seconds, the full update to 47.24 seconds, and
+end-to-end time to 49.77 seconds. Sampled peak RSS was 1.935 GB, and the strict
+canonical hash and counts remained exact.
 
 The seed-zero canonical hash is
 `39efcf273da6b52e6c6bdfce8a6546a9a0819a054340fee9062ac2a7fddf808c`.

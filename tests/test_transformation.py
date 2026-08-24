@@ -13,6 +13,7 @@ from premise.transformation import (
     BaseTransformation,
     clone_inventory_dataset,
     find_fuel_efficiency,
+    prepare_fuel_filters,
 )
 
 
@@ -306,6 +307,23 @@ def test_find_fuel_efficiency_rejects_empty_filter():
         )
 
 
+def test_find_fuel_efficiency_rejects_empty_prepared_filter():
+    dataset = {
+        "name": "electricity production, biomass",
+        "location": "GLO",
+        "exchanges": [],
+    }
+
+    with pytest.raises(ValueError, match="No fuel filters configured"):
+        find_fuel_efficiency(
+            dataset=dataset,
+            energy_out=3.6,
+            fuel_specs={},
+            fuel_map_reverse={},
+            fuel_filters=prepare_fuel_filters([]),
+        )
+
+
 def test_find_fuel_efficiency_rejects_missing_fuel_input():
     dataset = {
         "name": "electricity production, biomass",
@@ -330,6 +348,46 @@ def test_find_fuel_efficiency_rejects_missing_fuel_input():
             },
             fuel_filters=["market for wood chips, green, measured as dry mass"],
         )
+
+
+def test_prepared_fuel_filters_preserve_sanitized_prefix_matching():
+    filters = prepare_fuel_filters(
+        [
+            "market for hard coal, at mine",
+            "market group for natural gas, high pressure",
+            "market for wood chips, used as fuel",
+        ]
+    )
+
+    assert filters.matches("market group for hard coal")
+    assert filters.matches("market for natural gas, low pressure")
+    assert filters.matches("market for wood chips")
+    assert not filters.matches("market for steel, low-alloyed")
+
+
+def test_find_fuel_efficiency_accepts_prepared_fuel_filters():
+    dataset = {
+        "name": "electricity production, hard coal",
+        "location": "GLO",
+        "exchanges": [
+            {
+                "name": "market group for hard coal",
+                "amount": 0.2,
+                "unit": "kilogram",
+                "type": "technosphere",
+            },
+        ],
+    }
+
+    efficiency = find_fuel_efficiency(
+        dataset=dataset,
+        energy_out=3.6,
+        fuel_specs={"hard coal": {"lhv": {"value": 18.0}}},
+        fuel_map_reverse={"hard coal": "hard coal"},
+        fuel_filters=prepare_fuel_filters(["market for hard coal, at mine"]),
+    )
+
+    assert efficiency == pytest.approx(1.0)
 
 
 def test_biomass_fuel_map_includes_green_wood_chips():
