@@ -2,11 +2,13 @@ import pytest
 import pandas as pd
 
 import premise.metals as metals_module
+import premise.validation as validation_module
 from premise.filesystem_constants import DATA_DIR
 from premise.metals import (
     Metals,
     PostAllocationCorrectionError,
     _load_mining_shares_mapping,
+    build_transport_lookup,
     correct_metal_resource_exchanges,
     extract_exact_filter_values,
     extract_reference_products_from_filter,
@@ -33,6 +35,38 @@ def test_mining_share_loader_returns_unfiltered_source_values(monkeypatch):
     assert loaded.columns.tolist() == ["Metal", "2020", "2030"]
     assert loaded["2020"].tolist() == [0.005, 0.995]
     assert loaded["2030"].tolist() == [0.004, 0.996]
+
+
+def test_transport_lookup_preserves_last_duplicate_row_and_frame_metadata():
+    dataframe = pd.DataFrame(
+        {
+            "country": ["CH", "CH", "DE"],
+            "Metal": ["Copper", "Copper", "Copper"],
+            "TransportMode Label": ["Railway", "Road", "Sea"],
+        },
+        index=[10, 20, 30],
+    )
+    metals = object.__new__(Metals)
+    metals.metals_transport = dataframe
+    metals.transport_lookup = build_transport_lookup(dataframe)
+    metals.alt_names = {"copper": "Copper"}
+
+    result = metals.get_weighted_average_distance("CH", "copper")
+
+    pd.testing.assert_frame_equal(result, dataframe.iloc[[1]])
+
+
+def test_metals_validation_reuses_supplied_mining_shares(monkeypatch):
+    validator = object.__new__(validation_module.MetalsValidation)
+    validator.mining_shares_mapping = pd.DataFrame({"Metal": [], "Country": []})
+
+    monkeypatch.setattr(
+        validation_module,
+        "_load_mining_shares_mapping_for_validation",
+        lambda _version: pytest.fail("validation reopened the mining-share workbook"),
+    )
+
+    validator.check_excel_shares_preserved()
 
 
 def biosphere_resource(name, amount):

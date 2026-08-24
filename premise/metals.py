@@ -373,9 +373,11 @@ def _update_metals(scenario, version, system_model):
         version=metals.version,
     )
 
+    mining_shares_mapping = load_mining_shares_mapping(metals.version)
     validate.prim_sec_split = metals.prim_sec_split
+    validate.mining_shares_mapping = mining_shares_mapping
     validate.interpolate_by_year = interpolate_by_year
-    validate.metals_list = load_mining_shares_mapping()["Metal"].unique().tolist()
+    validate.metals_list = mining_shares_mapping["Metal"].unique().tolist()
     validate.run_metals_checks()
 
     return scenario
@@ -422,6 +424,17 @@ def load_metals_transport():
     df["country"] = df["Country"]
 
     return df
+
+
+def build_transport_lookup(dataframe: pd.DataFrame) -> Dict[tuple, int]:
+    """Map country/metal keys to the final matching transport row position."""
+
+    return {
+        (country, metal): position
+        for position, (country, metal) in enumerate(
+            zip(dataframe["country"], dataframe["Metal"])
+        )
+    }
 
 
 @lru_cache(maxsize=None)
@@ -1424,15 +1437,7 @@ class Metals(BaseTransformation):
 
         self.build_db_indexes()
 
-        self.weighted_transport_distances = {
-            (row["country"], row["Metal"]): row
-            for _, row in self.metals_transport.iterrows()
-        }
-
-        self.transport_lookup = {
-            (row["country"], row["Metal"]): row
-            for _, row in self.metals_transport.iterrows()
-        }
+        self.transport_lookup = build_transport_lookup(self.metals_transport)
 
         self.prim_sec_split = load_primary_secondary_split()
 
@@ -2505,13 +2510,10 @@ class Metals(BaseTransformation):
         if not alt_metal:
             return pd.DataFrame()  # fallback
 
-        rows = [
-            row
-            for (c, m), row in self.transport_lookup.items()
-            if c == country and m == alt_metal
-        ]
-
-        return pd.DataFrame(rows)
+        row_position = self.transport_lookup.get((country, alt_metal))
+        if row_position is None:
+            return pd.DataFrame()
+        return self.metals_transport.iloc[[row_position]]
 
     def create_metal_markets(self):
         dataframe = load_mining_shares_mapping(self.version)

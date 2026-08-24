@@ -2943,7 +2943,9 @@ class MetalsValidation(BaseDatasetValidator):
         This should catch normalization bugs
         """
 
-        mining_shares_df = _load_mining_shares_mapping_for_validation(self.version)
+        mining_shares_df = getattr(self, "mining_shares_mapping", None)
+        if mining_shares_df is None:
+            mining_shares_df = _load_mining_shares_mapping_for_validation(self.version)
 
         country_codes = dict(
             zip(

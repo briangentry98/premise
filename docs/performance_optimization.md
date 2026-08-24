@@ -7,8 +7,8 @@
 > warm IMAGE SSP2-M 2050 all-sector differential run it produced the exact same
 > semantic hash as the legacy store (`39efcf273da6b52e6c6bdfce8a6546a9a0819a054340fee9062ac2a7fddf808c`),
 > with 50,938 datasets and 1,597,616 exchanges. A matched diagnostic run (not
-> the five-run acceptance median) reduced wall time from 82.67 to 52.37 seconds
-> (36.6%) and sampled peak RSS from 2.692 to 1.941 GB (27.9%). This is well
+> the five-run acceptance median) reduced wall time from 82.67 to 51.59 seconds
+> (37.6%) and sampled peak RSS from 2.692 to 1.945 GB (27.8%). This is well
 > short of the required 50%/50% activation gate.
 > The default therefore remains `legacy`; transformation hot paths still need
 > to move off their private mutable working materialization.
@@ -46,8 +46,8 @@ includes the full all-sector update and compact checkpoint write.
 
 | Metric | Legacy oracle | Compact | Change |
 | --- | ---: | ---: | ---: |
-| End-to-end wall time | 82.67 s | 52.37 s | -36.6% |
-| Sampled peak RSS | 2.692 GB | 1.941 GB | -27.9% |
+| End-to-end wall time | 82.67 s | 51.59 s | -37.6% |
+| Sampled peak RSS | 2.692 GB | 1.945 GB | -27.8% |
 | Datasets | 50,938 | 50,938 | exact |
 | Exchanges | 1,597,616 | 1,597,616 | exact |
 
@@ -123,6 +123,16 @@ reuse it while standalone helper calls keep their scan fallback. This reduced
 the next matched diagnostic to 49.86 seconds for the update, 5.73 seconds for
 metals, and 52.37 seconds end to end, with a 1.941 GB sampled peak and exact
 canonical output.
+
+Metals transport initialization now builds one country/metal-to-row-position
+mapping instead of two 23,345-row `iterrows()` dictionaries containing full
+`Series` objects. The unused duplicate mapping is gone, duplicate keys retain
+the previous last-row precedence, and lookups select the row directly instead
+of scanning every key. Metals validation also reuses the already-cached mining
+share frame rather than reopening the Excel sheet. Metals fell from 5.73 to
+4.74 seconds, the full update to 48.98 seconds, and end-to-end time to 51.59
+seconds. Metals-end RSS was about 28 MB lower; the later sampled process peak
+was 1.945 GB. Canonical output remained exact.
 
 The seed-zero canonical hash is
 `39efcf273da6b52e6c6bdfce8a6546a9a0819a054340fee9062ac2a7fddf808c`.
