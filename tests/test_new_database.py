@@ -872,7 +872,10 @@ def test_load_original_database_reloads_released_base_database_from_cache(tmp_pa
 
 def test_find_cached_db_supports_manifest_bundle(monkeypatch, tmp_path):
     version_token = "".join(map(str, new_database_module.__version__))
-    cache_ref = tmp_path / f"cached_{version_token}_source-db_wo_uncertainty.pickle"
+    cache_ref = (
+        tmp_path
+        / f"cached_{version_token}_v{new_database_module.CACHE_SCHEMA_VERSION}_source-db_wo_uncertainty.pickle"
+    )
     metadata_ref = Path(str(cache_ref).replace(".pickle", " (metadata).pickle"))
     shard = tmp_path / "cached-db.part-a.pickle"
     metadata_shard = tmp_path / "cached-db.metadata.part-a.pickle"

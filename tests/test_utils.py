@@ -8,6 +8,7 @@ from premise.export import exc_codes, fetch_exchange_code
 from premise.geomap import Geomap
 from premise.utils import *
 from premise.fuels.utils import get_crops_properties
+import premise.utils as utils_module
 
 
 def _write_cache_manifest(cache_ref, *shard_files):
@@ -221,6 +222,49 @@ def test_scenario_cache_preserves_regionalized_without_metadata_reload(tmp_path)
     assert scenario["database"][0]["classifications"] == [("CPC", "17100")]
 
 
+def test_scenario_cache_compacts_each_exchange_only_once(tmp_path, monkeypatch):
+    calls = 0
+    original = utils_module._trim_scenario_exchange
+
+    def counted(exchange):
+        nonlocal calls
+        calls += 1
+        return original(exchange)
+
+    monkeypatch.setattr(utils_module, "_trim_scenario_exchange", counted)
+    database = [
+        {
+            "name": "market for test",
+            "reference product": "test product",
+            "location": "GLO",
+            "unit": "kilogram",
+            "exchanges": [
+                {
+                    "name": "market for test",
+                    "product": "test product",
+                    "location": "GLO",
+                    "unit": "kilogram",
+                    "amount": 1.0,
+                    "type": "production",
+                    "comment": "metadata",
+                },
+                {
+                    "name": "input",
+                    "product": "input",
+                    "location": "GLO",
+                    "unit": "kilogram",
+                    "amount": 2.0,
+                    "type": "technosphere",
+                },
+            ],
+        }
+    ]
+
+    create_scenario_cache(database, tmp_path / "scenario-cache.pickle")
+
+    assert calls == 2
+
+
 def test_create_cache_writes_legacy_database_and_manifest_metadata(tmp_path):
     cache_ref = tmp_path / "db-cache.pickle"
     database = [
@@ -254,10 +298,63 @@ def test_create_cache_writes_legacy_database_and_manifest_metadata(tmp_path):
         Path(str(cache_ref).replace(".pickle", " (metadata).pickle"))
     )
     assert load_cached_database(cache_ref) == trimmed
+    assert "comment" not in trimmed[0]
     assert trimmed[0]["classifications"] == [("CPC", "12345")]
     assert list(iter_cached_metadata(metadata_ref))[0] == {
-        ("market for test", "test product", "GLO"): {"foo": "bar"}
+        ("market for test", "test product", "GLO"): {
+            "comment": "hello",
+            "foo": "bar",
+        }
     }
+
+
+def test_create_cache_keeps_runtime_comments_used_for_cdr_classification(tmp_path):
+    cache_ref = tmp_path / "db-cache.pickle"
+    database = [
+        {
+            "name": "direct air capture",
+            "reference product": "carbon dioxide",
+            "location": "GLO",
+            "unit": "kilogram",
+            "comment": "This dataset supplies heat pump heat.",
+            "exchanges": [],
+        }
+    ]
+
+    trimmed, metadata_ref = create_cache(database, cache_ref)
+
+    assert trimmed[0]["comment"] == "This dataset supplies heat pump heat."
+    assert list(iter_cached_metadata(metadata_ref)) == [{}]
+
+
+def test_load_database_merges_source_and_scenario_comment_metadata(tmp_path):
+    scenario_db = tmp_path / "scenario-db.pickle"
+    source_metadata_ref = tmp_path / "source-metadata.pickle"
+    scenario_metadata_ref = tmp_path / "scenario-metadata.pickle"
+    key = ("market for test", "test product", "GLO")
+    dataset = {
+        "name": key[0],
+        "reference product": key[1],
+        "location": key[2],
+        "unit": "kilogram",
+        "exchanges": [],
+    }
+
+    with open(scenario_db, "wb") as file:
+        pickle.dump([dataset], file)
+    with open(source_metadata_ref, "wb") as file:
+        pickle.dump({key: {"comment": "Source comment"}}, file)
+    with open(scenario_metadata_ref, "wb") as file:
+        pickle.dump({key: {"comment": "Scenario update"}}, file)
+
+    scenario = {
+        "database filepath": scenario_db,
+        "database metadata cache filepath": source_metadata_ref,
+        "database metadata filepath": scenario_metadata_ref,
+    }
+    loaded = load_database(scenario, original_database=[], delete=False)
+
+    assert loaded["database"][0]["comment"] == "Source comment. Scenario update"
 
 
 def test_load_database_restores_classifications_from_legacy_metadata(tmp_path):

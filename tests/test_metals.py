@@ -6,8 +6,10 @@ from premise.metals import (
     Metals,
     PostAllocationCorrectionError,
     correct_metal_resource_exchanges,
+    extract_exact_filter_values,
     extract_reference_products_from_filter,
     is_secondary_metal_supply_exchange,
+    matches_filter_query,
 )
 
 
@@ -72,6 +74,92 @@ def test_extract_reference_products_from_filter_handles_either_expression():
         "lithium carbonate, battery grade",
         "lithium carbonate",
     ]
+
+
+@pytest.mark.parametrize(
+    ("value", "query", "expected"),
+    [
+        ("copper mine operation", {"contains": "mine"}, True),
+        ("copper mine operation", {"equals": "copper mine operation"}, True),
+        ("copper mine operation", {"startswith": "copper"}, True),
+        (
+            "copper mine operation",
+            {"all": [{"contains": "copper"}, {"contains": "mine"}]},
+            True,
+        ),
+        (
+            "copper mine operation",
+            {"either": [{"equals": "other"}, {"contains": "mine"}]},
+            True,
+        ),
+        ("copper mine operation", {"contains": "market"}, False),
+    ],
+)
+def test_matches_filter_query(value, query, expected):
+    assert matches_filter_query(value, query) is expected
+
+
+def test_extract_exact_filter_values_handles_boolean_expressions():
+    assert extract_exact_filter_values(
+        {"either": [{"equals": "copper"}, {"equals": "zinc"}]}
+    ) == {"copper", "zinc"}
+    assert extract_exact_filter_values({"contains": "copper"}) is None
+
+
+def test_metal_filter_lookup_uses_exact_activity_index():
+    copper = market_dataset("copper mine", "copper", "GLO", [])
+    zinc = market_dataset("zinc mine", "zinc", "GLO", [])
+    metals = object.__new__(Metals)
+    metals.database = [zinc, copper]
+    metals.build_db_indexes()
+
+    assert metals.get_datasets_matching_filters(
+        {"equals": "copper mine"}, {"equals": "copper"}
+    ) == [copper]
+    assert metals.get_datasets_matching_filters(
+        {"contains": "copper"}, {"equals": "copper"}
+    ) == [copper]
+    assert metals.get_datasets_matching_filters(
+        {"either": [{"equals": "copper mine"}, {"equals": "zinc mine"}]},
+        {"either": [{"equals": "copper"}, {"equals": "zinc"}]},
+    ) == [zinc, copper]
+
+
+def test_mining_share_dataset_membership_is_cached_but_returned_as_a_copy(
+    monkeypatch,
+):
+    dataset = {
+        "name": "copper mine operation",
+        "reference product": "copper",
+        "location": "GLO",
+        "unit": "kilogram",
+        "exchanges": [biosphere_resource("Copper", 1.0)],
+    }
+    dataframe = pd.DataFrame(
+        {
+            "Work done": ["Yes"],
+            "Process": ["{'contains': 'copper mine'}"],
+            "Reference product": ["{'equals': 'copper'}"],
+        }
+    )
+    calls = 0
+
+    def load_mapping(_):
+        nonlocal calls
+        calls += 1
+        return dataframe.copy()
+
+    monkeypatch.setattr("premise.metals.load_mining_shares_mapping", load_mapping)
+    metals = object.__new__(Metals)
+    metals.database = [dataset]
+    metals.version = "3.12"
+
+    first = metals.get_mining_share_dataset_ids()
+    first.clear()
+    second = metals.get_mining_share_dataset_ids()
+
+    assert second == {id(dataset)}
+    assert calls == 1
 
 
 def test_is_secondary_metal_supply_exchange_matches_recovery_terms():

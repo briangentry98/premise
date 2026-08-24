@@ -1,7 +1,7 @@
 # content of test_activity_maps.py
 import pytest
 
-from premise.activity_maps import InventorySet
+from premise.activity_maps import InventorySet, act_fltr
 
 dummy_minimal_db = [
     {
@@ -58,6 +58,34 @@ def test_length_dict():
     assert len(maps.generate_powerplant_map()) > 0
     assert len(maps.generate_fuel_map()) > 0
     assert len(maps.generate_cement_map()) > 0
+
+
+def test_act_fltr_preserves_or_includes_and_excludes_any_mask_match():
+    database = [
+        {"name": "electricity production, coal", "location": "DE"},
+        {"name": "electricity production, gas", "location": "US"},
+        {"name": "heat production, coal", "location": "DE"},
+    ]
+
+    result = act_fltr(
+        database,
+        fltr={"name": ["electricity", "heat"], "location": ["DE", "FR"]},
+        mask={"name": ["heat", "market"]},
+    )
+
+    assert result == [database[0]]
+
+
+def test_generate_sets_supports_filters_without_a_name_prefilter():
+    database = [
+        {"name": "first", "reference product": "target fuel"},
+        {"name": "second", "reference product": "other product"},
+    ]
+    mapping = InventorySet(database).generate_sets_from_filters(
+        {"target": {"fltr": {"reference product": "target"}}}
+    )
+
+    assert mapping == {"target": [database[0]]}
 
 
 def test_image_cdr_map_includes_cement_biogenic_ccs_variant():

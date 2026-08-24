@@ -35,6 +35,7 @@ from .geomap import Geomap
 FUELS_PROPERTIES = VARIABLES_DIR / "fuels.yaml"
 EFFICIENCY_RATIO_SOLAR_PV = DATA_DIR / "renewables" / "efficiency_solar_PV.csv"
 CACHE_MANIFEST_SUFFIX = ".manifest.json"
+CACHE_SCHEMA_VERSION = 2
 
 
 def rescale_exchanges(
@@ -810,13 +811,15 @@ def load_database(
             delete_cache_ref(filepath)
 
     if load_metadata:
-        if "database metadata filepath" in scenario:
-            filepaths = [scenario["database metadata filepath"]]
-        else:
-            filepaths = [
-                scenario["database metadata cache filepath"],
-                scenario["inventories metadata cache filepath"],
-            ]
+        filepaths = [
+            scenario[key]
+            for key in (
+                "database metadata cache filepath",
+                "inventories metadata cache filepath",
+                "database metadata filepath",
+            )
+            if key in scenario
+        ]
         datasets_by_key = {
             (ds["name"], ds["reference product"], ds["location"]): ds
             for ds in scenario["database"]
@@ -1012,7 +1015,6 @@ _CACHE_TRIMMED_DATASET_FIELDS = {
     "location",
     "unit",
     "exchanges",
-    "comment",
     "classifications",
 }
 
@@ -1023,7 +1025,6 @@ _CACHE_METADATA_EXCLUDED_FIELDS = {
     "unit",
     "exchanges",
     "type",
-    "comment",
     "classifications",
 }
 
@@ -1078,6 +1079,10 @@ def _has_cache_value(value: Any) -> bool:
         return False
     if isinstance(value, (list, tuple, dict, set)):
         return True
+    if isinstance(value, (bool, int, np.integer)):
+        return True
+    if isinstance(value, (float, complex, np.floating, np.complexfloating)):
+        return not bool(np.isnan(value))
 
     try:
         return bool(pd.notna(value))
@@ -1095,7 +1100,17 @@ def _metadata_for_cache_dataset(ds: Dict[str, Any]) -> Tuple[tuple, Dict[str, An
         and value != "None"
         and value != "nan"
     }
+    if _is_runtime_cache_comment(ds.get("comment")):
+        # This comment stays with the compact dataset and will be captured by
+        # scenario metadata later; keeping it here as well would duplicate it.
+        metadata.pop("comment", None)
     return key, metadata
+
+
+def _is_runtime_cache_comment(comment: Any) -> bool:
+    """Return whether a source comment is required by runtime transformations."""
+
+    return isinstance(comment, str) and "heat pump" in comment.lower()
 
 
 def _trim_cache_dataset_in_place(ds: Dict[str, Any]) -> Dict[str, Any]:
@@ -1107,6 +1122,11 @@ def _trim_cache_dataset_in_place(ds: Dict[str, Any]) -> Dict[str, Any]:
     trimmed_dataset["exchanges"] = [
         trim_exchanges(exchange) for exchange in trimmed_dataset["exchanges"]
     ]
+    comment = ds.get("comment")
+    if _is_runtime_cache_comment(comment):
+        # CDR inventory classification currently uses this phrase at runtime.
+        # All other source comments are restored from the metadata sidecar.
+        trimmed_dataset["comment"] = comment
     ds.clear()
     ds.update(trimmed_dataset)
     return ds
@@ -1164,6 +1184,39 @@ def _trim_scenario_dataset_in_place(ds: Dict[str, Any]) -> Dict[str, Any]:
     ds.clear()
     ds.update(trimmed_dataset)
     return ds
+
+
+def _compact_scenario_dataset_in_place(
+    ds: Dict[str, Any],
+) -> Tuple[tuple, Dict[str, Any]]:
+    """Compact one scenario dataset and collect sidecar metadata in one pass."""
+
+    key = (ds["name"], ds["reference product"], ds["location"])
+    metadata = {
+        field: value
+        for field, value in ds.items()
+        if field not in _SCENARIO_METADATA_EXCLUDED_FIELDS and _has_cache_value(value)
+    }
+
+    compact_exchanges = []
+    exchange_metadata = []
+    for exchange in ds.get("exchanges", []):
+        compact_exchange, compact_exchange_metadata = _trim_scenario_exchange(exchange)
+        compact_exchanges.append(compact_exchange)
+        exchange_metadata.append(compact_exchange_metadata)
+
+    if any(exchange_metadata):
+        metadata["__exchange_metadata__"] = exchange_metadata
+
+    compact_dataset = {
+        field: value
+        for field, value in ds.items()
+        if field in _SCENARIO_TRIMMED_DATASET_FIELDS
+    }
+    compact_dataset["exchanges"] = compact_exchanges
+    ds.clear()
+    ds.update(compact_dataset)
+    return key, metadata
 
 
 def _chunk_sequence(
@@ -1295,11 +1348,9 @@ def create_scenario_cache(
     metadata_chunk: Dict[tuple, Dict[str, Any]] = {}
 
     for dataset in database:
-        key, metadata = _metadata_for_scenario_dataset(dataset)
+        key, metadata = _compact_scenario_dataset_in_place(dataset)
         if metadata:
             metadata_chunk[key] = metadata
-
-        _trim_scenario_dataset_in_place(dataset)
 
         if len(metadata_chunk) >= metadata_chunk_size:
             shard_path = metadata_cache_file.with_name(

@@ -102,21 +102,16 @@ def act_fltr(
 
     assert len(fltr) > 0, "Filter dict must not be empty."
 
-    # find `act` in `database` that match `fltr`
-    # and do not match `mask`
     filters = []
     for field, value in fltr.items():
         if isinstance(value, list):
-            filters.extend([ws.either(*[ws.contains(field, v) for v in value])])
+            filters.append(ws.either(*[ws.contains(field, item) for item in value]))
         else:
             filters.append(ws.contains(field, value))
 
-    if mask:
-        for field, value in mask.items():
-            if isinstance(value, list):
-                filters.extend([ws.exclude(ws.contains(field, v)) for v in value])
-            else:
-                filters.append(ws.exclude(ws.contains(field, value)))
+    for field, value in mask.items():
+        values = value if isinstance(value, list) else [value]
+        filters.extend(ws.exclude(ws.contains(field, item)) for item in values)
 
     return list(ws.get_many(database, *filters))
 
@@ -541,23 +536,36 @@ class InventorySet:
         database = database or self.database
 
         names: List[str] = []
+        every_filter_has_name = True
 
         for entry in filtr.values():
             if "fltr" in entry:
                 if isinstance(entry["fltr"], dict):
                     if "name" in entry["fltr"]:
-                        names.extend(entry["fltr"]["name"])
+                        name_filter = entry["fltr"]["name"]
+                        if isinstance(name_filter, list):
+                            names.extend(name_filter)
+                        else:
+                            names.append(name_filter)
+                    else:
+                        every_filter_has_name = False
                 elif isinstance(entry["fltr"], list):
                     names.extend(entry["fltr"])
                 else:
                     names.append(entry["fltr"])
+            else:
+                every_filter_has_name = False
 
-        subset = list(
-            ws.get_many(
-                database,
-                ws.either(*[ws.contains("name", name) for name in names]),
+        unique_names = tuple(dict.fromkeys(names))
+        if unique_names and every_filter_has_name:
+            subset = list(
+                ws.get_many(
+                    database,
+                    ws.either(*[ws.contains("name", name) for name in unique_names]),
+                )
             )
-        )
+        else:
+            subset = database
 
         techs = {
             tech: act_fltr(subset, fltr.get("fltr"), fltr.get("mask"))

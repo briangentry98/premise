@@ -58,6 +58,7 @@ from .scenario_array import (
 from .steel import _update_steel
 from .transport import _update_vehicles
 from .utils import (
+    CACHE_SCHEMA_VERSION,
     cache_ref_exists,
     database_metadata,
     clear_existing_cache,
@@ -758,7 +759,7 @@ class NewDatabase:
 
         file_name = (
             DIR_CACHED_DB
-            / f"cached_{''.join(tuple(map(str, __version__)))}_{db_name.strip().lower()}_{uncertainty_data}.pickle"
+            / f"cached_{''.join(tuple(map(str, __version__)))}_v{CACHE_SCHEMA_VERSION}_{db_name.strip().lower()}_{uncertainty_data}.pickle"
         )
 
         # check that file path leads to an existing file
@@ -802,7 +803,7 @@ class NewDatabase:
 
         file_name = (
             DIR_CACHED_DB
-            / f"cached_{''.join(tuple(map(str, __version__)))}_{db_name.strip().lower()}_{uncertainty_data}_inventories.pickle"
+            / f"cached_{''.join(tuple(map(str, __version__)))}_v{CACHE_SCHEMA_VERSION}_{db_name.strip().lower()}_{uncertainty_data}_inventories.pickle"
         )
 
         # check that file path leads to an existing file

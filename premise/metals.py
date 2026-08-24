@@ -423,7 +423,8 @@ def load_metals_transport():
     return df
 
 
-def load_mining_shares_mapping(ei_version="312"):
+@lru_cache(maxsize=None)
+def _load_mining_shares_mapping(ei_version="3.12"):
     """
     Load mapping between mining shares from the different sources and ecoinvent
     """
@@ -454,6 +455,17 @@ def load_mining_shares_mapping(ei_version="312"):
         )
 
     return df
+
+
+def load_mining_shares_mapping(ei_version="3.12"):
+    """Return an isolated copy of the cached mining-share mapping."""
+
+    normalized_version = {
+        "310": "3.10",
+        "311": "3.11",
+        "312": "3.12",
+    }.get(str(ei_version), str(ei_version))
+    return _load_mining_shares_mapping(normalized_version).copy(deep=True)
 
 
 def load_primary_secondary_split():
@@ -676,6 +688,81 @@ def build_ws_filter(field: str, query: dict):
         raise ValueError(f"No valid filters provided for field {field}")
 
     return filters
+
+
+def matches_filter_query(value: str, query) -> bool:
+    """Evaluate a mining-share filter without constructing Wurst predicates."""
+
+    if isinstance(query, list):
+        for item in query:
+            if not matches_filter_query(value, item):
+                return False
+        return True
+
+    if not isinstance(query, dict):
+        raise ValueError(f"Invalid filter query: {query!r}")
+
+    found_operator = False
+    for operator, expected in query.items():
+        if expected == "":
+            continue
+        found_operator = True
+        if operator == "contains":
+            if expected not in value:
+                return False
+        elif operator == "equals":
+            if value != expected:
+                return False
+        elif operator == "startswith":
+            if not value.startswith(expected):
+                return False
+        elif operator == "all":
+            for item in expected:
+                if not matches_filter_query(value, item):
+                    return False
+        elif operator == "either":
+            for item in expected:
+                if matches_filter_query(value, item):
+                    break
+            else:
+                return False
+        else:
+            raise ValueError(f"Unsupported operator {operator} in query {query}")
+
+    if not found_operator:
+        raise ValueError(f"No valid filters provided in query {query}")
+    return True
+
+
+def extract_exact_filter_values(query) -> Optional[Set[str]]:
+    """Return exact values represented by a filter, or ``None`` if not exact."""
+
+    if isinstance(query, list):
+        values = None
+        for item in query:
+            item_values = extract_exact_filter_values(item)
+            if item_values is None:
+                return None
+            values = item_values if values is None else values & item_values
+        return values
+
+    if not isinstance(query, dict) or len(query) != 1:
+        return None
+
+    operator, expected = next(iter(query.items()))
+    if operator == "equals" and expected != "":
+        return {expected}
+    if operator == "either":
+        values = set()
+        for item in expected:
+            item_values = extract_exact_filter_values(item)
+            if item_values is None:
+                return None
+            values.update(item_values)
+        return values
+    if operator == "all":
+        return extract_exact_filter_values(expected)
+    return None
 
 
 def extract_reference_products_from_filter(value) -> List[str]:
@@ -1709,6 +1796,10 @@ class Metals(BaseTransformation):
 
     def get_mining_share_dataset_ids(self) -> Set[int]:
         """Return dataset object IDs matched by the mining-share mapping."""
+        cached = getattr(self, "_mining_share_dataset_ids_cache", None)
+        if cached is not None:
+            return set(cached)
+
         dataframe = load_mining_shares_mapping(self.version)
         dataframe = dataframe.loc[dataframe["Work done"] == "Yes"]
 
@@ -1719,16 +1810,15 @@ class Metals(BaseTransformation):
             try:
                 proc_filter = ast.literal_eval(row["Process"])
                 ref_prod_filter = ast.literal_eval(row["Reference product"])
-                filters = build_ws_filter("name", proc_filter) + build_ws_filter(
-                    "reference product", ref_prod_filter
-                )
             except (ValueError, SyntaxError) as exc:
                 logger.warning(
                     f"[Metals] Invalid mining-share mapping filter skipped: {exc}"
                 )
                 continue
 
-            for dataset in ws.get_many(self.database, *filters):
+            for dataset in self.get_datasets_matching_filters(
+                proc_filter, ref_prod_filter
+            ):
                 if is_market_dataset(dataset):
                     continue
                 if get_in_ground_resource_exchanges(
@@ -1736,7 +1826,8 @@ class Metals(BaseTransformation):
                 ) or can_add_missing_target_resource_exchange(dataset):
                     dataset_ids.add(id(dataset))
 
-        return dataset_ids
+        self._mining_share_dataset_ids_cache = frozenset(dataset_ids)
+        return set(self._mining_share_dataset_ids_cache)
 
     def get_mapped_metal_dataset_ids(self) -> Set[int]:
         """Return mapped dataset IDs with one unambiguous target resource flow."""
@@ -1823,6 +1914,41 @@ class Metals(BaseTransformation):
             self.db_index[name][ref_prod].append(ds)
             self.db_index_full[name][ref_prod][location].append(ds)
 
+    def get_datasets_matching_filters(self, process_filter, reference_product_filter):
+        """Use the activity index for exact filters and scan only as fallback."""
+
+        names = extract_exact_filter_values(process_filter)
+        reference_products = extract_exact_filter_values(reference_product_filter)
+        if (
+            names is not None
+            and reference_products is not None
+            and hasattr(self, "db_index")
+        ):
+            candidates = [
+                dataset
+                for name in names
+                for reference_product in reference_products
+                for dataset in self.db_index.get(name, {}).get(reference_product, [])
+            ]
+            if len(names) == 1 and len(reference_products) == 1:
+                return candidates
+
+            # Wurst yields matches in database order. Preserve that observable
+            # behavior for filters containing several exact alternatives.
+            candidate_ids = {id(dataset) for dataset in candidates}
+            return [
+                dataset for dataset in self.database if id(dataset) in candidate_ids
+            ]
+
+        return [
+            dataset
+            for dataset in self.database
+            if matches_filter_query(dataset.get("name", ""), process_filter)
+            and matches_filter_query(
+                dataset.get("reference product", ""), reference_product_filter
+            )
+        ]
+
     def create_region_specific_markets(self, df: pd.DataFrame) -> List[dict]:
         new_exchanges, new_datasets = [], []
 
@@ -1840,12 +1966,10 @@ class Metals(BaseTransformation):
                 continue
 
             try:
-                filters = build_ws_filter("name", proc_filter) + build_ws_filter(
-                    "reference product", ref_prod_filter
+                subset = self.get_datasets_matching_filters(
+                    proc_filter, ref_prod_filter
                 )
-                subset = list(ws.get_many(self.database, *filters))
-
-            except Exception as e:
+            except (TypeError, ValueError) as e:
                 logger.error(
                     f"[Metals] Error fetching datasets for process '{proc_filter}' and reference product '{ref_prod_filter}': {e}"
                 )
