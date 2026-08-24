@@ -1,6 +1,7 @@
 import pytest
 import pandas as pd
 
+import premise.metals as metals_module
 from premise.filesystem_constants import DATA_DIR
 from premise.metals import (
     Metals,
@@ -221,6 +222,35 @@ def test_mining_share_dataset_membership_is_cached_but_returned_as_a_copy(
 
     assert second == {id(dataset)}
     assert calls == 1
+
+
+def test_in_ground_resource_exchange_index_scans_each_dataset_once(monkeypatch):
+    resource_exchange = biosphere_resource("Copper", 1.0)
+    copper = market_dataset(
+        "copper mine operation", "copper", "GLO", [resource_exchange]
+    )
+    empty = market_dataset("market for copper", "copper", "GLO", [])
+    original = metals_module.get_in_ground_resource_exchanges
+    scanned = []
+
+    def record_scan(dataset):
+        scanned.append(id(dataset))
+        return original(dataset)
+
+    monkeypatch.setattr(metals_module, "get_in_ground_resource_exchanges", record_scan)
+    metals = object.__new__(Metals)
+    metals.database = [copper, empty]
+
+    metals.build_in_ground_resource_exchange_index()
+
+    first = metals._get_in_ground_resource_exchanges(copper)
+    repeated = metals._get_in_ground_resource_exchanges(copper)
+    no_resources = metals._get_in_ground_resource_exchanges(empty)
+
+    assert scanned == [id(copper), id(empty)]
+    assert first is repeated
+    assert first == [resource_exchange]
+    assert no_resources == []
 
 
 def test_is_secondary_metal_supply_exchange_matches_recovery_terms():

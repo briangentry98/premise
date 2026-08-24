@@ -7,8 +7,8 @@
 > warm IMAGE SSP2-M 2050 all-sector differential run it produced the exact same
 > semantic hash as the legacy store (`39efcf273da6b52e6c6bdfce8a6546a9a0819a054340fee9062ac2a7fddf808c`),
 > with 50,938 datasets and 1,597,616 exchanges. A matched diagnostic run (not
-> the five-run acceptance median) reduced wall time from 82.67 to 52.65 seconds
-> (36.3%) and sampled peak RSS from 2.692 to 1.941 GB (27.9%). This is well
+> the five-run acceptance median) reduced wall time from 82.67 to 52.37 seconds
+> (36.6%) and sampled peak RSS from 2.692 to 1.941 GB (27.9%). This is well
 > short of the required 50%/50% activation gate.
 > The default therefore remains `legacy`; transformation hot paths still need
 > to move off their private mutable working materialization.
@@ -46,7 +46,7 @@ includes the full all-sector update and compact checkpoint write.
 
 | Metric | Legacy oracle | Compact | Change |
 | --- | ---: | ---: | ---: |
-| End-to-end wall time | 82.67 s | 52.65 s | -36.3% |
+| End-to-end wall time | 82.67 s | 52.37 s | -36.6% |
 | Sampled peak RSS | 2.692 GB | 1.941 GB | -27.9% |
 | Datasets | 50,938 | 50,938 | exact |
 | Exchanges | 1,597,616 | 1,597,616 | exact |
@@ -114,6 +114,15 @@ and uncommon key/value types retain the generic `deepcopy` fallback. This cut
 millions of recursive clone calls. A second matched diagnostic reached 50.13
 seconds for the update, 5.93 seconds for metals, 52.65 seconds end to end, and a
 1.941 GB sampled peak, with the exact canonical hash and counts preserved.
+
+Metals post-allocation correction now builds one sparse index of activities
+with kilogram in-ground natural-resource exchanges. Its mapping retains the
+original exchange dictionaries, stores no entries for the overwhelmingly common
+empty case, and is rebuilt before each correction pass. Nine correction helpers
+reuse it while standalone helper calls keep their scan fallback. This reduced
+the next matched diagnostic to 49.86 seconds for the update, 5.73 seconds for
+metals, and 52.37 seconds end to end, with a 1.941 GB sampled peak and exact
+canonical output.
 
 The seed-zero canonical hash is
 `39efcf273da6b52e6c6bdfce8a6546a9a0819a054340fee9062ac2a7fddf808c`.

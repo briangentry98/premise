@@ -1092,23 +1092,32 @@ def is_metal_resource_flow(flow_name: str) -> bool:
     return canonical_resource_flow_label(flow_name) in get_metal_resource_flow_labels()
 
 
-def get_matching_resource_exchanges(dataset: dict) -> List[dict]:
+def get_matching_resource_exchanges(
+    dataset: dict, resource_exchanges: Optional[List[dict]] = None
+) -> List[dict]:
     reference_product = dataset.get("reference product", "")
+    if resource_exchanges is None:
+        resource_exchanges = get_in_ground_resource_exchanges(dataset)
     return [
         exc
-        for exc in get_in_ground_resource_exchanges(dataset)
+        for exc in resource_exchanges
         if resource_flow_matches_reference_product(
             exc.get("name", ""), reference_product
         )
     ]
 
 
-def get_content_factor_resource_exchanges(dataset: dict) -> List[dict]:
+def get_content_factor_resource_exchanges(
+    dataset: dict, resource_exchanges: Optional[List[dict]] = None
+) -> List[dict]:
     """Return resource exchanges with an explicit product-content factor."""
     reference_product = dataset.get("reference product", "")
     matches = []
 
-    for exc in get_in_ground_resource_exchanges(dataset):
+    if resource_exchanges is None:
+        resource_exchanges = get_in_ground_resource_exchanges(dataset)
+
+    for exc in resource_exchanges:
         if not is_metal_resource_flow(exc.get("name", "")):
             continue
 
@@ -1121,14 +1130,18 @@ def get_content_factor_resource_exchanges(dataset: dict) -> List[dict]:
     return matches
 
 
-def get_target_resource_exchanges(dataset: dict) -> List[dict]:
-    content_factor_matches = get_content_factor_resource_exchanges(dataset)
+def get_target_resource_exchanges(
+    dataset: dict, resource_exchanges: Optional[List[dict]] = None
+) -> List[dict]:
+    content_factor_matches = get_content_factor_resource_exchanges(
+        dataset, resource_exchanges
+    )
     if len(content_factor_matches) == 1:
         return content_factor_matches
 
     return [
         exc
-        for exc in get_matching_resource_exchanges(dataset)
+        for exc in get_matching_resource_exchanges(dataset, resource_exchanges)
         if is_metal_resource_flow(exc.get("name", ""))
     ]
 
@@ -1175,6 +1188,7 @@ def correct_metal_resource_exchanges(
     strict: bool = False,
     add_missing_target_resource: bool = False,
     target_resource_flow_name: Optional[str] = None,
+    resource_exchanges: Optional[List[dict]] = None,
 ) -> bool:
     """
     Correct target in-ground resource content and zero co-mined resources.
@@ -1182,7 +1196,8 @@ def correct_metal_resource_exchanges(
     Returns True when a dataset was processed by the correction. Non-market
     datasets without a resolvable target flow are skipped unless strict=True.
     """
-    resource_exchanges = get_in_ground_resource_exchanges(dataset)
+    if resource_exchanges is None:
+        resource_exchanges = get_in_ground_resource_exchanges(dataset)
 
     if is_market_dataset(dataset):
         return False
@@ -1197,6 +1212,7 @@ def correct_metal_resource_exchanges(
             exchange_flow_name = target_resource_flow_name or flow_name
             target_exchange = make_target_resource_exchange(exchange_flow_name, 1.0)
             dataset.setdefault("exchanges", []).append(target_exchange)
+            resource_exchanges.append(target_exchange)
 
             return True
 
@@ -1217,8 +1233,10 @@ def correct_metal_resource_exchanges(
             exc["amount"] = 0.0
         return True
 
-    matching_resource_exchanges = get_matching_resource_exchanges(dataset)
-    matches = get_target_resource_exchanges(dataset)
+    matching_resource_exchanges = get_matching_resource_exchanges(
+        dataset, resource_exchanges
+    )
+    matches = get_target_resource_exchanges(dataset, resource_exchanges)
 
     if matching_resource_exchanges and not matches:
         return False
@@ -1590,6 +1608,7 @@ class Metals(BaseTransformation):
         zero.
         """
 
+        self.build_in_ground_resource_exchange_index()
         considered_dataset_ids = self.get_considered_metal_dataset_ids()
         strict_dataset_ids = self.get_mapped_metal_dataset_ids()
         missing_target_dataset_ids = self.get_missing_target_resource_dataset_ids(
@@ -1618,7 +1637,26 @@ class Metals(BaseTransformation):
                 strict=id(ds) in strict_dataset_ids,
                 add_missing_target_resource=id(ds) in missing_target_dataset_ids,
                 target_resource_flow_name=target_resource_flow_name,
+                resource_exchanges=self._get_in_ground_resource_exchanges(ds),
             )
+
+    def build_in_ground_resource_exchange_index(self) -> None:
+        """Index qualifying in-ground exchanges once for the correction pass."""
+
+        index = {}
+        for dataset in self.database:
+            resource_exchanges = get_in_ground_resource_exchanges(dataset)
+            if resource_exchanges:
+                index[id(dataset)] = resource_exchanges
+        self._in_ground_resource_exchange_index = index
+
+    def _get_in_ground_resource_exchanges(self, dataset: dict) -> List[dict]:
+        """Return indexed resource exchanges or use the standalone fallback."""
+
+        index = getattr(self, "_in_ground_resource_exchange_index", None)
+        if index is None:
+            return get_in_ground_resource_exchanges(dataset)
+        return index.get(id(dataset), [])
 
     def get_considered_metal_dataset_ids(self) -> Set[int]:
         """
@@ -1634,7 +1672,7 @@ class Metals(BaseTransformation):
             if is_market_dataset(dataset) or id(dataset) in dataset_ids:
                 continue
 
-            resource_exchanges = get_in_ground_resource_exchanges(dataset)
+            resource_exchanges = self._get_in_ground_resource_exchanges(dataset)
             if resource_exchanges and (
                 has_metal_extraction_context(dataset)
                 or has_resolved_target_resource_context(dataset)
@@ -1656,7 +1694,7 @@ class Metals(BaseTransformation):
         return {
             exc.get("name", "")
             for dataset in self.database
-            for exc in get_in_ground_resource_exchanges(dataset)
+            for exc in self._get_in_ground_resource_exchanges(dataset)
             if exc.get("name")
         }
 
@@ -1686,13 +1724,19 @@ class Metals(BaseTransformation):
         return provider_index
 
     @staticmethod
-    def dataset_has_target_resource_exchange(dataset: dict, flow_name: str) -> bool:
+    def dataset_has_target_resource_exchange(
+        dataset: dict,
+        flow_name: str,
+        resource_exchanges: Optional[List[dict]] = None,
+    ) -> bool:
         """Return True if a dataset directly extracts the target resource."""
         flow_label = canonical_resource_flow_label(flow_name)
+        if resource_exchanges is None:
+            resource_exchanges = get_in_ground_resource_exchanges(dataset)
         return any(
             canonical_resource_flow_label(exc.get("name", "")) == flow_label
             and abs(float(exc.get("amount", 0.0))) > 0
-            for exc in get_in_ground_resource_exchanges(dataset)
+            for exc in resource_exchanges
         )
 
     def target_resource_is_supplied_upstream(
@@ -1737,7 +1781,11 @@ class Metals(BaseTransformation):
                     continue
                 if dataset_may_carry_target_resource(
                     provider, flow_name
-                ) and self.dataset_has_target_resource_exchange(provider, flow_name):
+                ) and self.dataset_has_target_resource_exchange(
+                    provider,
+                    flow_name,
+                    self._get_in_ground_resource_exchanges(provider),
+                ):
                     cache[cache_key] = True
                     return True
                 if self.target_resource_is_supplied_upstream(
@@ -1774,7 +1822,7 @@ class Metals(BaseTransformation):
         for dataset in self.database:
             if id(dataset) not in strict_dataset_ids:
                 continue
-            if get_in_ground_resource_exchanges(dataset):
+            if self._get_in_ground_resource_exchanges(dataset):
                 continue
             if not can_add_missing_target_resource_exchange(dataset):
                 continue
@@ -1820,7 +1868,7 @@ class Metals(BaseTransformation):
             ):
                 if is_market_dataset(dataset):
                     continue
-                if get_in_ground_resource_exchanges(
+                if self._get_in_ground_resource_exchanges(
                     dataset
                 ) or can_add_missing_target_resource_exchange(dataset):
                     dataset_ids.add(id(dataset))
@@ -1836,7 +1884,9 @@ class Metals(BaseTransformation):
         for dataset in self.database:
             if id(dataset) not in mining_share_dataset_ids:
                 continue
-            matches = get_target_resource_exchanges(dataset)
+            matches = get_target_resource_exchanges(
+                dataset, self._get_in_ground_resource_exchanges(dataset)
+            )
             matched_names = {exc.get("name") for exc in matches}
             if len(matched_names) == 1 or can_add_missing_target_resource_exchange(
                 dataset
