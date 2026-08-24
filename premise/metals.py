@@ -20,6 +20,7 @@ import yaml
 
 from .export import biosphere_flows_dictionary
 from .logger import create_logger
+from .inventory_store import get_scenario_inventory, replace_scenario_inventory
 from .transformation import (
     BaseTransformation,
     Dict,
@@ -343,7 +344,7 @@ class PostAllocationCorrectionError(ValueError):
 def _update_metals(scenario, version, system_model):
 
     metals = Metals(
-        database=scenario["database"],
+        database=get_scenario_inventory(scenario),
         model=scenario["model"],
         pathway=scenario["pathway"],
         iam_data=scenario["iam data"],
@@ -357,7 +358,7 @@ def _update_metals(scenario, version, system_model):
     metals.create_metal_markets()
     metals.update_metals_use_in_database()
     metals.relink_datasets()
-    scenario["database"] = metals.database
+    replace_scenario_inventory(scenario, metals.database)
     scenario["cache"] = metals.cache
     scenario["index"] = metals.index
 
@@ -819,6 +820,7 @@ def is_secondary_metal_supply_exchange(
     return any(term in text for term in SECONDARY_METAL_SUPPLY_TERMS)
 
 
+@lru_cache(maxsize=None)
 def normalize_resource_label(value: str) -> str:
     """Normalize resource labels enough for conservative fuzzy matching."""
     value = value or ""
@@ -827,22 +829,25 @@ def normalize_resource_label(value: str) -> str:
     return " ".join(value.split())
 
 
+@lru_cache(maxsize=None)
 def canonical_resource_flow_label(value: str) -> str:
     """Return a canonical metal label for version-specific resource flows."""
     label = normalize_resource_label(value)
     return RESOURCE_FLOW_ALIASES.get(label, label)
 
 
+@lru_cache(maxsize=None)
 def resource_label_tokens(value: str) -> Set[str]:
-    return {
+    return frozenset(
         token
         for token in normalize_resource_label(value).split()
         if len(token) > 1
         and not token.isdigit()
         and token not in RESOURCE_MATCH_STOPWORDS
-    }
+    )
 
 
+@lru_cache(maxsize=None)
 def get_metal_bearing_product_content_factor(
     reference_product: str, flow_name: str
 ) -> tuple[Optional[float], str]:
@@ -873,6 +878,7 @@ def get_metal_bearing_product_content_factor(
     return None, ""
 
 
+@lru_cache(maxsize=None)
 def is_pure_target_resource_product(reference_product: str, flow_name: str) -> bool:
     """Return True if the reference product denotes the target metal itself."""
     product_label = normalize_resource_label(reference_product)
@@ -946,6 +952,7 @@ def has_resolved_target_resource_context(dataset: dict) -> bool:
     return target_resource_amount_is_resolved(dataset, matches[0])
 
 
+@lru_cache(maxsize=None)
 def is_downstream_attributed_resource_carrier(reference_product: str) -> bool:
     """Return True for generic intermediates whose metal flows are handled downstream."""
     product_label = normalize_resource_label(reference_product)
@@ -970,6 +977,7 @@ def is_downstream_attributed_resource_carrier_dataset(dataset: dict) -> bool:
     }
 
 
+@lru_cache(maxsize=None)
 def get_reference_product_resource_flow_name(reference_product: str) -> Optional[str]:
     """Return the metal resource flow represented by a pure metal product."""
     product_tokens = resource_label_tokens(reference_product)
@@ -1047,6 +1055,7 @@ def get_in_ground_resource_exchanges(dataset: dict) -> List[dict]:
     ]
 
 
+@lru_cache(maxsize=None)
 def get_resource_label_variants(reference_product: str) -> Set[str]:
     """Return product-derived labels that may identify the target resource flow."""
     variants = {normalize_resource_label(reference_product)}
@@ -1058,9 +1067,10 @@ def get_resource_label_variants(reference_product: str) -> Set[str]:
     tokens = resource_label_tokens(reference_product)
     variants.update(tokens)
 
-    return {variant for variant in variants if variant}
+    return frozenset(variant for variant in variants if variant)
 
 
+@lru_cache(maxsize=None)
 def resource_flow_matches_reference_product(
     flow_name: str, reference_product: str
 ) -> bool:
@@ -1090,6 +1100,7 @@ def get_metal_resource_flow_labels() -> Set[str]:
     return {normalize_resource_label(name) for name in METAL_RESOURCE_FLOW_NAMES}
 
 
+@lru_cache(maxsize=None)
 def is_metal_resource_flow(flow_name: str) -> bool:
     return canonical_resource_flow_label(flow_name) in get_metal_resource_flow_labels()
 
@@ -1135,6 +1146,7 @@ def get_target_resource_exchanges(dataset: dict) -> List[dict]:
     ]
 
 
+@lru_cache(maxsize=None)
 def product_label_may_carry_target_resource(product_label: str, flow_name: str) -> bool:
     """Return True when a product label denotes the target resource or carrier."""
     if is_downstream_attributed_resource_carrier(product_label):

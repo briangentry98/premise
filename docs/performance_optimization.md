@@ -1,5 +1,18 @@
 # Runtime and resident-memory optimization
 
+> **Premise 3.0 InventoryStore status (24 August 2026):** The store contract,
+> immutable records, atomic transactions, copy-on-write forks, ordered indexes,
+> Arrow checkpoints, private scenario ownership, and explicit materialization
+> API are implemented. The compact backend is still opt-in. On the current
+> warm IMAGE SSP2-M 2050 all-sector differential run it produced the exact same
+> semantic hash as the legacy store (`39efcf273da6b52e6c6bdfce8a6546a9a0819a054340fee9062ac2a7fddf808c`),
+> with 50,938 datasets and 1,597,616 exchanges. A matched diagnostic run (not
+> the five-run acceptance median) reduced wall time from 82.67 to 61.07 seconds
+> (26.1%) and sampled peak RSS from 2.692 to 1.970 GB (26.8%). This is well
+> short of the required 50%/50% activation gate.
+> The default therefore remains `legacy`; transformation hot paths still need
+> to move off their private mutable working materialization.
+
 This document records the profiling baseline, the first optimization pass, and
 the architectural work that should follow it. The benchmark is a complete
 `NewDatabase.update()` over all sectors for one ecoinvent 3.12 cutoff scenario.
@@ -15,6 +28,7 @@ plaintext IAM file does not.
 ```console
 PYTHONHASHSEED=0 python benchmarks/profile_new_database.py \
   --model remind --pathway SSP1-NPi \
+  --inventory-backend compact \
   --output /tmp/premise-profile.json
 ```
 
@@ -23,6 +37,35 @@ capture. RSS is sampled every 50 ms with `psutil` and cross-checked against
 `resource.getrusage`.
 
 ## Results
+
+### Compact InventoryStore pass
+
+The current IMAGE SSP2-M 2050 diagnostic uses
+`inventory_backend="compact"` explicitly and fixes `PYTHONHASHSEED=0`. It
+includes the full all-sector update and compact checkpoint write.
+
+| Metric | Legacy oracle | Compact | Change |
+| --- | ---: | ---: | ---: |
+| End-to-end wall time | 82.67 s | 61.07 s | -26.1% |
+| Sampled peak RSS | 2.692 GB | 1.970 GB | -26.8% |
+| Datasets | 50,938 | 50,938 | exact |
+| Exchanges | 1,597,616 | 1,597,616 | exact |
+
+The compact checkpoint is 348 MB. Common exchange strings and numeric values
+are dictionary-encoded or typed in batched Arrow record batches; arbitrary
+metadata remains in a lossless per-activity sidecar. Python `float` and `int`
+and NumPy `float32` and `float64` values retain their exact scalar types when a
+checkpoint is reopened. Source and final indexes are lazy, exchange storage is
+dense and ordered, and the final single-scenario build transfers exclusive
+ownership instead of deep-copying the working graph.
+
+The seed-zero canonical hash is
+`39efcf273da6b52e6c6bdfce8a6546a9a0819a054340fee9062ac2a7fddf808c`.
+Compact builds refuse an unfixed hash seed in the benchmark harness so an
+existing order-sensitive transformation cannot be mistaken for a backend
+regression.
+
+### Earlier mutable-inventory optimization pass
 
 The comparison below used Python 3.11 on macOS, a warm source-database cache,
 REMIND SSP1-NPi in 2050, and all sectors. Both revisions used the same source
@@ -83,6 +126,7 @@ database names):
 PYTHONHASHSEED=0 PREMISE_KEY=... python benchmarks/compare_build_outputs.py build \
   --output-dir /tmp/equivalence/baseline \
   --label baseline --revision 691ec672 \
+  --inventory-backend compact \
   --database-name premise-equivalence-baseline
 
 python benchmarks/compare_build_outputs.py compare \

@@ -7,6 +7,7 @@ from collections import defaultdict
 
 from .data_collection import IAMDataCollection
 from .logger import create_logger
+from .inventory_store import get_scenario_inventory, replace_scenario_inventory
 from .transformation import BaseTransformation, ws
 from .utils import rescale_exchanges
 from .validation import SteelValidation
@@ -22,7 +23,7 @@ def _update_steel(scenario, version, system_model):
         return scenario
 
     steel = Steel(
-        database=scenario["database"],
+        database=get_scenario_inventory(scenario),
         model=scenario["model"],
         pathway=scenario["pathway"],
         iam_data=scenario["iam data"],
@@ -37,7 +38,7 @@ def _update_steel(scenario, version, system_model):
     steel.create_steel_production_activities()
     steel.create_steel_markets()
     steel.relink_datasets()
-    scenario["database"] = steel.database
+    replace_scenario_inventory(scenario, steel.database)
     scenario["cache"] = steel.cache
     scenario["index"] = steel.index
 

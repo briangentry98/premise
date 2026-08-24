@@ -8,10 +8,10 @@ import gc
 import inspect
 import logging
 import os
-import pickle
+import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import List, Union
+from typing import List, Literal, Union
 
 import bw2data
 import datapackage
@@ -40,13 +40,27 @@ from .export import (
 )
 from .external import _update_external_scenarios
 from .external_data_validation import check_external_scenarios
-from .filesystem_constants import DIR_CACHED_DB, IAM_OUTPUT_DIR, INVENTORY_DIR
+from .filesystem_constants import (
+    DIR_CACHED_DB,
+    DIR_CACHED_FILES,
+    IAM_OUTPUT_DIR,
+    INVENTORY_DIR,
+)
 from .fuels.base import _update_fuels
 from .heat import _update_heat
 from .inventory_imports import (
     AdditionalInventory,
     BaseInventoryImport,
     DefaultInventory,
+)
+from .inventory_store import (
+    CompactInventoryStore,
+    IndexedInventoryList,
+    InventoryStore,
+    InventoryStoreCorruptionError,
+    InventoryStoreVersionError,
+    ReadOnlyInventoryStore,
+    create_inventory_store,
 )
 from .metals import _update_metals
 from .mining import _update_mining
@@ -65,7 +79,6 @@ from .utils import (
     clear_runtime_caches,
     create_scenario_list,
     delete_all_pickles,
-    dump_database,
     eidb_label,
     hide_messages,
     info_on_utils_functions,
@@ -583,6 +596,7 @@ class NewDatabase:
         use_absolute_efficiency=False,
         biosphere_name: str = "biosphere3",
         generate_reports: bool = True,
+        inventory_backend: Literal["compact", "legacy"] = "legacy",
     ) -> None:
         """
         Initialize the NewDatabase class.
@@ -608,7 +622,12 @@ class NewDatabase:
             It must match a biosphere database in the current Brightway project
             only when exporting to Brightway. Default is "biosphere3".
         :param generate_reports: whether to generate change and summary reports. Default is True.
+        :param inventory_backend: inventory storage implementation. ``"compact"``
+            uses copy-on-write scenario stores; ``"legacy"`` is retained as a
+            differential-testing oracle. The legacy backend remains the default
+            until the compact backend passes the release performance gates.
         """
+        self._inventory_api_active = False
         self.sector_update_methods = None
         self.source = source_db
         self.version = check_db_version(source_version)
@@ -620,6 +639,10 @@ class NewDatabase:
         self.keep_source_db_uncertainty = keep_source_db_uncertainty
         self.biosphere_name = biosphere_name
         self.generate_reports = generate_reports
+        if inventory_backend not in {"compact", "legacy"}:
+            raise ValueError("inventory_backend must be either 'compact' or 'legacy'.")
+        self.inventory_backend = inventory_backend
+        self._source_inventory_store = None
         self.database_cache_filepath = None
         self.inventories_cache_filepath = None
         self._database_is_complete = False
@@ -693,13 +716,13 @@ class NewDatabase:
 
         print("- Extracting source database")
         if use_cached_database:
-            self.database = self.__find_cached_db(source_db)
+            self._database = self.__find_cached_db(source_db)
             for scenario in self.scenarios:
                 scenario["database metadata cache filepath"] = (
                     self.database_metadata_cache_filepath
                 )
         else:
-            self.database = self.__clean_database()
+            self._database = self.__clean_database()
 
         imported_inventory_data = False
 
@@ -711,10 +734,10 @@ class NewDatabase:
                     self.inventories_metadata_cache_filepath
                 )
             if data is not None:
-                self.database.extend(data)
+                self._database.extend(data)
             else:
                 imported_inventory_data = True
-            # A cache miss imports inventories directly into ``self.database``
+            # A cache miss imports inventories directly into ``self._database``
             # before replacing the imported tail with the trimmed cached
             # representation, so the inventory coverage is complete in both the
             # hit and miss cases here and the original form can be reloaded from
@@ -728,7 +751,7 @@ class NewDatabase:
         if self.additional_inventories:
             print("- Importing additional inventories")
             data = self.__import_additional_inventories(self.additional_inventories)
-            self.database.extend(data)
+            self._database.extend(data)
             imported_inventory_data = True
 
         if imported_inventory_data:
@@ -738,7 +761,42 @@ class NewDatabase:
         for scenario in self.scenarios:
             _fetch_iam_data(scenario)
 
+        self._source_inventory_store = create_inventory_store(
+            self._database,
+            backend=self.inventory_backend,
+            scenario_identity="source",
+            take_ownership=True,
+        )
+        # The mutable extraction list is an implementation detail only.  From
+        # this point onward all scenario ownership goes through InventoryStore.
+        self._database = None
+        self._inventory_api_active = True
+
         print("Done!")
+
+    @property
+    def database(self):
+        """The historical mutable inventory attribute has been removed."""
+
+        if not getattr(self, "_inventory_api_active", False):
+            return getattr(self, "_database", None)
+        raise AttributeError(
+            "NewDatabase.database was removed in premise 3.0. Use "
+            "get_inventory_store() for immutable access or "
+            "materialize_inventory() when a real list[dict] is unavoidable "
+            "(materialization has a substantial memory cost)."
+        )
+
+    @database.setter
+    def database(self, value):
+        # A compatibility hook for narrowly constructed internal/test objects.
+        # Fully initialised premise 3.0 instances reject both reads and writes.
+        if getattr(self, "_inventory_api_active", False):
+            raise AttributeError(
+                "NewDatabase.database was removed in premise 3.0; inventory "
+                "mutation must use get_inventory_store(writable=True)."
+            )
+        self._database = value
 
     def __find_cached_db(self, db_name: str) -> List[dict]:
         """
@@ -820,7 +878,7 @@ class NewDatabase:
 
         # else, extract the database, pickle it for next time and return it
         print("Cannot find cached inventories. Will create them now for next time...")
-        inventory_start = len(self.database)
+        inventory_start = len(self._database)
         import_inventories = self.__import_inventories
         if "collect_data" in inspect.signature(import_inventories).parameters:
             import_inventories(collect_data=False)
@@ -828,9 +886,9 @@ class NewDatabase:
             import_inventories()
 
         trimmed_inventories, inventories_metadata_cache_filepath = create_cache(
-            self.database[inventory_start:], file_name
+            self._database[inventory_start:], file_name
         )
-        self.database[inventory_start:] = trimmed_inventories
+        self._database[inventory_start:] = trimmed_inventories
         self.inventories_cache_filepath = resolve_cache_ref(file_name)
         self.inventories_metadata_cache_filepath = inventories_metadata_cache_filepath
         self._reload_original_database_from_cache_for_update = True
@@ -980,7 +1038,7 @@ class NewDatabase:
                 continue
 
             inventory = DefaultInventory(
-                database=self.database,
+                database=self._database,
                 version_in=filepath[1],
                 version_out=self.version,
                 path=filepath[0],
@@ -990,7 +1048,7 @@ class NewDatabase:
             datasets = inventory.merge_inventory()
             if collect_data:
                 data.extend(datasets)
-            self.database.extend(datasets)
+            self._database.extend(datasets)
             unlinked.extend(inventory.list_unlinked)
 
         if len(unlinked) > 0:
@@ -1007,9 +1065,9 @@ class NewDatabase:
 
     def _can_reload_original_database(self) -> bool:
         return (
-            self.database_cache_filepath is not None
-            and self.inventories_cache_filepath is not None
-            and self.additional_inventories is None
+            getattr(self, "database_cache_filepath", None) is not None
+            and getattr(self, "inventories_cache_filepath", None) is not None
+            and getattr(self, "additional_inventories", None) is None
         )
 
     @staticmethod
@@ -1017,8 +1075,12 @@ class NewDatabase:
         return load_cached_database(filepath)
 
     def _load_original_database(self) -> List[dict]:
-        if self.database is not None and self._database_is_complete:
-            return self.database
+        source_store = getattr(self, "_source_inventory_store", None)
+        if source_store is not None:
+            return source_store.materialize(restore_metadata=True)
+
+        if self._database is not None and self._database_is_complete:
+            return self._database
 
         if self._can_reload_original_database():
             database = self._load_pickled_database(self.database_cache_filepath)
@@ -1027,51 +1089,178 @@ class NewDatabase:
             )
             return database
 
-        if self.database is None:
+        if self._database is None:
             raise ValueError(
                 "The original database is not available in memory and cannot be "
                 "reloaded from cache."
             )
 
-        return self.database
+        return self._database
+
+    @staticmethod
+    def _scenario_identity(scenario: dict) -> tuple:
+        external = tuple(
+            item.get("scenario")
+            for item in scenario.get("external scenarios", ())
+            if isinstance(item, dict)
+        )
+        return (
+            scenario.get("model"),
+            scenario.get("pathway"),
+            scenario.get("year"),
+            external,
+        )
+
+    def _ensure_scenario_store(self, scenario: dict) -> InventoryStore:
+        store = scenario.get("_inventory_store")
+        if store is not None:
+            return store
+
+        checkpoint = scenario.get("_inventory_checkpoint")
+        if checkpoint is not None:
+            try:
+                store = InventoryStore.open(checkpoint)
+            except (InventoryStoreCorruptionError, InventoryStoreVersionError):
+                # Never partially load an invalid compact bundle.  A source
+                # graph can safely recreate an unmodified scenario; callers
+                # with a transformed corrupt scenario receive the original
+                # validation error because its overlay cannot be reconstructed.
+                if scenario.get("applied functions"):
+                    raise
+                scenario.pop("_inventory_checkpoint", None)
+                checkpoint = None
+                store = None
+        else:
+            store = None
+
+        if store is None:
+            source_store = getattr(self, "_source_inventory_store", None)
+            if source_store is None:
+                # Supports narrowly constructed NewDatabase instances in tools
+                # and tests without reintroducing a public mutable attribute.
+                source_store = create_inventory_store(
+                    self._load_original_database(),
+                    backend=getattr(self, "inventory_backend", "legacy"),
+                    scenario_identity="source",
+                )
+                self._source_inventory_store = source_store
+            store = source_store.fork(self._scenario_identity(scenario))
+        scenario["_inventory_store"] = store
+        return store
+
+    def get_inventory_store(
+        self,
+        scenario: int = 0,
+        *,
+        writable: bool = False,
+    ) -> InventoryStore:
+        """Return the inventory store for a scenario.
+
+        Read-only access is the default.  Even writable stores can only be
+        changed through ``store.transaction(...)``; snapshots returned by read
+        methods are immutable.
+        """
+
+        if not isinstance(scenario, int):
+            raise TypeError("scenario must be an integer scenario position.")
+        if scenario < 0 or scenario >= len(self.scenarios):
+            raise IndexError(
+                f"scenario position {scenario} is outside 0..{len(self.scenarios) - 1}."
+            )
+        store = self._ensure_scenario_store(self.scenarios[scenario])
+        return store if writable else ReadOnlyInventoryStore(store)
+
+    def materialize_inventory(
+        self,
+        scenario: int = 0,
+        *,
+        restore_metadata: bool = True,
+    ) -> List[dict]:
+        """Return a real ``list[dict]`` for an integration that requires one.
+
+        Materialization duplicates the complete graph in Python and can have a
+        substantial memory cost.  Prefer :meth:`get_inventory_store` for
+        inspection and transformation code.
+        """
+
+        return self.get_inventory_store(scenario).materialize(
+            restore_metadata=restore_metadata
+        )
 
     def _load_scenario_database_for_update(
         self, scenario: dict, scenario_position: int
     ) -> dict:
-        if scenario.get("database") is not None:
-            return scenario
-
-        if "database filepath" in scenario:
-            return load_database(
-                scenario=scenario,
-                original_database=self.database,
-                load_metadata=False,
-                warning=False,
-            )
-
-        if (
-            scenario_position == 0
-            and self.database is not None
-            and self._database_is_complete
-            and self._can_reload_original_database()
+        if not hasattr(self, "inventory_backend") and not hasattr(
+            self, "_source_inventory_store"
         ):
-            if getattr(self, "_reload_original_database_from_cache_for_update", False):
-                self.database = None
-                gc.collect()
-                scenario["database"] = self._load_original_database()
-                self._reload_original_database_from_cache_for_update = False
+            if (
+                scenario_position == 0
+                and self._database is not None
+                and self._database_is_complete
+                and self._can_reload_original_database()
+            ):
+                if getattr(
+                    self, "_reload_original_database_from_cache_for_update", False
+                ):
+                    self._database = None
+                    scenario["database"] = self._load_original_database()
+                    self._reload_original_database_from_cache_for_update = False
+                    return scenario
+                scenario["database"] = self._database
+                self._database = None
                 return scenario
-
-            scenario["database"] = self.database
-            self.database = None
+            scenario["database"] = self._load_original_database()
             return scenario
 
-        if self.database is not None:
-            scenario["database"] = pickle.loads(pickle.dumps(self.database, -1))
-            return scenario
+        runtime_scenario = scenario.copy()
+        runtime_scenario.pop("_inventory_store", None)
+        runtime_scenario.pop("_inventory_checkpoint", None)
+        store = self._ensure_scenario_store(scenario)
+        can_release_source = (
+            scenario_position == len(self.scenarios) - 1
+            and self._can_reload_original_database()
+        )
+        if isinstance(store, CompactInventoryStore) and can_release_source:
+            runtime_scenario["_inventory_working_copy"] = store._checkout_materialized(
+                discard_shared_state=True
+            )
+        else:
+            runtime_scenario["_inventory_working_copy"] = IndexedInventoryList(
+                store.materialize(restore_metadata=True)
+            )
+        # Once the final scenario has its private working graph, a reloadable
+        # source store only inflates the high-water mark. Exporters can restore
+        # the source from the versioned source/inventory caches when needed.
+        scenario.pop("_inventory_store", None)
+        if can_release_source:
+            self._source_inventory_store = None
+            del store
+            clear_runtime_caches()
+            gc.collect()
+        return runtime_scenario
 
-        scenario["database"] = self._load_original_database()
-        return scenario
+    def _store_updated_scenario(
+        self,
+        scenario_definition: dict,
+        runtime_scenario: dict,
+        *,
+        persist: bool,
+    ) -> InventoryStore:
+        database = runtime_scenario.pop("_inventory_working_copy")
+        store = create_inventory_store(
+            database,
+            backend=self.inventory_backend,
+            scenario_identity=self._scenario_identity(runtime_scenario),
+            take_ownership=True,
+        )
+        scenario_definition.clear()
+        scenario_definition.update(runtime_scenario)
+        if persist:
+            checkpoint = DIR_CACHED_FILES / f"{uuid.uuid4().hex}.inventory-store"
+            scenario_definition["_inventory_checkpoint"] = store.checkpoint(checkpoint)
+        else:
+            scenario_definition["_inventory_store"] = store
+        return store
 
     @staticmethod
     def _clear_scenario_runtime_state(scenario: dict) -> None:
@@ -1103,7 +1292,7 @@ class NewDatabase:
             # this is a list of file paths
             for file_path in data_package:
                 additional = AdditionalInventory(
-                    database=self.database,
+                    database=self._database,
                     version_in=file_path["ecoinvent version"],
                     version_out=self.version,
                     path=file_path["filepath"],
@@ -1115,7 +1304,7 @@ class NewDatabase:
         elif isinstance(data_package, datapackage.DataPackage):
             if data_package.get_resource("inventories"):
                 additional = AdditionalInventory(
-                    database=self.database,
+                    database=self._database,
                     version_in=data_package.descriptor["ecoinvent"]["version"],
                     version_out=self.version,
                     path=data_package.get_resource("inventories").source,
@@ -1127,9 +1316,17 @@ class NewDatabase:
 
         return data
 
-    def update(self, sectors: [str, list, None] = None) -> None:
+    def update(
+        self,
+        sectors: [str, list, None] = None,
+        *,
+        persist: bool = True,
+    ) -> None:
         """
         Update a specific sector by name.
+
+        :param persist: checkpoint the scenario store after the update. Set to
+            ``False`` to retain it in memory for immediate inspection or export.
         """
         self.sector_update_methods = {
             "biomass": {
@@ -1227,9 +1424,9 @@ class NewDatabase:
         )
 
         with tqdm(total=len(self.scenarios), desc=description, ncols=70) as pbar_outer:
-            for position, scenario in enumerate(self.scenarios):
+            for position, scenario_definition in enumerate(self.scenarios):
                 scenario = self._load_scenario_database_for_update(
-                    scenario=scenario, scenario_position=position
+                    scenario=scenario_definition, scenario_position=position
                 )
 
                 for sector in sectors:
@@ -1248,22 +1445,31 @@ class NewDatabase:
                         scenario["applied functions"] = []
                     scenario["applied functions"].append(sector)
 
-                # dump database
-                dump_database(scenario)
                 self._clear_scenario_runtime_state(scenario)
+                self._store_updated_scenario(
+                    scenario_definition,
+                    scenario,
+                    persist=persist,
+                )
                 # Manually update the outer progress bar after each sector is completed
                 pbar_outer.update()
 
-        if (
-            self.database is not None
-            and self._database_is_complete
-            and self._can_reload_original_database()
-        ):
-            self.database = None
-            clear_runtime_caches()
-            gc.collect()
-
         print("Done!\n")
+
+    def update_and_write(
+        self,
+        name: [str, List[str]] = None,
+        sectors: [str, list, None] = None,
+    ) -> None:
+        """Update scenarios in memory and immediately write them to Brightway.
+
+        Keeping the scenario stores in memory avoids the historical scenario
+        dump/reload cycle between :meth:`update` and
+        :meth:`write_db_to_brightway`.
+        """
+
+        self.update(sectors=sectors, persist=False)
+        self.write_db_to_brightway(name=name)
 
     def write_superstructure_db_to_brightway(
         self,
@@ -1290,7 +1496,7 @@ class NewDatabase:
         )
 
         write_brightway_database(
-            data=self.database,
+            data=self._database,
             name=name,
             fast=True,
             check_internal=False,
@@ -1363,7 +1569,7 @@ class NewDatabase:
         )
 
         write_brightway_database(
-            data=self.database,
+            data=self._database,
             name=name,
             fast=True,
             check_internal=False,
@@ -1414,9 +1620,10 @@ class NewDatabase:
 
         original_database = self._load_original_database()
 
-        for scenario in self.scenarios:
+        prepared_scenarios = []
+        for scenario_definition in self.scenarios:
             scenario = load_database(
-                scenario=scenario,
+                scenario=scenario_definition,
                 original_database=original_database,
                 load_metadata=True,
             )
@@ -1434,22 +1641,28 @@ class NewDatabase:
                 raise ValueError(
                     "The database is not ready for export: MAJOR anomalies found. Check the change report."
                 )
+            prepared_scenarios.append(scenario)
 
         scenario_labels = create_scenario_list(self.scenarios)
+        scenario_payloads = (
+            prepared_scenarios
+            if getattr(self, "_inventory_api_active", False)
+            else self.scenarios
+        )
         dataframe = None
         if scenario_array:
-            self.database, dataframe = _build_superstructure_db(
+            self._database, dataframe = _build_superstructure_db(
                 origin_db=original_database,
-                scenarios=self.scenarios,
+                scenarios=scenario_payloads,
                 db_name=name,
                 biosphere_name=self.biosphere_name,
                 version=self.version,
                 scenario_list=scenario_labels,
             )
         else:
-            self.database = generate_superstructure_db(
+            self._database = generate_superstructure_db(
                 origin_db=original_database,
-                scenarios=self.scenarios,
+                scenarios=scenario_payloads,
                 db_name=name,
                 biosphere_name=self.biosphere_name,
                 filepath=filepath,
@@ -1460,7 +1673,7 @@ class NewDatabase:
             )
 
         tmp_scenario = self.scenarios[0].copy()
-        tmp_scenario["database"] = self.database
+        tmp_scenario["database"] = self._database
         additional_regions = sorted(
             {
                 region
@@ -1471,7 +1684,7 @@ class NewDatabase:
         if additional_regions:
             tmp_scenario["additional valid regions"] = additional_regions
 
-        self.database = prepare_db_for_export(
+        self._database = prepare_db_for_export(
             scenario=tmp_scenario,
             name=name,
             original_database=original_database,
@@ -1546,7 +1759,10 @@ class NewDatabase:
 
         for s, scenario in enumerate(self.scenarios):
             can_use_fast_export = (
-                scenario.get("database") is not None or "database filepath" in scenario
+                scenario.get("_inventory_store") is not None
+                or "_inventory_checkpoint" in scenario
+                or scenario.get("database") is not None
+                or "database filepath" in scenario
             )
 
             if can_use_fast_export:
@@ -1726,9 +1942,9 @@ class NewDatabase:
         print("Write Simapro import file(s).")
         original_database = self._load_original_database()
 
-        for scenario in self.scenarios:
+        for scenario_definition in self.scenarios:
             scenario = load_database(
-                scenario=scenario,
+                scenario=scenario_definition,
                 original_database=original_database,
                 load_metadata=True,
             )
@@ -1746,7 +1962,6 @@ class NewDatabase:
                 raise ValueError(
                     "The database is not ready for export: MAJOR anomalies found. Check the change report."
                 )
-
             export = Export(
                 scenario=scenario,
                 filepath=filepath,
@@ -1836,9 +2051,10 @@ class NewDatabase:
 
         original_database = self._load_original_database()
 
-        for scenario in self.scenarios:
+        prepared_scenarios = []
+        for scenario_definition in self.scenarios:
             scenario = load_database(
-                scenario=scenario,
+                scenario=scenario_definition,
                 original_database=original_database,
                 load_metadata=True,
             )
@@ -1856,19 +2072,20 @@ class NewDatabase:
                 raise ValueError(
                     "The database is not ready for export: MAJOR anomalies found. Check the change report."
                 )
+            prepared_scenarios.append(scenario)
 
         list_scenarios = create_scenario_list(self.scenarios)
 
         df, extra_inventories = generate_scenario_factor_file(
             origin_db=original_database,
-            scenarios=self.scenarios,
+            scenarios=prepared_scenarios,
             db_name=name,
             biosphere_name=self.biosphere_name,
             version=self.version,
             scenario_list=list_scenarios,
         )
 
-        for scenario in self.scenarios:
+        for scenario in prepared_scenarios:
             end_of_process(scenario)
 
         cached_inventories.extend(extra_inventories)

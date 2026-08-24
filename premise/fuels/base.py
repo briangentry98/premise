@@ -14,6 +14,7 @@ from ..validation import FuelsValidation
 from ..activity_maps import InventorySet
 from ..inventory_imports import get_biosphere_code
 from ..logger import create_logger
+from ..inventory_store import get_scenario_inventory, replace_scenario_inventory
 
 logger = create_logger("fuel")
 
@@ -21,7 +22,7 @@ logger = create_logger("fuel")
 def _update_fuels(scenario, version, system_model):
 
     fuels = Fuels(
-        database=scenario["database"],
+        database=get_scenario_inventory(scenario),
         iam_data=scenario["iam data"],
         model=scenario["model"],
         pathway=scenario["pathway"],
@@ -45,7 +46,7 @@ def _update_fuels(scenario, version, system_model):
         fuels.generate_synthetic_fuel_activities()
         fuels.generate_biogas_activities()
         fuels.relink_datasets()
-        scenario["database"] = fuels.database
+        replace_scenario_inventory(scenario, fuels.database)
         scenario["cache"] = fuels.cache
         scenario["index"] = fuels.index
 

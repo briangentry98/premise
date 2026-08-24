@@ -793,6 +793,20 @@ def load_database(
     if scenario.get("database") is not None:
         return scenario
 
+    # InventoryStore-backed scenarios never expose a mutable database payload.
+    # Exporters receive a short-lived copy so the active scenario definition
+    # continues to contain only private store/checkpoint references.
+    store = scenario.get("_inventory_store")
+    checkpoint = scenario.get("_inventory_checkpoint")
+    if store is not None or checkpoint is not None:
+        if store is None:
+            from .inventory_store import InventoryStore
+
+            store = InventoryStore.open(checkpoint)
+        materialized = scenario.copy()
+        materialized["database"] = store.materialize(restore_metadata=load_metadata)
+        return materialized
+
     if "database filepath" not in scenario:
         if warning:
             print("WARNING: loading unmodified database!")
@@ -950,7 +964,7 @@ def end_of_process(scenario: Dict[str, Any]) -> Dict[str, Any]:
     """
 
     # delete the database from the scenario
-    del scenario["database"]
+    scenario.pop("database", None)
 
     if "applied functions" in scenario:
         del scenario["applied functions"]

@@ -12,7 +12,6 @@ import uuid
 from collections import defaultdict
 from collections.abc import ValuesView
 from copy import deepcopy
-from functools import lru_cache
 from itertools import groupby, product
 from pathlib import Path
 from typing import Any, Dict, List, Set, Tuple, Union
@@ -524,6 +523,7 @@ class BaseTransformation:
 
         self.system_model: str = system_model
         self.cache: dict = cache or {}
+        self._gis_match_cache: dict[tuple, tuple] = {}
         self.ecoinvent_to_iam_loc: Dict[str, str] = {
             loc: self.geo.ecoinvent_to_iam_location(loc)
             for loc in self.get_ecoinvent_locs()
@@ -1419,7 +1419,6 @@ class BaseTransformation:
         )
 
         d_act = {}
-
         for region, dataset in d_iam_to_eco.items():
 
             if self.is_in_index(dataset, region):
@@ -2549,7 +2548,6 @@ class BaseTransformation:
 
         return dataset
 
-    @lru_cache()
     def get_gis_match(
         self,
         location,
@@ -2558,6 +2556,19 @@ class BaseTransformation:
         exclusive,
         biggest_first,
     ):
+        cache_key = (
+            location,
+            possible_locations,
+            contained,
+            exclusive,
+            biggest_first,
+        )
+        cache = getattr(self, "_gis_match_cache", None)
+        if cache is None:
+            cache = self._gis_match_cache = {}
+        if cache_key in cache:
+            return cache[cache_key]
+
         # prepare locations in possible_locations
         # all locations in possible_locations that are an IAM region
         # need to be converted to tuples with (model.upper(), location)
@@ -2584,13 +2595,15 @@ class BaseTransformation:
         try:
             with resolved_row(filtered_possible_locations, self.geo.geo) as g:
                 func = g.contained if contained else g.intersects
-                return func(
+                result = func(
                     location,
                     include_self=True,
                     exclusive=exclusive,
                     biggest_first=biggest_first,
                     only=filtered_possible_locations,
                 )
+                cache[cache_key] = result
+                return result
         except Exception as exc:
             raise ValueError(
                 "GIS matching failed for "

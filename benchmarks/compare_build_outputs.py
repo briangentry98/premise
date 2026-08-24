@@ -36,7 +36,6 @@ import bw2data as bd  # noqa: E402
 
 import premise  # noqa: E402
 from premise import NewDatabase  # noqa: E402
-from premise.utils import load_database  # noqa: E402
 
 IGNORED_DATASET_FIELDS = frozenset({"code", "database", "input"})
 IGNORED_EXCHANGE_FIELDS = frozenset({"input", "output"})
@@ -118,6 +117,9 @@ def parse_args() -> argparse.Namespace:
     build.add_argument("--model", default="image")
     build.add_argument("--pathway", default="SSP2-M")
     build.add_argument("--year", type=int, default=2050)
+    build.add_argument(
+        "--inventory-backend", choices=("compact", "legacy"), default="compact"
+    )
     build.add_argument("--database-name")
     build.add_argument("--sample-details", action="store_true")
 
@@ -445,19 +447,13 @@ def build_snapshot(args: argparse.Namespace) -> None:
         keep_source_db_uncertainty=False,
         generate_reports=False,
         quiet=True,
+        inventory_backend=args.inventory_backend,
     )
     ndb.update()
-    scenario = load_database(
-        scenario=ndb.scenarios[0],
-        original_database=[],
-        delete=False,
-        load_metadata=True,
-        warning=False,
-    )
-    ndb.scenarios[0] = scenario
+    scenario_database = ndb.materialize_inventory(restore_metadata=True)
 
     scenario_summary = write_semantic_snapshot(
-        scenario["database"],
+        scenario_database,
         args.output_dir / "scenario",
         write_details=args.sample_details,
     )
@@ -491,6 +487,7 @@ def build_snapshot(args: argparse.Namespace) -> None:
             "model": args.model,
             "pathway": args.pathway,
             "year": args.year,
+            "inventory_backend": args.inventory_backend,
         },
         "environment": {
             "python": sys.version,

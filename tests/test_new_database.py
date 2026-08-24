@@ -774,7 +774,7 @@ def test_write_scenario_array_writes_database_then_package_and_finalizes_once(
         "brightway_project": "scenario-project",
         "source_database": "source-db",
         "ecoinvent_version": "3.12",
-        "premise_version": "2.4.9.2",
+        "premise_version": ".".join(map(str, new_database_module.__version__)),
         "scenario_count": 3,
         "scenario_labels": ["original", "scenario-a", "scenario-b"],
     }
@@ -953,7 +953,12 @@ def test_constructor_marks_database_complete_after_inventory_cache_miss(monkeypa
 
     assert obj._database_is_complete is True
     assert obj._can_reload_original_database() is True
-    assert obj.database == [{"name": "base"}, {"name": "inventory"}]
+    assert obj.materialize_inventory() == [
+        {"name": "base", "exchanges": []},
+        {"name": "inventory", "exchanges": []},
+    ]
+    with pytest.raises(AttributeError, match="NewDatabase.database was removed"):
+        _ = obj.database
 
 
 def test_inventory_cache_miss_replaces_full_inventory_tail_with_trimmed_cache(

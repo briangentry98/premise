@@ -14,6 +14,7 @@ from numpy import ndarray
 
 from .filesystem_constants import DATA_DIR
 from .logger import create_logger
+from .inventory_store import get_scenario_inventory, replace_scenario_inventory
 from .transformation import (
     BaseTransformation,
     IAMDataCollection,
@@ -41,7 +42,7 @@ def _update_emissions(scenario, version, system_model, gains_scenario):
         return scenario
 
     emissions = Emissions(
-        database=scenario["database"],
+        database=get_scenario_inventory(scenario),
         year=scenario["year"],
         model=scenario["model"],
         pathway=scenario["pathway"],
@@ -52,7 +53,7 @@ def _update_emissions(scenario, version, system_model, gains_scenario):
     )
 
     emissions.update_emissions_in_database()
-    scenario["database"] = emissions.database
+    replace_scenario_inventory(scenario, emissions.database)
 
     return scenario
 

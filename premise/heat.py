@@ -12,6 +12,7 @@ from .filesystem_constants import VARIABLES_DIR
 from .heat_data import load_heat_mapping
 from .inventory_imports import get_biosphere_code
 from .logger import create_logger
+from .inventory_store import get_scenario_inventory, replace_scenario_inventory
 from .marginal_mixes import consequential_method
 from .transformation import (
     BaseTransformation,
@@ -128,7 +129,7 @@ def _update_heat(scenario, version, system_model):
         return scenario
 
     heat = Heat(
-        database=scenario["database"],
+        database=get_scenario_inventory(scenario),
         iam_data=scenario["iam data"],
         model=scenario["model"],
         pathway=scenario["pathway"],
@@ -162,7 +163,7 @@ def _update_heat(scenario, version, system_model):
 
     validate.run_heat_checks()
 
-    scenario["database"] = heat.database
+    replace_scenario_inventory(scenario, heat.database)
     scenario["cache"] = heat.cache
     scenario["index"] = heat.index
     scenario["heat diagnostics"] = heat.diagnostics

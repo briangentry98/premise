@@ -9,6 +9,7 @@ import uuid
 
 from .activity_maps import InventorySet
 from .logger import create_logger
+from .inventory_store import get_scenario_inventory, replace_scenario_inventory
 from .transformation import BaseTransformation, IAMDataCollection, List, np, ws
 
 logger = create_logger("wind_turbine")
@@ -16,7 +17,7 @@ logger = create_logger("wind_turbine")
 
 def _update_wind_turbines(scenario, version, system_model):
     wind_turbine = WindTurbine(
-        database=scenario["database"],
+        database=get_scenario_inventory(scenario),
         iam_data=scenario["iam data"],
         model=scenario["model"],
         pathway=scenario["pathway"],
@@ -29,7 +30,7 @@ def _update_wind_turbines(scenario, version, system_model):
 
     wind_turbine.create_direct_drive_turbines()
 
-    scenario["database"] = wind_turbine.database
+    replace_scenario_inventory(scenario, wind_turbine.database)
     scenario["index"] = wind_turbine.index
     scenario["cache"] = wind_turbine.cache
 

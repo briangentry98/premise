@@ -12,6 +12,7 @@ import uuid
 
 from .export import biosphere_flows_dictionary
 from .logger import create_logger
+from .inventory_store import get_scenario_inventory, replace_scenario_inventory
 from .transformation import (
     BaseTransformation,
     IAMDataCollection,
@@ -32,7 +33,7 @@ def _update_cement(scenario, version, system_model):
         return scenario
 
     cement = Cement(
-        database=scenario["database"],
+        database=get_scenario_inventory(scenario),
         model=scenario["model"],
         pathway=scenario["pathway"],
         iam_data=scenario["iam data"],
@@ -52,7 +53,7 @@ def _update_cement(scenario, version, system_model):
         cement.create_cement_production_datasets()
         cement.create_cement_market_datasets()
         cement.relink_datasets()
-        scenario["database"] = cement.database
+        replace_scenario_inventory(scenario, cement.database)
         scenario["index"] = cement.index
         scenario["cache"] = cement.cache
 

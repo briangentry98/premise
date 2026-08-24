@@ -18,6 +18,7 @@ from wurst import rescale_exchange
 from .export import biosphere_flows_dictionary
 from .filesystem_constants import VARIABLES_DIR
 from .logger import create_logger
+from .inventory_store import get_scenario_inventory, replace_scenario_inventory
 from .transformation import (
     BaseTransformation,
     Dict,
@@ -234,7 +235,7 @@ def _update_electricity(
         return scenario
 
     electricity = Electricity(
-        database=scenario["database"],
+        database=get_scenario_inventory(scenario),
         iam_data=scenario["iam data"],
         model=scenario["model"],
         pathway=scenario["pathway"],
@@ -266,7 +267,7 @@ def _update_electricity(
         print("No electricity efficiencies found in IAM data. Skipping.")
 
     electricity.relink_datasets()
-    scenario["database"] = electricity.database
+    replace_scenario_inventory(scenario, electricity.database)
     scenario["index"] = electricity.index
     scenario["cache"] = electricity.cache
 

@@ -15,6 +15,7 @@ from wurst import searching as ws
 from .activity_maps import InventorySet
 from .filesystem_constants import DATA_DIR, IAM_OUTPUT_DIR
 from .logger import create_logger
+from .inventory_store import get_scenario_inventory, replace_scenario_inventory
 from .transformation import BaseTransformation, IAMDataCollection
 from .utils import eidb_label, rescale_exchanges
 from .validation import CarValidation, TruckValidation
@@ -46,7 +47,7 @@ def _update_vehicles(scenario, vehicle_type, version, system_model):
         has_fleet = False
 
     trspt = Transport(
-        database=scenario["database"],
+        database=get_scenario_inventory(scenario),
         year=scenario["year"],
         model=scenario["model"],
         pathway=scenario["pathway"],
@@ -65,7 +66,7 @@ def _update_vehicles(scenario, vehicle_type, version, system_model):
         trspt.create_vehicle_markets()
         trspt.relink_transport_datasets()
 
-    scenario["database"] = trspt.database
+    replace_scenario_inventory(scenario, trspt.database)
     scenario["cache"] = trspt.cache
     scenario["index"] = trspt.index
 

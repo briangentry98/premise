@@ -29,6 +29,7 @@ from .inventory_imports import (
     get_biosphere_code,
     get_correspondence_bio_flows,
 )
+from .inventory_store import get_scenario_inventory, replace_scenario_inventory
 from .transformation import (
     BaseTransformation,
     find_fuel_efficiency,
@@ -94,7 +95,7 @@ def _update_external_scenarios(
             if "inventories" in [r.name for r in data_package.resources]:
                 if data_package.get_resource("inventories"):
                     additional = AdditionalInventory(
-                        database=scenario["database"],
+                        database=get_scenario_inventory(scenario),
                         version_in=data_package.descriptor["ecoinvent"]["version"],
                         version_out=version,
                         path=data_package.get_resource("inventories").source,
@@ -110,14 +111,14 @@ def _update_external_scenarios(
                     configuration=config_file,
                     inventory_data=inventories,
                     scenario_data=scenario["external data"][d],
-                    database=scenario["database"],
+                    database=get_scenario_inventory(scenario),
                     year=scenario["year"],
                     model=scenario["model"],
                 )
             )
 
-            scenario["database"] = checked_database
-            scenario["database"].extend(checked_inventories)
+            checked_database.extend(checked_inventories)
+            replace_scenario_inventory(scenario, checked_database)
 
             if "mapping" not in scenario:
                 scenario["mapping"] = {}
@@ -126,7 +127,7 @@ def _update_external_scenarios(
             configurations[d] = configuration
 
         external_scenario = ExternalScenario(
-            database=scenario["database"],
+            database=get_scenario_inventory(scenario),
             model=scenario["model"],
             pathway=scenario["pathway"],
             iam_data=scenario["iam data"],
@@ -139,7 +140,7 @@ def _update_external_scenarios(
         )
         external_scenario.create_markets()
         external_scenario.relink_datasets()
-        scenario["database"] = external_scenario.database
+        replace_scenario_inventory(scenario, external_scenario.database)
         scenario["index"] = external_scenario.index
         scenario["cache"] = external_scenario.cache
         scenario["configurations"] = configurations

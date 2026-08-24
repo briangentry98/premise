@@ -11,6 +11,7 @@ import xarray as xr
 
 from .filesystem_constants import DATA_DIR, VARIABLES_DIR
 from .logger import create_logger
+from .inventory_store import get_scenario_inventory, replace_scenario_inventory
 from .transformation import (
     BaseTransformation,
     IAMDataCollection,
@@ -63,7 +64,7 @@ def _update_cdr(scenario, version, system_model):
         return scenario
 
     cdr = CarbonDioxideRemoval(
-        database=scenario["database"],
+        database=get_scenario_inventory(scenario),
         iam_data=scenario["iam data"],
         model=scenario["model"],
         pathway=scenario["pathway"],
@@ -78,7 +79,7 @@ def _update_cdr(scenario, version, system_model):
         cdr.regionalize_cdr_activities()
         cdr.create_cdr_markets()
         cdr.relink_datasets()
-        scenario["database"] = cdr.database
+        replace_scenario_inventory(scenario, cdr.database)
         scenario["cache"] = cdr.cache
         scenario["index"] = cdr.index
     else:

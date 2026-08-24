@@ -8,6 +8,7 @@ project.
 Example
 -------
 PREMISE_KEY=... python benchmarks/profile_new_database.py \
+    --inventory-backend compact \
     --output /tmp/premise-profile.json \
     --pstats /tmp/premise-profile.pstats
 """
@@ -36,6 +37,11 @@ import bw2data as bd  # noqa: E402
 import premise  # noqa: E402
 import premise.new_database as new_database_module  # noqa: E402
 from premise import NewDatabase  # noqa: E402
+from premise.inventory_store import (  # noqa: E402
+    CompactInventoryStore,
+    get_scenario_inventory,
+    get_wurst_query_diagnostics,
+)
 
 try:  # psutil is optional; max RSS remains available through ``resource``.
     import psutil
@@ -142,7 +148,12 @@ class Recorder:
             )
 
 
-def _trace_sector_functions(recorder: Recorder) -> None:
+def _trace_sector_functions(
+    recorder: Recorder,
+    *,
+    profiler: cProfile.Profile | None = None,
+    profile_sector: str | None = None,
+) -> None:
     """Wrap imported sector entry points without changing their behavior."""
 
     for function_name, sector_label in UPDATE_FUNCTION_LABELS.items():
@@ -155,10 +166,17 @@ def _trace_sector_functions(recorder: Recorder) -> None:
             _label=sector_label,
             **kwargs: Any,
         ) -> dict[str, Any]:
+            should_profile = profiler is not None and _label == profile_sector
+            if should_profile:
+                profiler.enable()
             with recorder.phase(f"sector:{_label}") as record:
-                updated = _original(scenario, *args, **kwargs)
-                record["activities"] = len(updated.get("database", []))
-                return updated
+                try:
+                    updated = _original(scenario, *args, **kwargs)
+                    record["activities"] = len(get_scenario_inventory(updated))
+                    return updated
+                finally:
+                    if should_profile:
+                        profiler.disable()
 
         setattr(new_database_module, function_name, wrapper)
 
@@ -167,20 +185,55 @@ def _trace_sector_functions(recorder: Recorder) -> None:
     def vehicles_wrapper(
         scenario: dict[str, Any], vehicle_type: str, *args: Any, **kwargs: Any
     ) -> dict[str, Any]:
+        should_profile = profiler is not None and vehicle_type == profile_sector
+        if should_profile:
+            profiler.enable()
         with recorder.phase(f"sector:{vehicle_type}") as record:
-            updated = original_vehicles(scenario, vehicle_type, *args, **kwargs)
-            record["activities"] = len(updated.get("database", []))
-            return updated
+            try:
+                updated = original_vehicles(scenario, vehicle_type, *args, **kwargs)
+                record["activities"] = len(get_scenario_inventory(updated))
+                return updated
+            finally:
+                if should_profile:
+                    profiler.disable()
 
     new_database_module._update_vehicles = vehicles_wrapper
 
-    original_dump = new_database_module.dump_database
 
-    def dump_wrapper(scenario: dict[str, Any]) -> dict[str, Any]:
-        with recorder.phase("scenario-cache-dump"):
-            return original_dump(scenario)
+def _trace_inventory_store_boundaries(recorder: Recorder) -> None:
+    """Record the remaining list/store conversion boundaries separately."""
 
-    new_database_module.dump_database = dump_wrapper
+    original_create = new_database_module.create_inventory_store
+
+    def create_wrapper(*args: Any, **kwargs: Any):
+        with recorder.phase("inventory:create-store"):
+            return original_create(*args, **kwargs)
+
+    new_database_module.create_inventory_store = create_wrapper
+
+    original_checkpoint = CompactInventoryStore.checkpoint
+
+    def checkpoint_wrapper(self, *args: Any, **kwargs: Any):
+        with recorder.phase("inventory:checkpoint"):
+            return original_checkpoint(self, *args, **kwargs)
+
+    CompactInventoryStore.checkpoint = checkpoint_wrapper
+
+    original_load = NewDatabase._load_scenario_database_for_update
+
+    def load_wrapper(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        with recorder.phase("inventory:materialize-working-copy"):
+            return original_load(self, *args, **kwargs)
+
+    NewDatabase._load_scenario_database_for_update = load_wrapper
+
+    original_store = NewDatabase._store_updated_scenario
+
+    def store_wrapper(self, *args: Any, **kwargs: Any):
+        with recorder.phase("inventory:store-and-checkpoint"):
+            return original_store(self, *args, **kwargs)
+
+    NewDatabase._store_updated_scenario = store_wrapper
 
 
 def parse_args() -> argparse.Namespace:
@@ -194,12 +247,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pathway", default="SSP2-M")
     parser.add_argument("--year", type=int, default=2050)
     parser.add_argument(
+        "--inventory-backend", choices=("compact", "legacy"), default="compact"
+    )
+    parser.add_argument(
         "--sectors",
         nargs="+",
         help="Sector labels accepted by NewDatabase.update; default is all sectors.",
     )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--pstats", type=Path)
+    parser.add_argument(
+        "--profile-sector",
+        choices=tuple(UPDATE_FUNCTION_LABELS.values())
+        + ("car", "two-wheeler", "truck", "ship", "bus", "train"),
+        help="Limit cProfile collection to one sector (requires --pstats).",
+    )
     parser.add_argument("--sample-interval", type=float, default=0.05)
     parser.add_argument(
         "--keep-imports-uncertainty",
@@ -220,11 +282,29 @@ def _get_key() -> bytes | None:
     return key.encode() if key else None
 
 
+def _fixed_python_hash_seed() -> str:
+    value = os.environ.get("PYTHONHASHSEED")
+    try:
+        seed = int(value) if value is not None else None
+    except ValueError as error:
+        raise RuntimeError(
+            "Set PYTHONHASHSEED to an integer from 0 through 4294967295."
+        ) from error
+    if seed is None or not 0 <= seed <= 4_294_967_295:
+        raise RuntimeError(
+            "Set PYTHONHASHSEED to an integer from 0 through 4294967295."
+        )
+    return value
+
+
 def main() -> None:
     args = parse_args()
+    hash_seed = _fixed_python_hash_seed()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     if args.pstats is not None:
         args.pstats.parent.mkdir(parents=True, exist_ok=True)
+    if args.profile_sector and args.pstats is None:
+        raise ValueError("--profile-sector requires --pstats.")
 
     bd.projects.set_current(args.project)
     if args.source_db not in bd.databases:
@@ -236,12 +316,14 @@ def main() -> None:
     recorder = Recorder(sampler)
     profiler = cProfile.Profile() if args.pstats is not None else None
     sampler.start()
+    get_wurst_query_diagnostics(reset=True)
     started = time.perf_counter()
 
-    if profiler is not None:
+    if profiler is not None and args.profile_sector is None:
         profiler.enable()
 
     try:
+        _trace_inventory_store_boundaries(recorder)
         with recorder.phase("new-database-constructor"):
             ndb = NewDatabase(
                 scenarios=[
@@ -263,9 +345,14 @@ def main() -> None:
                 keep_source_db_uncertainty=False,
                 generate_reports=False,
                 quiet=True,
+                inventory_backend=args.inventory_backend,
             )
 
-        _trace_sector_functions(recorder)
+        _trace_sector_functions(
+            recorder,
+            profiler=profiler,
+            profile_sector=args.profile_sector,
+        )
         with recorder.phase("update-total"):
             ndb.update(args.sectors)
     finally:
@@ -285,6 +372,7 @@ def main() -> None:
             "model": args.model,
             "pathway": args.pathway,
             "year": args.year,
+            "inventory_backend": args.inventory_backend,
             "sectors": args.sectors or "all",
             "keep_imports_uncertainty": args.keep_imports_uncertainty,
             "use_cached_database": args.use_cached_database,
@@ -295,11 +383,13 @@ def main() -> None:
             "platform": platform.platform(),
             "premise": ".".join(map(str, premise.__version__)),
             "bw2data": str(bd.__version__),
+            "python_hash_seed": hash_seed,
         },
         "wall_seconds": time.perf_counter() - started,
         "sampled_peak_rss_bytes": sampler.peak_rss or None,
         "resource_peak_rss_bytes": _max_rss_bytes(),
         "phases": recorder.phases,
+        "query_diagnostics": get_wurst_query_diagnostics(),
     }
     args.output.write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(f"profile_output={args.output}", flush=True)

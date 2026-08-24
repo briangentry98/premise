@@ -12,6 +12,7 @@ import yaml
 from .export import biosphere_flows_dictionary
 from .filesystem_constants import VARIABLES_DIR, DATA_DIR
 from .logger import create_logger
+from .inventory_store import get_scenario_inventory, replace_scenario_inventory
 from .transformation import (
     BaseTransformation,
     IAMDataCollection,
@@ -37,7 +38,7 @@ def _update_biomass(scenario, version, system_model):
         return scenario
 
     biomass = Biomass(
-        database=scenario["database"],
+        database=get_scenario_inventory(scenario),
         iam_data=scenario["iam data"],
         model=scenario["model"],
         pathway=scenario["pathway"],
@@ -67,7 +68,7 @@ def _update_biomass(scenario, version, system_model):
 
     validate.run_biomass_checks()
 
-    scenario["database"] = biomass.database
+    replace_scenario_inventory(scenario, biomass.database)
     scenario["index"] = biomass.index
     scenario["cache"] = biomass.cache
     if "mapping" not in scenario:

@@ -8,6 +8,7 @@ import yaml
 
 from .filesystem_constants import DATA_DIR
 from .logger import create_logger
+from .inventory_store import get_scenario_inventory, replace_scenario_inventory
 from .transformation import BaseTransformation, IAMDataCollection, List, np, ws
 from .validation import BatteryValidation
 
@@ -40,7 +41,7 @@ def _update_battery(scenario, version, system_model):
         return scenario
 
     battery = Battery(
-        database=scenario["database"],
+        database=get_scenario_inventory(scenario),
         iam_data=scenario["iam data"],
         model=scenario["model"],
         pathway=scenario["pathway"],
@@ -59,7 +60,7 @@ def _update_battery(scenario, version, system_model):
     ):
         battery.adjust_battery_market_shares()
 
-    scenario["database"] = battery.database
+    replace_scenario_inventory(scenario, battery.database)
     scenario["index"] = battery.index
     scenario["cache"] = battery.cache
 
