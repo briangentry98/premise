@@ -600,6 +600,7 @@ class BaseTransformation:
             self.index = defaultdict(list, index)
         self._provider_index_generation = 0
         self._provider_group_cache: dict[tuple[int, tuple[str, str]], tuple] = {}
+        self._provider_location_cache: dict[tuple[int, tuple[str, str]], set[str]] = {}
 
     def create_index(self):
         idx = defaultdict(list)
@@ -657,6 +658,29 @@ class BaseTransformation:
             getattr(self, "_provider_index_generation", 0) + 1
         )
         self._provider_group_cache = {}
+        self._provider_location_cache = {}
+
+    def _get_provider_locations(
+        self,
+        key: tuple[str, str],
+        possible_datasets: list[dict] | None = None,
+    ) -> set[str]:
+        """Return provider locations for an exact index key and generation."""
+
+        generation = getattr(self, "_provider_index_generation", 0)
+        cache = getattr(self, "_provider_location_cache", None)
+        if cache is None:
+            cache = self._provider_location_cache = {}
+        cache_key = (generation, key)
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        if possible_datasets is None:
+            possible_datasets = self.index[key]
+        locations = {dataset["location"] for dataset in possible_datasets}
+        cache[cache_key] = locations
+        return locations
 
     def _get_provider_groups(self, exchange: dict) -> tuple:
         """Return ordered provider candidates and their location groupings.
@@ -687,7 +711,7 @@ class BaseTransformation:
             return cached
 
         possible_locations = [dataset["location"] for dataset in possible_datasets]
-        locations_set = set(possible_locations)
+        locations_set = self._get_provider_locations(key, possible_datasets)
         by_location = defaultdict(list)
         for dataset in possible_datasets:
             by_location[dataset["location"]].append(dataset)
@@ -711,10 +735,8 @@ class BaseTransformation:
         else:
             key = (ds["name"], ds["product"])
 
-        if location is None:
-            return ds["location"] in [k["location"] for k in self.index[key]]
-
-        return location in [k["location"] for k in self.index[key]]
+        target_location = ds["location"] if location is None else location
+        return target_location in self._get_provider_locations(key)
 
     def get_ecoinvent_locs(self) -> List[str]:
         """

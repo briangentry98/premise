@@ -125,6 +125,7 @@ def test_provider_groups_preserve_order_and_invalidate_after_index_mutation():
     transformation.index = defaultdict(list, {key: [first_provider, second_provider]})
     transformation._provider_index_generation = 0
     transformation._provider_group_cache = {}
+    transformation._provider_location_cache = {}
     exchange = {"name": key[0], "product": key[1]}
 
     first = transformation._get_provider_groups(exchange)
@@ -133,6 +134,8 @@ def test_provider_groups_preserve_order_and_invalidate_after_index_mutation():
     assert repeated is first
     assert first[2] == ["GLO", "RoW"]
     assert first[4]["GLO"] == [first_provider]
+    assert transformation.is_in_index({**exchange, "location": "RoW"})
+    first_locations = transformation._get_provider_locations(key)
 
     added = {
         "name": key[0],
@@ -156,12 +159,15 @@ def test_provider_groups_preserve_order_and_invalidate_after_index_mutation():
 
     assert after_addition is not first
     assert after_addition[2] == ["GLO", "RoW", "CH"]
+    assert transformation.is_in_index({**exchange, "location": "CH"})
+    assert transformation._get_provider_locations(key) is not first_locations
 
     transformation.remove_from_index(added)
     after_removal = transformation._get_provider_groups(exchange)
 
     assert after_removal is not after_addition
     assert after_removal[2] == ["GLO", "RoW"]
+    assert not transformation.is_in_index({**exchange, "location": "CH"})
 
 
 def test_gis_resolution_cache_is_shared_between_sector_instances(monkeypatch):
