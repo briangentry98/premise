@@ -125,6 +125,46 @@ def test_metal_filter_lookup_uses_exact_activity_index():
     ) == [zinc, copper]
 
 
+def test_create_metal_markets_refreshes_exact_index_before_correction(monkeypatch):
+    original = market_dataset("vanadium mine", "vanadium ore", "GLO", [])
+    regional_proxy = market_dataset("vanadium mine", "vanadium ore", "BR", [])
+    metals = object.__new__(Metals)
+    metals.database = [original]
+    metals.country_codes = {}
+    metals.version = "3.12"
+    metals.build_db_indexes()
+
+    dataframe = pd.DataFrame(
+        {
+            "Work done": ["Yes"],
+            "Country": ["Brazil"],
+            "Metal": ["Vanadium"],
+        }
+    )
+    monkeypatch.setattr(
+        "premise.metals.load_mining_shares_mapping", lambda _: dataframe.copy()
+    )
+
+    def create_market(_metal, _dataframe):
+        metals.database.append(regional_proxy)
+        return None
+
+    metals.create_market = create_market
+    matched = []
+
+    def post_allocation_correction():
+        matched.extend(
+            metals.get_datasets_matching_filters(
+                {"equals": "vanadium mine"}, {"equals": "vanadium ore"}
+            )
+        )
+
+    metals.post_allocation_correction = post_allocation_correction
+    metals.create_metal_markets()
+
+    assert matched == [original, regional_proxy]
+
+
 def test_mining_share_dataset_membership_is_cached_but_returned_as_a_copy(
     monkeypatch,
 ):

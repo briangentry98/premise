@@ -2493,6 +2493,10 @@ class Metals(BaseTransformation):
                 self.write_log(dataset, "created")
                 self.substitute_old_markets(new_dataset=dataset, df_metal=df_metal)
 
+        # Regional mining proxies were added after the indexes were built in
+        # ``__init__``. Refresh once so the optimized exact-match path sees the
+        # same complete database that the legacy Wurst scan saw here.
+        self.build_db_indexes()
         self.post_allocation_correction()
 
     def get_market_split_shares(self, metal_key: str) -> tuple[str, str, float, float]:

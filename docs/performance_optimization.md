@@ -13,7 +13,7 @@ project. Encrypted IAM files require `PREMISE_KEY` or `IAM_FILES_KEY`; a local
 plaintext IAM file does not.
 
 ```console
-python benchmarks/profile_new_database.py \
+PYTHONHASHSEED=0 python benchmarks/profile_new_database.py \
   --model remind --pathway SSP1-NPi \
   --output /tmp/premise-profile.json
 ```
@@ -26,17 +26,19 @@ capture. RSS is sampled every 50 ms with `psutil` and cross-checked against
 
 The comparison below used Python 3.11 on macOS, a warm source-database cache,
 REMIND SSP1-NPi in 2050, and all sectors. Both revisions used the same source
-database, IAM file, process sampler, and cache state.
+database, IAM file, process sampler, and cache state. These are the final
+results after the strict output-equivalence fixes; earlier, faster measurements
+from the metadata-elision experiment are intentionally not reported as valid.
 
 | Metric | Baseline | Optimized | Change |
 | --- | ---: | ---: | ---: |
-| End-to-end wall time | 89.60 s | 72.33 s | -19.3% |
-| `update()` wall time | 87.06 s | 69.82 s | -19.8% |
-| Sampled peak RSS | 1.818 GB | 1.706 GB | -6.2% |
-| Constructor-end RSS | 1.612 GB | 1.531 GB | -5.0% |
-| Metals sector | 30.67 s | 21.25 s | -30.7% |
-| Emissions sector | 7.16 s | 4.72 s | -34.1% |
-| Scenario-cache dump | 8.37 s | 7.54 s | -9.9% |
+| End-to-end wall time | 89.60 s | 86.82 s | -3.1% |
+| `update()` wall time | 87.06 s | 83.58 s | -4.0% |
+| Sampled peak RSS | 1.818 GB | 1.795 GB | -1.3% |
+| Constructor-end RSS | 1.612 GB | 1.614 GB | +0.1% |
+| Metals sector | 30.67 s | 28.15 s | -8.2% |
+| Emissions sector | 7.16 s | 4.70 s | -34.3% |
+| Scenario-cache dump | 8.37 s | 5.99 s | -28.5% |
 
 An additional IMAGE SSP2-M baseline exposed the same structure at a larger
 scale: 119.99 seconds without profiling, 2.46 billion calls under `cProfile`,
@@ -49,7 +51,45 @@ versioned so old and compact caches cannot be confused.
 
 Activity counts were identical after every sector in the baseline and optimized
 runs (42,374 after emissions), and the optimized validation log contained no
-major issues.
+major issues. The stronger end-to-end equivalence certification is recorded
+below.
+
+## Output-equivalence certification
+
+`benchmarks/compare_build_outputs.py` builds the parent revision and optimized
+revision in separate processes with the same fixed `PYTHONHASHSEED`, source
+database, encrypted IAM input, model, pathway, year, and system model. It then:
+
+1. restores all scenario-cache metadata and computes a canonical SHA-256 over
+   every dataset and exchange field except Brightway's random storage IDs;
+2. writes each result to a dedicated Brightway database, extracts it again, and
+   repeats the exact canonical comparison;
+3. compares stable Brightway database metadata exactly; and
+4. compares 20 LCIA scores (five representative activities and four methods)
+   with relative and absolute tolerances of `1e-12`.
+
+The full IMAGE SSP2-M 2050 all-sector certification against revision
+`691ec672` passed. Both sides contained 50,938 datasets and 1,597,616 exchanges.
+The restored-scenario hash was
+`1aa05bbf2d84ed5e58ba787b54d1705a582f1a000af60eb490897f87b4e0be79`;
+the re-extracted Brightway hash was
+`4482604d947aeaa08c99366fc10b6693e669ea33fd4666d5e3b16c42b87ec4ac`.
+Stable metadata and all 20 LCIA scores also matched.
+
+Example invocation (run once from each revision with different output and
+database names):
+
+```console
+PYTHONHASHSEED=0 PREMISE_KEY=... python benchmarks/compare_build_outputs.py build \
+  --output-dir /tmp/equivalence/baseline \
+  --label baseline --revision 691ec672 \
+  --database-name premise-equivalence-baseline
+
+python benchmarks/compare_build_outputs.py compare \
+  --left /tmp/equivalence/baseline \
+  --right /tmp/equivalence/optimized \
+  --report /tmp/equivalence/report.json
+```
 
 ## Profile findings
 
@@ -71,20 +111,18 @@ The main baseline costs were structural rather than numerical:
 
 ## Implemented changes
 
-### Compact, versioned source cache
+### Versioned source cache
 
-Dataset comments now live in the metadata sidecar instead of the hot source
-database. They are restored before export, after which scenario-generated
-comments are merged in the same order as before. The heat-pump comments needed
-by CDR classification remain resident because they are runtime input, not only
-export metadata. Cache filenames include a schema version to force one safe
-rebuild instead of loading an incompatible old cache.
+Cache filenames include a schema version so a layout change forces one safe
+rebuild instead of loading an incompatible cache. Source comments remain in the
+runtime database: removing them changed proxy comments and therefore failed the
+strict canonical equivalence gate.
 
 ### One-pass scenario compaction
 
-Scenario metadata extraction and exchange trimming now happen in one traversal.
-Fast scalar paths in cache-value detection avoid routing millions of ordinary
-integers and floats through pandas.
+Scenario metadata extraction and exchange trimming now happen in one traversal,
+which removes a complete pass over roughly 1.6 million exchanges. Cache-value
+semantics remain identical to the parent revision.
 
 ### Indexed metals matching
 
@@ -92,7 +130,10 @@ Mining-share workbooks are parsed once per normalized ecoinvent version and
 callers receive defensive DataFrame copies. Exact `equals`/`either` expressions
 are resolved through the existing name/reference-product activity index. More
 general `contains`, `startswith`, and boolean expressions retain a compatible
-scan fallback. Mining dataset membership is cached after the first lookup.
+scan fallback. Mining dataset membership is cached after the first lookup. The
+index is refreshed once after regional proxy creation; the equivalence harness
+caught the stale-index version because it left five mineral-resource exchanges
+different from the parent revision.
 
 ### Safer activity-map prefiltering
 

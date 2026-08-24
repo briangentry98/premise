@@ -298,63 +298,11 @@ def test_create_cache_writes_legacy_database_and_manifest_metadata(tmp_path):
         Path(str(cache_ref).replace(".pickle", " (metadata).pickle"))
     )
     assert load_cached_database(cache_ref) == trimmed
-    assert "comment" not in trimmed[0]
+    assert trimmed[0]["comment"] == "hello"
     assert trimmed[0]["classifications"] == [("CPC", "12345")]
     assert list(iter_cached_metadata(metadata_ref))[0] == {
-        ("market for test", "test product", "GLO"): {
-            "comment": "hello",
-            "foo": "bar",
-        }
+        ("market for test", "test product", "GLO"): {"foo": "bar"}
     }
-
-
-def test_create_cache_keeps_runtime_comments_used_for_cdr_classification(tmp_path):
-    cache_ref = tmp_path / "db-cache.pickle"
-    database = [
-        {
-            "name": "direct air capture",
-            "reference product": "carbon dioxide",
-            "location": "GLO",
-            "unit": "kilogram",
-            "comment": "This dataset supplies heat pump heat.",
-            "exchanges": [],
-        }
-    ]
-
-    trimmed, metadata_ref = create_cache(database, cache_ref)
-
-    assert trimmed[0]["comment"] == "This dataset supplies heat pump heat."
-    assert list(iter_cached_metadata(metadata_ref)) == [{}]
-
-
-def test_load_database_merges_source_and_scenario_comment_metadata(tmp_path):
-    scenario_db = tmp_path / "scenario-db.pickle"
-    source_metadata_ref = tmp_path / "source-metadata.pickle"
-    scenario_metadata_ref = tmp_path / "scenario-metadata.pickle"
-    key = ("market for test", "test product", "GLO")
-    dataset = {
-        "name": key[0],
-        "reference product": key[1],
-        "location": key[2],
-        "unit": "kilogram",
-        "exchanges": [],
-    }
-
-    with open(scenario_db, "wb") as file:
-        pickle.dump([dataset], file)
-    with open(source_metadata_ref, "wb") as file:
-        pickle.dump({key: {"comment": "Source comment"}}, file)
-    with open(scenario_metadata_ref, "wb") as file:
-        pickle.dump({key: {"comment": "Scenario update"}}, file)
-
-    scenario = {
-        "database filepath": scenario_db,
-        "database metadata cache filepath": source_metadata_ref,
-        "database metadata filepath": scenario_metadata_ref,
-    }
-    loaded = load_database(scenario, original_database=[], delete=False)
-
-    assert loaded["database"][0]["comment"] == "Source comment. Scenario update"
 
 
 def test_load_database_restores_classifications_from_legacy_metadata(tmp_path):
