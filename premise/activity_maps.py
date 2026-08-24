@@ -40,6 +40,13 @@ MINING_WASTE = DATA_DIR / "mining" / "tailings_activities.yaml"
 CARBON_STORAGE_TECHS = VARIABLES_DIR / "carbon_dioxide_removal.yaml"
 
 
+@lru_cache(maxsize=1)
+def _load_mapping_file(filepath: Path) -> Dict[str, dict]:
+    """Parse a mapping file once for all variable-specific lookups."""
+    with open(filepath, "r", encoding="utf-8") as stream:
+        return yaml.full_load(stream)
+
+
 @lru_cache(maxsize=64)
 def get_mapping(
     filepath: Path, var: str, model: Optional[str] = None
@@ -56,8 +63,7 @@ def get_mapping(
     :rtype: Dict[str, dict]
     """
 
-    with open(filepath, "r", encoding="utf-8") as stream:
-        techs = yaml.full_load(stream)
+    techs = _load_mapping_file(filepath)
 
     mapping: Dict[str, dict] = {}
     for key, val in techs.items():

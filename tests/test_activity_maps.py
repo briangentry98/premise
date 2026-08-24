@@ -1,6 +1,7 @@
 # content of test_activity_maps.py
 import pytest
 
+import premise.activity_maps as activity_maps_module
 from premise.activity_maps import InventorySet, act_fltr
 
 dummy_minimal_db = [
@@ -50,6 +51,31 @@ for act in dummy_minimal_db:
 def test_presence_of_dict():
     maps = InventorySet(dummy_minimal_db)
     assert isinstance(maps.generate_powerplant_map(), dict)
+
+
+def test_mapping_file_is_parsed_once_across_variable_lookups(tmp_path, monkeypatch):
+    mapping_file = tmp_path / "mapping.yaml"
+    mapping_file.write_text(
+        "technology:\n  first: one\n  second: two\n",
+        encoding="utf-8",
+    )
+    parse_calls = []
+    original_full_load = activity_maps_module.yaml.full_load
+
+    def counted_full_load(stream):
+        parse_calls.append(stream.name)
+        return original_full_load(stream)
+
+    activity_maps_module.get_mapping.cache_clear()
+    activity_maps_module._load_mapping_file.cache_clear()
+    monkeypatch.setattr(activity_maps_module.yaml, "full_load", counted_full_load)
+
+    first = activity_maps_module.get_mapping(mapping_file, "first")
+    second = activity_maps_module.get_mapping(mapping_file, "second")
+
+    assert first == {"technology": "one"}
+    assert second == {"technology": "two"}
+    assert parse_calls == [str(mapping_file)]
 
 
 def test_length_dict():

@@ -167,6 +167,16 @@ to 2.79 seconds, the full update to 44.98 seconds, and end-to-end time to 47.58
 seconds. Sampled peak RSS remained 1.938 GB and strict canonical output was
 exact.
 
+Mapping-file loading now keeps a one-entry cache of parsed YAML content so
+adjacent variable-specific requests reuse the same document without retaining
+all mapping files for the lifetime of the build. In the scoped electricity
+profile, full YAML parses fell from five to two, `get_mapping` from 0.45 to 0.14
+seconds, and electricity initialization from 1.41 to 1.09 seconds. A repeated
+unprofiled run put electricity at 2.73 seconds versus 2.79 seconds previously;
+the 47.62-second end-to-end result was within noise of the 47.58-second
+headline, which is therefore unchanged. Strict canonical output remained
+exact.
+
 The seed-zero canonical hash is
 `39efcf273da6b52e6c6bdfce8a6546a9a0819a054340fee9062ac2a7fddf808c`.
 Compact builds refuse an unfixed hash seed in the benchmark harness so an
