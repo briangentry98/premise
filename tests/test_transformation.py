@@ -179,6 +179,46 @@ def test_provider_groups_preserve_order_and_invalidate_after_index_mutation():
     assert not transformation.is_in_index({**exchange, "location": "CH"})
 
 
+def test_find_new_exchange_entries_accepts_preaggregated_amount(monkeypatch):
+    transformation = object.__new__(BaseTransformation)
+    transformation.cache = {}
+    transformation.model = "image"
+    transformation.find_alternative_locations = lambda act, exc, alt_names: [
+        (
+            exc["name"],
+            exc["product"],
+            "World",
+            exc["unit"],
+            1.0,
+        )
+    ]
+    exchange = {
+        "name": "market for fuel",
+        "product": "fuel",
+        "location": "GLO",
+        "unit": "kilogram",
+    }
+
+    monkeypatch.setattr(
+        transformation_module.ws,
+        "technosphere",
+        lambda dataset: (_ for _ in ()).throw(
+            AssertionError("preaggregated amounts must not rescan exchanges")
+        ),
+    )
+
+    entries, amount = transformation.find_new_exchange_entries(
+        {"location": "CH"},
+        exchange,
+        [],
+        amount=np.float64(3.25),
+    )
+
+    assert entries == [("market for fuel", "fuel", "World", "kilogram", 1.0)]
+    assert type(amount) is np.float64
+    assert amount == np.float64(3.25)
+
+
 def test_gis_resolution_cache_is_shared_between_sector_instances(monkeypatch):
     match_calls = []
     row_calls = []

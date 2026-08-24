@@ -771,17 +771,26 @@ class BaseTransformation:
         return grouped
 
     def is_in_index(self, ds, location=None):
-        if not any(key in ds for key in ["reference product", "product"]):
+        if "reference product" in ds:
+            key = (ds["name"], ds["reference product"])
+        elif "product" in ds:
+            key = (ds["name"], ds["product"])
+        else:
             raise KeyError(
                 f"Dataset {ds['name']} does not have neither 'reference product' nor 'product' keys."
             )
-        if "reference product" in ds:
-            key = (ds["name"], ds["reference product"])
-        else:
-            key = (ds["name"], ds["product"])
 
         target_location = ds["location"] if location is None else location
-        return target_location in self._get_provider_locations(key)
+        generation = getattr(self, "_provider_index_generation", 0)
+        cache = getattr(self, "_provider_location_cache", None)
+        if cache is None:
+            cache = self._provider_location_cache = {}
+        cache_key = (generation, key)
+        locations = cache.get(cache_key)
+        if locations is None:
+            locations = {dataset["location"] for dataset in self.index[key]}
+            cache[cache_key] = locations
+        return target_location in locations
 
     def get_ecoinvent_locs(self) -> List[str]:
         """
@@ -1794,9 +1803,18 @@ class BaseTransformation:
             # of the technosphere exchanges to relink
             # to compare with the new exchanges
             excs_to_relink_dict = defaultdict(float)
+            relink_amounts = defaultdict(float)
             for exc in excs_to_relink:
                 try:
                     excs_to_relink_dict[exc["product"]] += exc["amount"]
+                    relink_amounts[
+                        (
+                            exc["name"],
+                            exc["product"],
+                            exc["location"],
+                            exc["unit"],
+                        )
+                    ] += exc["amount"]
                 except:
                     print(exc)
                     raise
@@ -1819,7 +1837,10 @@ class BaseTransformation:
 
             # Process exchanges to relink
             new_exchanges = self.process_exchanges_to_relink(
-                act, unique_excs_to_relink, alt_names
+                act,
+                unique_excs_to_relink,
+                alt_names,
+                relink_amounts=relink_amounts,
             )
 
             # apply uncertainties, if any
@@ -1873,10 +1894,31 @@ class BaseTransformation:
                     f" Exchanges to relink: {excs_to_relink_dict}, new exchanges: {new_exchanges_dict}"
                 )
 
-    def process_exchanges_to_relink(self, act, unique_excs_to_relink, alt_names):
+    def process_exchanges_to_relink(
+        self,
+        act,
+        unique_excs_to_relink,
+        alt_names,
+        relink_amounts=None,
+    ):
         new_exchanges = []
         for exc in unique_excs_to_relink:
-            entries, amount = self.find_new_exchange_entries(act, exc, alt_names)
+            amount = None
+            if relink_amounts is not None:
+                amount = relink_amounts[
+                    (
+                        exc["name"],
+                        exc["product"],
+                        exc["location"],
+                        exc["unit"],
+                    )
+                ]
+            entries, amount = self.find_new_exchange_entries(
+                act,
+                exc,
+                alt_names,
+                amount=amount,
+            )
             if amount != 0:
                 new_exchanges.extend(self.create_new_exchanges(entries, amount))
         # Make exchanges unique and sum amounts for duplicates
@@ -2023,7 +2065,7 @@ class BaseTransformation:
         # Second search with modified names
         return search_for_new_exchanges(names_to_look_for)
 
-    def find_new_exchange_entries(self, act, exc, alt_names):
+    def find_new_exchange_entries(self, act, exc, alt_names, amount=None):
         entries = None
 
         if self.is_exchange_in_cache(exc, act["location"]):
@@ -2037,12 +2079,13 @@ class BaseTransformation:
                 (exc["name"], exc["product"], exc["location"], exc["unit"]) + (1.0,)
             ]
 
-        amount = sum(
-            e["amount"]
-            for e in ws.technosphere(act)
-            if (e["name"], e["product"], e["location"], e["unit"])
-            == (exc["name"], exc["product"], exc["location"], exc["unit"])
-        )
+        if amount is None:
+            amount = sum(
+                e["amount"]
+                for e in ws.technosphere(act)
+                if (e["name"], e["product"], e["location"], e["unit"])
+                == (exc["name"], exc["product"], exc["location"], exc["unit"])
+            )
 
         return entries, amount
 

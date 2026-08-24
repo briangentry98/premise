@@ -7,8 +7,8 @@
 > warm IMAGE SSP2-M 2050 all-sector differential run it produced the exact same
 > semantic hash as the legacy store (`39efcf273da6b52e6c6bdfce8a6546a9a0819a054340fee9062ac2a7fddf808c`),
 > with 50,938 datasets and 1,597,616 exchanges. A matched diagnostic run (not
-> the five-run acceptance median) reduced wall time from 82.67 to 48.51 seconds
-> (41.3%) and sampled peak RSS from 2.692 to 1.938 GB (28.0%). This is well
+> the five-run acceptance median) reduced wall time from 82.67 to 47.58 seconds
+> (42.4%) and sampled peak RSS from 2.692 to 1.938 GB (28.0%). This is well
 > short of the required 50%/50% activation gate.
 > The default therefore remains `legacy`; transformation hot paths still need
 > to move off their private mutable working materialization.
@@ -46,7 +46,7 @@ includes the full all-sector update and compact checkpoint write.
 
 | Metric | Legacy oracle | Compact | Change |
 | --- | ---: | ---: | ---: |
-| End-to-end wall time | 82.67 s | 48.51 s | -41.3% |
+| End-to-end wall time | 82.67 s | 47.58 s | -42.4% |
 | Sampled peak RSS | 2.692 GB | 1.938 GB | -28.0% |
 | Datasets | 50,938 | 50,938 | exact |
 | Exchanges | 1,597,616 | 1,597,616 | exact |
@@ -154,6 +154,18 @@ to 0.56 seconds. In the next matched unprofiled run, electricity reached 3.24
 seconds, the full update 45.94 seconds, and end-to-end time 48.51 seconds.
 Sampled peak RSS was 1.938 GB, within 3 MB of the preceding run, and strict
 canonical output remained exact.
+
+Common relinking now aggregates amounts for each exact exchange identity once,
+in original exchange order, instead of rescanning all technosphere inputs for
+every unique exchange. Exact provider membership checks inline the existing
+generation-aware per-key location cache, avoiding repeated helper and generator
+dispatch while retaining incremental invalidation after index mutations. In the
+scoped profile, relinking fell from 3.21 to 1.54 seconds,
+`find_new_exchange_entries` from 1.81 to 0.50 seconds, and `is_in_index` from
+1.04 to 0.43 seconds. The matched unprofiled run reduced electricity from 3.24
+to 2.79 seconds, the full update to 44.98 seconds, and end-to-end time to 47.58
+seconds. Sampled peak RSS remained 1.938 GB and strict canonical output was
+exact.
 
 The seed-zero canonical hash is
 `39efcf273da6b52e6c6bdfce8a6546a9a0819a054340fee9062ac2a7fddf808c`.
