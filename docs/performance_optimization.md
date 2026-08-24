@@ -7,8 +7,8 @@
 > warm IMAGE SSP2-M 2050 all-sector differential run it produced the exact same
 > semantic hash as the legacy store (`39efcf273da6b52e6c6bdfce8a6546a9a0819a054340fee9062ac2a7fddf808c`),
 > with 50,938 datasets and 1,597,616 exchanges. A matched diagnostic run (not
-> the five-run acceptance median) reduced wall time from 82.67 to 49.77 seconds
-> (39.8%) and sampled peak RSS from 2.692 to 1.935 GB (28.1%). This is well
+> the five-run acceptance median) reduced wall time from 82.67 to 48.51 seconds
+> (41.3%) and sampled peak RSS from 2.692 to 1.938 GB (28.0%). This is well
 > short of the required 50%/50% activation gate.
 > The default therefore remains `legacy`; transformation hot paths still need
 > to move off their private mutable working materialization.
@@ -46,8 +46,8 @@ includes the full all-sector update and compact checkpoint write.
 
 | Metric | Legacy oracle | Compact | Change |
 | --- | ---: | ---: | ---: |
-| End-to-end wall time | 82.67 s | 49.77 s | -39.8% |
-| Sampled peak RSS | 2.692 GB | 1.935 GB | -28.1% |
+| End-to-end wall time | 82.67 s | 48.51 s | -41.3% |
+| Sampled peak RSS | 2.692 GB | 1.938 GB | -28.0% |
 | Datasets | 50,938 | 50,938 | exact |
 | Exchanges | 1,597,616 | 1,597,616 | exact |
 
@@ -144,6 +144,16 @@ efficiency update from 3.36 to 1.05 seconds. The matched unprofiled run reduced
 electricity from 4.59 to 3.53 seconds, the full update to 47.24 seconds, and
 end-to-end time to 49.77 seconds. Sampled peak RSS was 1.935 GB, and the strict
 canonical hash and counts remained exact.
+
+Coal-power-plant adjustment now caches the scalar result of each xarray
+selection by country, fuel, CHP status, and variable, as well as each derived
+emission factor. NumPy scalars retain the original multiplication and division
+order without holding thousands of zero-dimensional xarray objects alive.
+Selections fell from 4,833 to 3,281 and the profiled coal adjustment from 1.56
+to 0.56 seconds. In the next matched unprofiled run, electricity reached 3.24
+seconds, the full update 45.94 seconds, and end-to-end time 48.51 seconds.
+Sampled peak RSS was 1.938 GB, within 3 MB of the preceding run, and strict
+canonical output remained exact.
 
 The seed-zero canonical hash is
 `39efcf273da6b52e6c6bdfce8a6546a9a0819a054340fee9062ac2a7fddf808c`.

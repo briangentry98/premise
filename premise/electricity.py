@@ -45,6 +45,42 @@ POWERPLANT_TECHS = VARIABLES_DIR / "electricity.yaml"
 logger = create_logger("electricity")
 
 
+class _CoalPowerPlantData:
+    """Cache scalar selections and emission factors from coal-plant IAM data."""
+
+    def __init__(self, data):
+        self.data = data
+        self.countries = frozenset(data.country.values)
+        self._values = {}
+        self._emission_factors = {}
+
+    def contains_country(self, country: str) -> bool:
+        return country in self.countries
+
+    def _select(self, country: str, fuel: str, chp: bool, variable: str):
+        key = country, fuel, chp, variable
+        if key not in self._values:
+            values = self.data.sel(
+                country=country,
+                fuel=fuel,
+                CHP=chp,
+                variable=variable,
+            ).values
+            self._values[key] = values.reshape(-1)[0]
+        return self._values[key]
+
+    def value(self, country: str, fuel: str, chp: bool, variable: str):
+        return self._select(country, fuel, chp, variable).item()
+
+    def emission_factor(self, country: str, fuel: str, chp: bool, species: str):
+        key = country, fuel, chp, species
+        if key not in self._emission_factors:
+            emissions = self._select(country, fuel, chp, species)
+            generation = self._select(country, fuel, chp, "generation")
+            self._emission_factors[key] = (emissions / (generation * 1e3)).item()
+        return self._emission_factors[key]
+
+
 def load_electricity_variables() -> dict:
     """
     Load the electricity variables from a YAML file.
@@ -1824,6 +1860,7 @@ class Electricity(BaseTransformation):
             ("PM 10 - 2.5", "Particulate Matter, > 2.5 um and < 10um"),
             ("PM > 10", "Particulate Matter, > 10 um"),
         ]
+        coal_power_plant_data = _CoalPowerPlantData(self.iam_data.coal_power_plants)
 
         for tech in coal_techs:
             if tech in self.powerplant_map:
@@ -1833,7 +1870,14 @@ class Electricity(BaseTransformation):
                 )
                 for dataset in datasets:
                     loc = dataset["location"][:2]
-                    if loc in self.iam_data.coal_power_plants.country.values:
+                    if coal_power_plant_data.contains_country(loc):
+                        fuel = (
+                            "Anthracite coal"
+                            if "hard coal" in dataset["name"]
+                            else "Lignite coal"
+                        )
+                        is_chp = "co-generation" in dataset["name"]
+
                         # Find current efficiency
                         ei_eff = find_fuel_efficiency(
                             dataset=dataset,
@@ -1843,20 +1887,16 @@ class Electricity(BaseTransformation):
                             fuel_map_reverse=self.fuel_map_reverse,
                         )
 
-                        new_eff = self.iam_data.coal_power_plants.sel(
+                        new_eff = coal_power_plant_data.value(
                             country=loc,
-                            fuel=(
-                                "Anthracite coal"
-                                if "hard coal" in dataset["name"]
-                                else "Lignite coal"
-                            ),
-                            CHP="co-generation" in dataset["name"],
+                            fuel=fuel,
+                            chp=is_chp,
                             variable="efficiency",
                         )
 
-                        if not np.isnan(new_eff.values.item(0)):
+                        if not np.isnan(new_eff):
                             # Rescale all the exchanges except for a few biosphere exchanges
-                            scaling_factor = ei_eff / new_eff.values.item(0)
+                            scaling_factor = ei_eff / new_eff
 
                             # limit scaling factor to 1.5
                             scaling_factor = min(scaling_factor, 1.5)
@@ -1876,58 +1916,39 @@ class Electricity(BaseTransformation):
                             dataset.setdefault("log parameters", {}).update(
                                 {
                                     "ecoinvent original efficiency": ei_eff,
-                                    "Oberschelp et al. efficiency": new_eff.values.item(
-                                        0
-                                    ),
-                                    "efficiency change": ei_eff
-                                    / new_eff.values.item(0),
+                                    "Oberschelp et al. efficiency": new_eff,
+                                    "efficiency change": ei_eff / new_eff,
                                 }
                             )
 
                             if "comment" in dataset:
                                 dataset["comment"] += (
                                     f" Efficiency updated from {ei_eff:.2f} to "
-                                    f"{new_eff.values.item(0):.2f} "
+                                    f"{new_eff:.2f} "
                                     f"based on Oberschelp et al. (2019)."
                                 )
                             else:
                                 dataset["comment"] = (
                                     f"Efficiency updated from {ei_eff:.2f} to "
-                                    f"{new_eff.values.item(0):.2f} "
+                                    f"{new_eff:.2f} "
                                     f"based on Oberschelp et al. (2019)."
                                 )
 
                             self.update_ecoinvent_efficiency_parameter(
-                                dataset, ei_eff, new_eff.values.item(0)
+                                dataset, ei_eff, new_eff
                             )
 
                         for substance in substances:
                             species, flow = substance
 
-                            emission_factor = self.iam_data.coal_power_plants.sel(
+                            emission_factor = coal_power_plant_data.emission_factor(
                                 country=loc,
-                                fuel=(
-                                    "Anthracite coal"
-                                    if "hard coal" in dataset["name"]
-                                    else "Lignite coal"
-                                ),
-                                CHP="co-generation" in dataset["name"],
-                                variable=species,
-                            ) / (
-                                self.iam_data.coal_power_plants.sel(
-                                    country=loc,
-                                    fuel=(
-                                        "Anthracite coal"
-                                        if "hard coal" in dataset["name"]
-                                        else "Lignite coal"
-                                    ),
-                                    CHP="co-generation" in dataset["name"],
-                                    variable="generation",
-                                )
-                                * 1e3
+                                fuel=fuel,
+                                chp=is_chp,
+                                species=species,
                             )
 
-                            if not np.isnan(emission_factor.values.item(0)):
+                            if not np.isnan(emission_factor):
                                 for exc in ws.biosphere(dataset):
                                     if (
                                         exc["name"] == flow
@@ -1939,10 +1960,7 @@ class Electricity(BaseTransformation):
                                         )[0]
                                         == "air"
                                     ):
-                                        scaling_factor = (
-                                            emission_factor.values.item(0)
-                                            / exc["amount"]
-                                        )
+                                        scaling_factor = emission_factor / exc["amount"]
                                         # limit scaling factor to 5
                                         scaling_factor = min(scaling_factor, 5)
                                         exc["amount"] *= scaling_factor

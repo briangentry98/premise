@@ -5,12 +5,47 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import xarray as xr
 
 from premise.data_collection import IAMDataCollection
-from premise.electricity import Electricity
+from premise.electricity import Electricity, _CoalPowerPlantData
 from premise.filesystem_constants import DATA_DIR
 
 LHV_FUELS = DATA_DIR / "fuels_lower_heating_value.txt"
+
+
+def test_coal_power_plant_data_caches_selections_and_emission_factors():
+    data = xr.DataArray(
+        np.array([[[[100.0, 2.0, 0.4]]]]),
+        dims=("country", "fuel", "CHP", "variable"),
+        coords={
+            "country": ["CH"],
+            "fuel": ["Anthracite coal"],
+            "CHP": [False],
+            "variable": ["generation", "SO2", "efficiency"],
+        },
+    )
+
+    class CountingData:
+        def __init__(self, array):
+            self.array = array
+            self.country = array.country
+            self.selections = 0
+
+        def sel(self, **kwargs):
+            self.selections += 1
+            return self.array.sel(**kwargs)
+
+    counting_data = CountingData(data)
+    coal_data = _CoalPowerPlantData(counting_data)
+
+    assert coal_data.contains_country("CH")
+    assert not coal_data.contains_country("FR")
+    assert coal_data.value("CH", "Anthracite coal", False, "efficiency") == 0.4
+    assert coal_data.value("CH", "Anthracite coal", False, "efficiency") == 0.4
+    assert coal_data.emission_factor("CH", "Anthracite coal", False, "SO2") == 2e-5
+    assert coal_data.emission_factor("CH", "Anthracite coal", False, "SO2") == 2e-5
+    assert counting_data.selections == 3
 
 
 def get_db():
