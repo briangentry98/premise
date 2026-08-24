@@ -1,9 +1,12 @@
 from collections import defaultdict
+from contextlib import contextmanager
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import xarray as xr
 
+import premise.transformation as transformation_module
 from premise.activity_maps import InventorySet
 from premise.marginal_mixes import get_list_contrained_suppliers
 from premise.transformation import (
@@ -100,6 +103,120 @@ def test_inventory_dataset_clone_is_lossless_and_isolated():
     assert dataset["custom"]["values"] == [np.float64(2.5), ("CPC", "171")]
     assert dataset["array"].tolist() == [1.0, 2.0]
     assert dataset["exchanges"][0]["amount"] == np.float64(1.0)
+
+
+def test_provider_groups_preserve_order_and_invalidate_after_index_mutation():
+    transformation = object.__new__(BaseTransformation)
+    key = ("market for fuel", "fuel")
+    first_provider = {
+        "name": key[0],
+        "reference product": key[1],
+        "location": "GLO",
+        "unit": "kilogram",
+        "production volume": 2.0,
+    }
+    second_provider = {
+        "name": key[0],
+        "reference product": key[1],
+        "location": "RoW",
+        "unit": "kilogram",
+        "production volume": 1.0,
+    }
+    transformation.index = defaultdict(list, {key: [first_provider, second_provider]})
+    transformation._provider_index_generation = 0
+    transformation._provider_group_cache = {}
+    exchange = {"name": key[0], "product": key[1]}
+
+    first = transformation._get_provider_groups(exchange)
+    repeated = transformation._get_provider_groups(exchange)
+
+    assert repeated is first
+    assert first[2] == ["GLO", "RoW"]
+    assert first[4]["GLO"] == [first_provider]
+
+    added = {
+        "name": key[0],
+        "reference product": key[1],
+        "location": "CH",
+        "unit": "kilogram",
+        "exchanges": [
+            {
+                "name": key[0],
+                "product": key[1],
+                "location": "CH",
+                "unit": "kilogram",
+                "type": "production",
+                "amount": 1.0,
+                "production volume": 3.0,
+            }
+        ],
+    }
+    transformation.add_to_index(added)
+    after_addition = transformation._get_provider_groups(exchange)
+
+    assert after_addition is not first
+    assert after_addition[2] == ["GLO", "RoW", "CH"]
+
+    transformation.remove_from_index(added)
+    after_removal = transformation._get_provider_groups(exchange)
+
+    assert after_removal is not after_addition
+    assert after_removal[2] == ["GLO", "RoW"]
+
+
+def test_gis_resolution_cache_is_shared_between_sector_instances(monkeypatch):
+    calls = []
+
+    class FakeGeo:
+        iam_regions = []
+        geo = {"CH", "DE"}
+
+        def __init__(self, model):
+            self.model = model
+
+        @staticmethod
+        def ecoinvent_to_iam_location(location):
+            return location
+
+    class FakeMatcher:
+        @staticmethod
+        def intersects(*args, **kwargs):
+            calls.append((args, kwargs))
+            return ("DE",)
+
+        contained = intersects
+
+    @contextmanager
+    def fake_resolved_row(*args, **kwargs):
+        yield FakeMatcher()
+
+    monkeypatch.setattr(transformation_module, "Geomap", FakeGeo)
+    monkeypatch.setattr(transformation_module, "resolved_row", fake_resolved_row)
+    monkeypatch.setattr(transformation_module, "get_fuel_properties", lambda: {})
+
+    shared_cache = {}
+    iam_data = SimpleNamespace(regions=[])
+    instances = [
+        BaseTransformation(
+            database=[],
+            iam_data=iam_data,
+            model="image",
+            pathway="SSP2-M",
+            year=2050,
+            version="3.12",
+            system_model="cutoff",
+            cache=shared_cache,
+            index=defaultdict(list),
+        )
+        for _ in range(2)
+    ]
+
+    first = instances[0].get_gis_match("CH", ("DE",), False, True, False)
+    repeated = instances[1].get_gis_match("CH", ("DE",), False, True, False)
+
+    assert first == repeated == ("DE",)
+    assert instances[0]._gis_match_cache is instances[1]._gis_match_cache
+    assert len(calls) == 1
 
 
 def test_find_fuel_efficiency_uses_default_fuels_when_filter_is_none(capsys):

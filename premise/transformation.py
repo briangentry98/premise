@@ -46,6 +46,7 @@ with open(LOG_CONFIG, encoding="utf-8") as f:
 
 logger = logging.getLogger("module")
 
+_SCENARIO_GIS_CACHE_KEY = "__premise_gis_match_v1__"
 
 _INVENTORY_ATOMIC_TYPES = (
     type(None),
@@ -578,8 +579,10 @@ class BaseTransformation:
         self.fuels_specs: dict = get_fuel_properties()
 
         self.system_model: str = system_model
-        self.cache: dict = cache or {}
-        self._gis_match_cache: dict[tuple, tuple] = {}
+        self.cache: dict = cache if cache is not None else {}
+        self._gis_match_cache: dict[tuple, tuple] = self.cache.setdefault(
+            _SCENARIO_GIS_CACHE_KEY, {}
+        )
         self.ecoinvent_to_iam_loc: Dict[str, str] = {
             loc: self.geo.ecoinvent_to_iam_location(loc)
             for loc in self.get_ecoinvent_locs()
@@ -588,7 +591,14 @@ class BaseTransformation:
         for key, value in self.ecoinvent_to_iam_loc.items():
             self.iam_to_ecoinvent_loc[value].append(key)
 
-        self.index = index or self.create_index()
+        if index is None:
+            self.index = self.create_index()
+        elif isinstance(index, defaultdict):
+            self.index = index
+        else:
+            self.index = defaultdict(list, index)
+        self._provider_index_generation = 0
+        self._provider_group_cache: dict[tuple[int, tuple[str, str]], tuple] = {}
 
     def create_index(self):
         idx = defaultdict(list)
@@ -627,6 +637,7 @@ class BaseTransformation:
                     ),
                 }
             )
+        self._invalidate_provider_group_cache()
 
     def remove_from_index(self, ds):
         key = (copy.deepcopy(ds["name"]), copy.deepcopy(ds["reference product"]))
@@ -636,6 +647,58 @@ class BaseTransformation:
                 d for d in self.index[key] if d["location"] == ds["location"]
             ][0]
             self.index[key].remove(ds_to_remove)
+            self._invalidate_provider_group_cache()
+
+    def _invalidate_provider_group_cache(self) -> None:
+        """Invalidate provider groupings after a mutation to ``self.index``."""
+
+        self._provider_index_generation = (
+            getattr(self, "_provider_index_generation", 0) + 1
+        )
+        self._provider_group_cache = {}
+
+    def _get_provider_groups(self, exchange: dict) -> tuple:
+        """Return ordered provider candidates and their location groupings.
+
+        Group construction is independent of the consumer location but used for
+        every exchange resolution. Cache entries are tied to the provider-index
+        generation so proxy additions and removals cannot leave stale supplier
+        sets behind. The returned list and location order exactly follow the
+        legacy index.
+        """
+
+        key = (exchange["name"], exchange["product"])
+        possible_datasets = self.index[key]
+        if len(possible_datasets) == 0 and "market for" in exchange["name"]:
+            key = (
+                exchange["name"].replace("market for", "market group for"),
+                exchange["product"],
+            )
+            possible_datasets = self.index[key]
+
+        generation = getattr(self, "_provider_index_generation", 0)
+        cache = getattr(self, "_provider_group_cache", None)
+        if cache is None:
+            cache = self._provider_group_cache = {}
+        cache_key = (generation, key)
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        possible_locations = [dataset["location"] for dataset in possible_datasets]
+        locations_set = set(possible_locations)
+        by_location = defaultdict(list)
+        for dataset in possible_datasets:
+            by_location[dataset["location"]].append(dataset)
+        grouped = (
+            key,
+            possible_datasets,
+            possible_locations,
+            locations_set,
+            by_location,
+        )
+        cache[cache_key] = grouped
+        return grouped
 
     def is_in_index(self, ds, location=None):
         if not any(key in ds for key in ["reference product", "product"]):
@@ -2107,16 +2170,13 @@ class BaseTransformation:
 
         # This function needs to handle the logic when
         # an exchange is not in the cache.
-        key = (exchange["name"], exchange["product"])
-        possible_datasets = self.index[key]
-
-        if len(possible_datasets) == 0:
-            if "market for" in exchange["name"]:
-                key = (
-                    exchange["name"].replace("market for", "market group for"),
-                    exchange["product"],
-                )
-                possible_datasets = self.index[key]
+        (
+            key,
+            possible_datasets,
+            possible_locations,
+            locations_set,
+            by_location,
+        ) = self._get_provider_groups(exchange)
 
         if len(possible_datasets) == 0:
             # search self.database for possible datasets
@@ -2159,11 +2219,15 @@ class BaseTransformation:
             )
 
         else:
-            possible_locations = [ds["location"] for ds in possible_datasets]
-            locations_set = set(possible_locations)
-            by_location = defaultdict(list)
-            for ds in possible_datasets:
-                by_location[ds["location"]].append(ds)
+            # A fallback database scan returns full datasets rather than the
+            # lightweight index records cached above. Preserve that first-call
+            # behavior while later calls use the freshly populated index.
+            if not possible_locations:
+                possible_locations = [ds["location"] for ds in possible_datasets]
+                locations_set = set(possible_locations)
+                by_location = defaultdict(list)
+                for ds in possible_datasets:
+                    by_location[ds["location"]].append(ds)
 
             self.handle_multiple_possible_datasets(
                 exchange,
