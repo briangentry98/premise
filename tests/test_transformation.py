@@ -65,15 +65,20 @@ def make_supplier(name, product="fuel"):
 
 
 def test_inventory_dataset_clone_is_lossless_and_isolated():
+    class CustomMetadataKey(str):
+        pass
+
     shared_metadata = {
         "values": [np.float64(2.5), ("CPC", "171")],
     }
+    custom_key = CustomMetadataKey("custom key")
     dataset = {
         "name": "proxy template",
         "reference product": "service",
         "location": "GLO",
         "custom": shared_metadata,
         "same custom": shared_metadata,
+        custom_key: "custom value",
         "array": np.array([1.0, 2.0]),
         "exchanges": [
             {
@@ -92,9 +97,12 @@ def test_inventory_dataset_clone_is_lossless_and_isolated():
     assert cloned["custom"] is cloned["same custom"]
     assert cloned["custom"] is cloned["exchanges"][0]["metadata"]
     assert cloned["custom"] is not shared_metadata
+    assert custom_key in cloned
+    assert type(next(key for key in cloned if key == custom_key)) is CustomMetadataKey
     assert np.array_equal(cloned["array"], dataset["array"])
     assert cloned["array"] is not dataset["array"]
     assert type(cloned["exchanges"][0]["amount"]) is np.float64
+    assert cloned["exchanges"][0]["amount"] is dataset["exchanges"][0]["amount"]
 
     cloned["custom"]["values"].append("changed")
     cloned["array"][0] = 99

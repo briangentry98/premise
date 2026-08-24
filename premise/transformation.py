@@ -48,15 +48,16 @@ logger = logging.getLogger("module")
 
 _SCENARIO_GIS_CACHE_KEY = "__premise_gis_match_v1__"
 
-_INVENTORY_ATOMIC_TYPES = (
-    type(None),
-    bool,
-    int,
-    float,
-    complex,
-    str,
-    bytes,
-    np.generic,
+_INVENTORY_ATOMIC_TYPES = frozenset(
+    (
+        type(None),
+        bool,
+        int,
+        float,
+        complex,
+        str,
+        bytes,
+    )
 )
 
 
@@ -74,27 +75,31 @@ def clone_inventory_dataset(dataset: dict) -> dict:
     memo: dict[int, Any] = {}
 
     def clone(value):
-        if isinstance(value, _INVENTORY_ATOMIC_TYPES):
+        value_type = type(value)
+        if value_type in _INVENTORY_ATOMIC_TYPES or isinstance(value, np.generic):
             return value
 
         value_id = id(value)
         if value_id in memo:
             return memo[value_id]
 
-        if type(value) is dict:
+        if value_type is dict:
             duplicate = {}
             memo[value_id] = duplicate
             for key, item in value.items():
-                duplicate[clone(key)] = clone(item)
+                duplicate_key = (
+                    key if type(key) in _INVENTORY_ATOMIC_TYPES else clone(key)
+                )
+                duplicate[duplicate_key] = clone(item)
             return duplicate
 
-        if type(value) is list:
+        if value_type is list:
             duplicate = []
             memo[value_id] = duplicate
             duplicate.extend(clone(item) for item in value)
             return duplicate
 
-        if type(value) is np.ndarray:
+        if value_type is np.ndarray:
             duplicate = value.copy()
             memo[value_id] = duplicate
             return duplicate
