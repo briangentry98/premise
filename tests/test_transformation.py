@@ -165,30 +165,52 @@ def test_provider_groups_preserve_order_and_invalidate_after_index_mutation():
 
 
 def test_gis_resolution_cache_is_shared_between_sector_instances(monkeypatch):
-    calls = []
+    match_calls = []
+    row_calls = []
+
+    class FakeMatcher:
+        def __init__(self):
+            self.locations = {"CH", "DE", "FR"}
+            self.rows = {}
+
+        def __contains__(self, key):
+            return key in self.locations or key in self.rows
+
+        def __getitem__(self, key):
+            return self.rows[key]
+
+        def __setitem__(self, key, value):
+            self.rows[key] = value
+
+        def __delitem__(self, key):
+            del self.rows[key]
+
+        @staticmethod
+        def intersects(*args, **kwargs):
+            match_calls.append((args, kwargs))
+            return ("DE",)
+
+        contained = intersects
 
     class FakeGeo:
         iam_regions = []
-        geo = {"CH", "DE"}
 
         def __init__(self, model):
             self.model = model
+            self.geo = FakeMatcher()
 
         @staticmethod
         def ecoinvent_to_iam_location(location):
             return location
 
-    class FakeMatcher:
-        @staticmethod
-        def intersects(*args, **kwargs):
-            calls.append((args, kwargs))
-            return ("DE",)
-
-        contained = intersects
-
     @contextmanager
-    def fake_resolved_row(*args, **kwargs):
-        yield FakeMatcher()
+    def fake_resolved_row(possible_locations, geomatcher):
+        row_calls.append(tuple(possible_locations))
+        geomatcher["RoW"] = {"unused-face"}
+        try:
+            yield geomatcher
+        finally:
+            del geomatcher["RoW"]
 
     monkeypatch.setattr(transformation_module, "Geomap", FakeGeo)
     monkeypatch.setattr(transformation_module, "resolved_row", fake_resolved_row)
@@ -213,10 +235,16 @@ def test_gis_resolution_cache_is_shared_between_sector_instances(monkeypatch):
 
     first = instances[0].get_gis_match("CH", ("DE",), False, True, False)
     repeated = instances[1].get_gis_match("CH", ("DE",), False, True, False)
+    another_location = instances[0].get_gis_match("FR", ("DE",), False, True, False)
 
-    assert first == repeated == ("DE",)
+    assert first == repeated == another_location == ("DE",)
     assert instances[0]._gis_match_cache is instances[1]._gis_match_cache
-    assert len(calls) == 1
+    assert (
+        instances[0]._resolved_row_faces_cache
+        is not instances[1]._resolved_row_faces_cache
+    )
+    assert len(match_calls) == 2
+    assert len(row_calls) == 1
 
 
 def test_find_fuel_efficiency_uses_default_fuels_when_filter_is_none(capsys):

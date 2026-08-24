@@ -583,6 +583,7 @@ class BaseTransformation:
         self._gis_match_cache: dict[tuple, tuple] = self.cache.setdefault(
             _SCENARIO_GIS_CACHE_KEY, {}
         )
+        self._resolved_row_faces_cache: dict[tuple, set] = {}
         self.ecoinvent_to_iam_loc: Dict[str, str] = {
             loc: self.geo.ecoinvent_to_iam_location(loc)
             for loc in self.get_ecoinvent_locs()
@@ -2712,18 +2713,34 @@ class BaseTransformation:
             loc for loc in filtered_possible_locations if loc in self.geo.geo
         ]
 
+        def match(geomatcher):
+            func = geomatcher.contained if contained else geomatcher.intersects
+            return func(
+                location,
+                include_self=True,
+                exclusive=exclusive,
+                biggest_first=biggest_first,
+                only=filtered_possible_locations,
+            )
+
+        row_cache = getattr(self, "_resolved_row_faces_cache", None)
+        if row_cache is None:
+            row_cache = self._resolved_row_faces_cache = {}
+        row_cache_key = (self.model, tuple(filtered_possible_locations))
+
         try:
-            with resolved_row(filtered_possible_locations, self.geo.geo) as g:
-                func = g.contained if contained else g.intersects
-                result = func(
-                    location,
-                    include_self=True,
-                    exclusive=exclusive,
-                    biggest_first=biggest_first,
-                    only=filtered_possible_locations,
-                )
-                cache[cache_key] = result
-                return result
+            if row_cache_key not in row_cache:
+                with resolved_row(filtered_possible_locations, self.geo.geo) as g:
+                    row_cache[row_cache_key] = g["RoW"]
+                    result = match(g)
+            else:
+                self.geo.geo["RoW"] = row_cache[row_cache_key]
+                try:
+                    result = match(self.geo.geo)
+                finally:
+                    del self.geo.geo["RoW"]
+            cache[cache_key] = result
+            return result
         except Exception as exc:
             raise ValueError(
                 "GIS matching failed for "

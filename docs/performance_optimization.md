@@ -7,8 +7,8 @@
 > warm IMAGE SSP2-M 2050 all-sector differential run it produced the exact same
 > semantic hash as the legacy store (`39efcf273da6b52e6c6bdfce8a6546a9a0819a054340fee9062ac2a7fddf808c`),
 > with 50,938 datasets and 1,597,616 exchanges. A matched diagnostic run (not
-> the five-run acceptance median) reduced wall time from 82.67 to 55.73 seconds
-> (32.6%) and sampled peak RSS from 2.692 to 1.936 GB (28.1%). This is well
+> the five-run acceptance median) reduced wall time from 82.67 to 54.34 seconds
+> (34.3%) and sampled peak RSS from 2.692 to 1.945 GB (27.7%). This is well
 > short of the required 50%/50% activation gate.
 > The default therefore remains `legacy`; transformation hot paths still need
 > to move off their private mutable working materialization.
@@ -46,8 +46,8 @@ includes the full all-sector update and compact checkpoint write.
 
 | Metric | Legacy oracle | Compact | Change |
 | --- | ---: | ---: | ---: |
-| End-to-end wall time | 82.67 s | 55.73 s | -32.6% |
-| Sampled peak RSS | 2.692 GB | 1.936 GB | -28.1% |
+| End-to-end wall time | 82.67 s | 54.34 s | -34.3% |
+| Sampled peak RSS | 2.692 GB | 1.945 GB | -27.7% |
 | Datasets | 50,938 | 50,938 | exact |
 | Exchanges | 1,597,616 | 1,597,616 | exact |
 
@@ -86,6 +86,15 @@ without changing candidate or tie-breaking order. In the next matched compact
 run, metals fell from 8.13 to 7.50 seconds, the full update from 54.65 to 53.01
 seconds, and end-to-end time from 57.14 to 55.73 seconds. The checkpoint retained
 the exact seed-zero canonical hash and counts reported below.
+
+GIS matching also caches the synthetic Rest-of-World face set for each ordered
+provider-location tuple within a transformation. Different consumer locations
+can reuse that topology while still running the legacy contained/intersects
+selection independently. The cache owns the set created by the geography
+resolver directly and is released with the sector object; only the much smaller
+final GIS decisions persist between sectors. Metals fell further from 7.50 to
+6.22 seconds, the full update to 51.74 seconds, and end-to-end time to 54.34
+seconds. Sampled peak RSS was 1.945 GB in this run.
 
 The seed-zero canonical hash is
 `39efcf273da6b52e6c6bdfce8a6546a9a0819a054340fee9062ac2a7fddf808c`.
