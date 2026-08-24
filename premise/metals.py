@@ -442,19 +442,6 @@ def _load_mining_shares_mapping(ei_version="3.12"):
     # replace all instances of "Year" in columns by ""
     df.columns = df.columns.str.replace("Year ", "")
 
-    # remove suppliers whose markets share is below the cutoff
-    cut_off = 0.01
-
-    df_filtered = df.loc[df.loc[:, "2020":"2030"].max(axis=1) > cut_off].copy()
-
-    # Normalize remaining data back to 100% for each metal
-    years = [str(year) for year in range(2020, 2031)]
-    for metal in df_filtered["Metal"].unique():
-        metal_indices = df_filtered["Metal"] == metal
-        df_filtered.loc[:, years] = df_filtered.groupby("Metal")[years].transform(
-            lambda x: x / x.sum()
-        )
-
     return df
 
 

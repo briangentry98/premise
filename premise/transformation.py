@@ -47,6 +47,62 @@ with open(LOG_CONFIG, encoding="utf-8") as f:
 logger = logging.getLogger("module")
 
 
+_INVENTORY_ATOMIC_TYPES = (
+    type(None),
+    bool,
+    int,
+    float,
+    complex,
+    str,
+    bytes,
+    np.generic,
+)
+
+
+def clone_inventory_dataset(dataset: dict) -> dict:
+    """Clone a mutable inventory dataset without copying immutable scalars.
+
+    Proxy creation clones thousands of metadata-rich datasets. Generic
+    :func:`copy.deepcopy` repeatedly dispatches over every string, number, and
+    NumPy scalar even though these values are immutable. This specialised
+    copier handles the two dominant mutable containers directly, retains
+    shared-reference relationships through a memo, and delegates uncommon
+    Python objects to ``deepcopy`` for exact type semantics.
+    """
+
+    memo: dict[int, Any] = {}
+
+    def clone(value):
+        if isinstance(value, _INVENTORY_ATOMIC_TYPES):
+            return value
+
+        value_id = id(value)
+        if value_id in memo:
+            return memo[value_id]
+
+        if type(value) is dict:
+            duplicate = {}
+            memo[value_id] = duplicate
+            for key, item in value.items():
+                duplicate[clone(key)] = clone(item)
+            return duplicate
+
+        if type(value) is list:
+            duplicate = []
+            memo[value_id] = duplicate
+            duplicate.extend(clone(item) for item in value)
+            return duplicate
+
+        if type(value) is np.ndarray:
+            duplicate = value.copy()
+            memo[value_id] = duplicate
+            return duplicate
+
+        return copy.deepcopy(value, memo)
+
+    return clone(dataset)
+
+
 def redefine_uncertainty_params(old_exc, new_exc):
     """
     Returns "loc", "scale", "minimum" and "maximum" and "negative" values for a given exchange.
@@ -1430,7 +1486,7 @@ class BaseTransformation:
                     != (dataset["name"], dataset["reference product"], region)
                 ]
 
-            dataset = copy.deepcopy(dataset)
+            dataset = clone_inventory_dataset(dataset)
             dataset["location"] = region
             dataset["code"] = str(uuid.uuid4().hex)
             dataset["regionalized"] = True

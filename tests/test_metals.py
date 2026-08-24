@@ -5,12 +5,33 @@ from premise.filesystem_constants import DATA_DIR
 from premise.metals import (
     Metals,
     PostAllocationCorrectionError,
+    _load_mining_shares_mapping,
     correct_metal_resource_exchanges,
     extract_exact_filter_values,
     extract_reference_products_from_filter,
     is_secondary_metal_supply_exchange,
     matches_filter_query,
 )
+
+
+def test_mining_share_loader_returns_unfiltered_source_values(monkeypatch):
+    source = pd.DataFrame(
+        {
+            "Metal": ["Copper", "Copper"],
+            "Year 2020": [0.005, 0.995],
+            "Year 2030": [0.004, 0.996],
+        }
+    )
+    monkeypatch.setattr(pd, "read_excel", lambda *args, **kwargs: source.copy())
+    _load_mining_shares_mapping.cache_clear()
+    try:
+        loaded = _load_mining_shares_mapping("3.12")
+    finally:
+        _load_mining_shares_mapping.cache_clear()
+
+    assert loaded.columns.tolist() == ["Metal", "2020", "2030"]
+    assert loaded["2020"].tolist() == [0.005, 0.995]
+    assert loaded["2030"].tolist() == [0.004, 0.996]
 
 
 def biosphere_resource(name, amount):

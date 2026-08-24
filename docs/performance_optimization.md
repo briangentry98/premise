@@ -7,8 +7,8 @@
 > warm IMAGE SSP2-M 2050 all-sector differential run it produced the exact same
 > semantic hash as the legacy store (`39efcf273da6b52e6c6bdfce8a6546a9a0819a054340fee9062ac2a7fddf808c`),
 > with 50,938 datasets and 1,597,616 exchanges. A matched diagnostic run (not
-> the five-run acceptance median) reduced wall time from 82.67 to 59.34 seconds
-> (28.2%) and sampled peak RSS from 2.692 to 1.972 GB (26.7%). This is well
+> the five-run acceptance median) reduced wall time from 82.67 to 57.14 seconds
+> (30.9%) and sampled peak RSS from 2.692 to 1.945 GB (27.8%). This is well
 > short of the required 50%/50% activation gate.
 > The default therefore remains `legacy`; transformation hot paths still need
 > to move off their private mutable working materialization.
@@ -46,8 +46,8 @@ includes the full all-sector update and compact checkpoint write.
 
 | Metric | Legacy oracle | Compact | Change |
 | --- | ---: | ---: | ---: |
-| End-to-end wall time | 82.67 s | 59.34 s | -28.2% |
-| Sampled peak RSS | 2.692 GB | 1.972 GB | -26.7% |
+| End-to-end wall time | 82.67 s | 57.14 s | -30.9% |
+| Sampled peak RSS | 2.692 GB | 1.945 GB | -27.8% |
 | Datasets | 50,938 | 50,938 | exact |
 | Exchanges | 1,597,616 | 1,597,616 | exact |
 
@@ -67,6 +67,16 @@ sector fell from 4.27 to 2.90 seconds in the matched full build. Compact
 transaction rollback now snapshots graph structure and replaces touched row
 payloads, avoiding a transaction-wide deep copy while retaining exact rollback
 semantics.
+
+Shared proxy creation now uses a memoized inventory-aware clone. Mutable
+dictionaries, lists, and NumPy arrays remain isolated, shared nested references
+remain shared within a clone, and uncommon objects retain the generic
+`deepcopy` fallback. Immutable Python and NumPy scalars are reused. The same
+profile also found that mining-share loading filtered and normalized a temporary
+DataFrame but returned the untouched source DataFrame; removing that dead work
+preserved the exact source hash. Together these changes reduced the metals
+sector from 9.96 to 8.13 seconds and the full update from 56.83 to 54.65 seconds
+in matched compact runs.
 
 The seed-zero canonical hash is
 `39efcf273da6b52e6c6bdfce8a6546a9a0819a054340fee9062ac2a7fddf808c`.

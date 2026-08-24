@@ -1,11 +1,16 @@
 from collections import defaultdict
 
+import numpy as np
 import pytest
 import xarray as xr
 
 from premise.activity_maps import InventorySet
 from premise.marginal_mixes import get_list_contrained_suppliers
-from premise.transformation import BaseTransformation, find_fuel_efficiency
+from premise.transformation import (
+    BaseTransformation,
+    clone_inventory_dataset,
+    find_fuel_efficiency,
+)
 
 
 def make_market_transformation(monkeypatch, technology_shares):
@@ -54,6 +59,47 @@ def make_supplier(name, product="fuel"):
         "unit": "kilogram",
         "exchanges": [],
     }
+
+
+def test_inventory_dataset_clone_is_lossless_and_isolated():
+    shared_metadata = {
+        "values": [np.float64(2.5), ("CPC", "171")],
+    }
+    dataset = {
+        "name": "proxy template",
+        "reference product": "service",
+        "location": "GLO",
+        "custom": shared_metadata,
+        "same custom": shared_metadata,
+        "array": np.array([1.0, 2.0]),
+        "exchanges": [
+            {
+                "name": "flow",
+                "amount": np.float64(1.0),
+                "type": "biosphere",
+                "metadata": shared_metadata,
+            }
+        ],
+    }
+
+    cloned = clone_inventory_dataset(dataset)
+
+    assert cloned["name"] == dataset["name"]
+    assert cloned["custom"] == dataset["custom"]
+    assert cloned["custom"] is cloned["same custom"]
+    assert cloned["custom"] is cloned["exchanges"][0]["metadata"]
+    assert cloned["custom"] is not shared_metadata
+    assert np.array_equal(cloned["array"], dataset["array"])
+    assert cloned["array"] is not dataset["array"]
+    assert type(cloned["exchanges"][0]["amount"]) is np.float64
+
+    cloned["custom"]["values"].append("changed")
+    cloned["array"][0] = 99
+    cloned["exchanges"][0]["amount"] = 3.0
+
+    assert dataset["custom"]["values"] == [np.float64(2.5), ("CPC", "171")]
+    assert dataset["array"].tolist() == [1.0, 2.0]
+    assert dataset["exchanges"][0]["amount"] == np.float64(1.0)
 
 
 def test_find_fuel_efficiency_uses_default_fuels_when_filter_is_none(capsys):
