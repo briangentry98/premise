@@ -611,6 +611,14 @@ class _DenseExchangeTable:
         self._rows[exchange_id] = None
         self._length -= 1
 
+    def shallow_copy(self) -> "_DenseExchangeTable":
+        """Copy the row index while sharing immutable transaction payloads."""
+
+        duplicate = type(self)()
+        duplicate._rows = self._rows.copy()
+        duplicate._length = self._length
+        return duplicate
+
 
 def _product(payload: Mapping[str, Any]) -> Any:
     return payload.get("reference product", payload.get("product"))
@@ -832,6 +840,29 @@ class _InMemoryInventoryStore(InventoryStore):
             self._state = copy.deepcopy(self._state)
             self._shared_state = False
 
+    def _transaction_snapshot(self) -> _StoreState:
+        """Return a rollback snapshot without copying every compact payload.
+
+        Transaction mutation methods replace activity and exchange dictionaries
+        instead of changing existing payloads in place. A shallow structural
+        snapshot is therefore sufficient for compact stores and keeps a small
+        sector transaction from duplicating the complete inventory graph.
+        Legacy retains its historical deep-copy oracle semantics.
+        """
+
+        if self.backend_name != "compact":
+            return copy.deepcopy(self._state)
+
+        state = self._state
+        snapshot = copy.copy(state)
+        snapshot.activities = state.activities.copy()
+        snapshot.activity_order = state.activity_order.copy()
+        snapshot.exchanges = state.exchanges.shallow_copy()
+        snapshot.exchange_owner = state.exchange_owner.copy()
+        snapshot.activity_exchanges = state.activity_exchanges.copy()
+        snapshot.transaction_log = state.transaction_log.copy()
+        return snapshot
+
     def _invalidate_indexes(self) -> None:
         self._state.field_index = {}
         self._state.activity_key_index = {}
@@ -879,6 +910,30 @@ class _InMemoryInventoryStore(InventoryStore):
             if exchange_id in self._state.exchanges
         ]
         return record
+
+    def _iter_storage_activities(
+        self,
+    ) -> Iterator[tuple[ActivityId, Mapping[str, Any], tuple[ExchangeId, ...]]]:
+        """Yield read-only activity metadata for package-native kernels.
+
+        This private interface avoids materialising exchange dictionaries when
+        a migrated sector only needs activity metadata and stable exchange IDs.
+        Mutations still have to go through :class:`InventoryTransaction`.
+        """
+
+        for activity_id in self.iter_activity_ids():
+            yield (
+                activity_id,
+                MappingProxyType(self._state.activities[activity_id]),
+                tuple(self._state.activity_exchanges[activity_id]),
+            )
+
+    def _storage_exchange(self, exchange_id: ExchangeId) -> Mapping[str, Any]:
+        """Return a read-only exchange mapping for a package-native kernel."""
+
+        if exchange_id not in self._state.exchanges:
+            raise KeyError(f"Unknown exchange id: {exchange_id}")
+        return MappingProxyType(self._state.exchanges[exchange_id])
 
     def activity(self, activity_id: ActivityId) -> ActivityRecord:
         return ActivityRecord(
@@ -1052,10 +1107,9 @@ class _InMemoryInventoryStore(InventoryStore):
         if self.eager_exchange_owners:
             self._state.exchange_owner[exchange_id] = activity_id
         exchange_ids = self._state.activity_exchanges[activity_id]
-        if isinstance(exchange_ids, range):
-            exchange_ids = list(exchange_ids)
-            self._state.activity_exchanges[activity_id] = exchange_ids
+        exchange_ids = list(exchange_ids)
         exchange_ids.append(exchange_id)
+        self._state.activity_exchanges[activity_id] = exchange_ids
         return exchange_id
 
     def _remove_exchange_unchecked(self, exchange_id: ExchangeId) -> None:
@@ -1063,11 +1117,9 @@ class _InMemoryInventoryStore(InventoryStore):
             raise KeyError(f"Unknown exchange id: {exchange_id}")
         self._ensure_exchange_owners()
         owner = self._state.exchange_owner.pop(exchange_id)
-        exchange_ids = self._state.activity_exchanges[owner]
-        if isinstance(exchange_ids, range):
-            exchange_ids = list(exchange_ids)
-            self._state.activity_exchanges[owner] = exchange_ids
+        exchange_ids = list(self._state.activity_exchanges[owner])
         exchange_ids.remove(exchange_id)
+        self._state.activity_exchanges[owner] = exchange_ids
         del self._state.exchanges[exchange_id]
 
     def _rebuild_indexes(self) -> None:
@@ -1276,7 +1328,7 @@ class InventoryTransaction:
             )
         self.store._active_transaction = True
         self.store._ensure_owned_state()
-        self._snapshot = copy.deepcopy(self.store._state)
+        self._snapshot = self.store._transaction_snapshot()
         self._entered = True
         return self
 
@@ -1349,9 +1401,11 @@ class InventoryTransaction:
             raise KeyError(f"Unknown activity id: {activity_id}")
         changes = copy.deepcopy(dict(updates))
         exchanges = changes.pop("exchanges", None)
-        self.store._state.activities[activity_id].update(changes)
+        payload = copy.deepcopy(self.store._state.activities[activity_id])
+        payload.update(changes)
         for field_name in delete_fields:
-            self.store._state.activities[activity_id].pop(field_name, None)
+            payload.pop(field_name, None)
+        self.store._state.activities[activity_id] = payload
         if exchanges is not None:
             self.replace_exchanges(activity_id, exchanges)
         else:
@@ -1384,9 +1438,11 @@ class InventoryTransaction:
         self._require_entered()
         if exchange_id not in self.store._state.exchanges:
             raise KeyError(f"Unknown exchange id: {exchange_id}")
-        self.store._state.exchanges[exchange_id].update(copy.deepcopy(dict(updates)))
+        payload = copy.deepcopy(self.store._state.exchanges[exchange_id])
+        payload.update(copy.deepcopy(dict(updates)))
         for field_name in delete_fields:
-            self.store._state.exchanges[exchange_id].pop(field_name, None)
+            payload.pop(field_name, None)
+        self.store._state.exchanges[exchange_id] = payload
         self.store._invalidate_indexes()
 
     def remove_exchange(self, exchange_id: ExchangeId) -> None:
@@ -1485,7 +1541,11 @@ def get_scenario_inventory(scenario: dict[str, Any]) -> list[dict[str, Any]]:
         raise InventoryStoreError(
             "Scenario has no inventory store or private working inventory."
         )
-    working_copy = IndexedInventoryList(store.materialize(restore_metadata=True))
+    if isinstance(store, CompactInventoryStore):
+        working_copy = store._checkout_materialized()
+        scenario.pop("_inventory_store", None)
+    else:
+        working_copy = IndexedInventoryList(store.materialize(restore_metadata=True))
     scenario["_inventory_working_copy"] = working_copy
     return working_copy
 

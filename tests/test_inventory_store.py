@@ -222,6 +222,29 @@ def test_transaction_commands_commit_and_rollback(store_class, inventory):
     )
 
 
+def test_compact_transaction_snapshot_copies_structure_not_untouched_payloads(
+    inventory,
+):
+    store = CompactInventoryStore(inventory)
+    untouched_activity = store._state.activities[1]
+    untouched_exchange = store._state.exchanges[1]
+
+    with pytest.raises(RuntimeError):
+        with store.transaction("shallow-rollback") as tx:
+            assert store._state.activities[1] is untouched_activity
+            assert store._state.exchanges[1] is untouched_exchange
+            tx.patch_activity(0, {"location": "DE"})
+            tx.patch_exchange(1, {"amount": 3.0})
+            assert store._state.activities[0] is not tx._snapshot.activities[0]
+            assert store._state.exchanges[1] is not tx._snapshot.exchanges[1]
+            raise RuntimeError("abort")
+
+    assert store._state.activities[1] is untouched_activity
+    assert store._state.exchanges[1] is untouched_exchange
+    assert store.activity(0)["location"] == "CH"
+    assert store.exchange(1)["amount"] == np.float64(2.0)
+
+
 def test_nested_and_out_of_context_transactions_are_rejected(inventory):
     store = LegacyInventoryStore(inventory)
     transaction = store.transaction("outside")
@@ -488,6 +511,41 @@ def test_new_database_update_keeps_only_private_inventory_state(
     assert obj.get_inventory_store().find_one({"code": "updated"})["name"] == (
         "updated activity"
     )
+
+
+def test_new_database_promotes_compact_emissions_to_store_native_path(
+    inventory, monkeypatch
+):
+    obj = object.__new__(NewDatabase)
+    obj._inventory_api_active = True
+    obj.inventory_backend = "compact"
+    obj._source_inventory_store = CompactInventoryStore(inventory)
+    obj.scenarios = [{"model": "image", "pathway": "SSP2-Base", "year": 2050}]
+    obj.version = "3.12"
+    obj.system_model = "cutoff"
+    obj.use_absolute_efficiency = False
+    obj.gains_scenario = "CLE"
+    obj.database_cache_filepath = None
+    obj.inventories_cache_filepath = None
+    obj.additional_inventories = None
+
+    def fake_update(scenario, version, system_model, gains_scenario):
+        assert (version, system_model, gains_scenario) == ("3.12", "cutoff", "CLE")
+        assert "_inventory_working_copy" not in scenario
+        store = scenario["_inventory_store"]
+        assert isinstance(store, CompactInventoryStore)
+        with store.transaction("sector:emissions") as transaction:
+            transaction.patch_activity(2, {"store native": True})
+        return scenario
+
+    monkeypatch.setattr(new_database_module, "_update_emissions", fake_update)
+
+    obj.update("emissions", persist=False)
+
+    scenario = obj.scenarios[0]
+    assert "_inventory_working_copy" not in scenario
+    assert isinstance(scenario["_inventory_store"], CompactInventoryStore)
+    assert obj.get_inventory_store().activity(2)["store native"] is True
 
 
 def test_legacy_and_compact_match_after_randomized_mutations(inventory):

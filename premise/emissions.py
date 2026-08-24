@@ -3,6 +3,8 @@ Integrates projections regarding emissions of hot pollutants
 from GAINS.
 """
 
+import copy
+from collections import defaultdict
 from functools import lru_cache
 from typing import Union
 
@@ -12,9 +14,15 @@ import xarray as xr
 import yaml
 from numpy import ndarray
 
+from .activity_maps import GAINS_MAPPING, get_mapping
 from .filesystem_constants import DATA_DIR
+from .geomap import Geomap
 from .logger import create_logger
-from .inventory_store import get_scenario_inventory, replace_scenario_inventory
+from .inventory_store import (
+    CompactInventoryStore,
+    get_scenario_inventory,
+    replace_scenario_inventory,
+)
 from .transformation import (
     BaseTransformation,
     IAMDataCollection,
@@ -39,6 +47,21 @@ def _update_emissions(scenario, version, system_model, gains_scenario):
 
     if scenario["iam data"].gains_data_IAM is None:
         print("No pollutant emissions scenario data available -- skipping")
+        return scenario
+
+    store = scenario.get("_inventory_store")
+    if isinstance(store, CompactInventoryStore):
+        emissions = Emissions.from_inventory_store(
+            store=store,
+            year=scenario["year"],
+            model=scenario["model"],
+            pathway=scenario["pathway"],
+            iam_data=scenario["iam data"],
+            version=version,
+            system_model=system_model,
+            gains_scenario=gains_scenario,
+        )
+        emissions.update_emissions_in_store(store)
         return scenario
 
     emissions = Emissions(
@@ -98,6 +121,117 @@ class Emissions(BaseTransformation):
         for s in self.gains_map:
             for t in self.gains_map[s]:
                 self.rev_gains_map[t["name"]] = s
+
+    @classmethod
+    def from_inventory_store(
+        cls,
+        *,
+        store: CompactInventoryStore,
+        iam_data: IAMDataCollection,
+        model: str,
+        pathway: str,
+        year: int,
+        version: str,
+        system_model: str,
+        gains_scenario: str,
+    ) -> "Emissions":
+        """Create an updater without materialising the compact graph."""
+
+        updater = object.__new__(cls)
+        updater.database = None
+        updater.iam_data = iam_data
+        updater.model = model
+        updater.regions = iam_data.regions
+        updater.geo = Geomap(model=model)
+        updater.scenario = pathway
+        updater.year = year
+        updater.version = version
+        updater.system_model = system_model
+        updater.cache = {}
+        updater.index = {}
+        updater.gains_IAM = updater.prepare_data(iam_data.gains_data_IAM)
+        updater.ei_pollutants = fetch_mapping(EI_POLLUTANTS)
+        updater.gains_pollutant = {
+            value: key for key, value in updater.ei_pollutants.items()
+        }
+        updater.gains_scenario = gains_scenario
+
+        locations = {
+            activity.get("location")
+            for _, activity, _ in store._iter_storage_activities()
+            if activity.get("location") is not None
+        }
+        locations.update(("LA", "FJ", "GN"))
+        updater.ecoinvent_to_iam_loc = {
+            location: updater.geo.ecoinvent_to_iam_location(location)
+            for location in locations
+        }
+        updater.iam_to_ecoinvent_loc = defaultdict(list)
+        for location, region in updater.ecoinvent_to_iam_loc.items():
+            updater.iam_to_ecoinvent_loc[region].append(location)
+        updater.rev_gains_map = updater._compile_store_gains_mapping(store)
+        return updater
+
+    @staticmethod
+    def _compile_store_gains_mapping(
+        store: CompactInventoryStore,
+    ) -> dict[str, str]:
+        """Compile legacy GAINS contains/mask filters against store metadata."""
+
+        activities = {
+            activity_id: activity
+            for activity_id, activity, _ in store._iter_storage_activities()
+        }
+        strings: dict[str, dict[str, set[int]]] = {
+            "name": defaultdict(set),
+            "reference product": defaultdict(set),
+        }
+        for activity_id, activity in activities.items():
+            for field_name in strings:
+                value = activity.get(field_name)
+                if isinstance(value, str):
+                    strings[field_name][value].add(activity_id)
+
+        predicate_cache: dict[tuple[str, str], set[int]] = {}
+
+        def containing(field_name: str, term: str) -> set[int]:
+            key = (field_name, term)
+            if key not in predicate_cache:
+                predicate_cache[key] = {
+                    activity_id
+                    for value, activity_ids in strings.get(field_name, {}).items()
+                    if term in value
+                    for activity_id in activity_ids
+                }
+            return predicate_cache[key]
+
+        def normalise(filters, *, default_field="name") -> dict[str, list[str]]:
+            if isinstance(filters, str):
+                return {default_field: [filters]}
+            if isinstance(filters, list):
+                return {default_field: filters}
+            return {
+                field_name: values if isinstance(values, list) else [values]
+                for field_name, values in (filters or {}).items()
+            }
+
+        reverse: dict[str, str] = {}
+        mappings = get_mapping(filepath=GAINS_MAPPING, var="ecoinvent_aliases")
+        all_activity_ids = set(activities)
+        for sector, specification in mappings.items():
+            candidates = all_activity_ids
+            for field_name, terms in normalise(specification.get("fltr")).items():
+                field_matches: set[int] = set()
+                for term in terms:
+                    field_matches.update(containing(field_name, term))
+                candidates = candidates.intersection(field_matches)
+            excluded: set[int] = set()
+            for field_name, terms in normalise(specification.get("mask")).items():
+                for term in terms:
+                    excluded.update(containing(field_name, term))
+            for activity_id in candidates.difference(excluded):
+                reverse[activities[activity_id]["name"]] = sector
+        return reverse
 
     @staticmethod
     def add_world_region(data: xr.DataArray) -> xr.DataArray:
@@ -159,6 +293,66 @@ class Emissions(BaseTransformation):
                         regions=self.gains_IAM.region.values,
                     )
                     self.write_log(ds, status="updated")
+
+    def update_emissions_in_store(self, store: CompactInventoryStore) -> None:
+        """Patch hot-pollutant exchanges directly in a compact transaction."""
+
+        relevant = set(self.ei_pollutants)
+        regions = self.gains_IAM.region.values
+        with store.transaction("sector:emissions") as transaction:
+            for activity_id, dataset, exchange_ids in store._iter_storage_activities():
+                name = dataset["name"]
+                location = dataset["location"]
+                sector = self.rev_gains_map.get(name)
+                iam_location = self.ecoinvent_to_iam_loc.get(location)
+                if (
+                    sector is None
+                    or not iam_location
+                    or iam_location not in self.gains_IAM.coords["region"]
+                ):
+                    continue
+
+                log_parameters = copy.deepcopy(dataset.get("log parameters", {}))
+                log_changed = False
+                for exchange_id in exchange_ids:
+                    exchange = store._storage_exchange(exchange_id)
+                    if (
+                        exchange.get("type") != "biosphere"
+                        or exchange.get("name") not in relevant
+                    ):
+                        continue
+                    gains_pollutant = self.ei_pollutants[exchange["name"]]
+                    scaling_factor = self.find_gains_emissions_change(
+                        pollutant=gains_pollutant,
+                        location=(location if location in regions else iam_location),
+                        sector=sector,
+                    )
+                    if not 1 > scaling_factor > 0:
+                        continue
+                    if gains_pollutant in log_parameters:
+                        continue
+
+                    updated_exchange = copy.deepcopy(dict(exchange))
+                    wurst.rescale_exchange(
+                        updated_exchange,
+                        scaling_factor,
+                        remove_uncertainty=False,
+                    )
+                    transaction.patch_exchange(exchange_id, updated_exchange)
+                    if "GAINS sector" not in log_parameters:
+                        log_parameters["GAINS sector"] = sector
+                    log_parameters[gains_pollutant] = scaling_factor
+                    log_changed = True
+
+                if log_changed:
+                    transaction.patch_activity(
+                        activity_id,
+                        {"log parameters": log_parameters},
+                    )
+                log_dataset = dict(dataset)
+                if log_changed:
+                    log_dataset["log parameters"] = log_parameters
+                self.write_log(log_dataset, status="updated")
 
     def update_pollutant_emissions(
         self, dataset: dict, sector: str, regions: list

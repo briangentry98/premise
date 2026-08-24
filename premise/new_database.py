@@ -1246,13 +1246,17 @@ class NewDatabase:
         *,
         persist: bool,
     ) -> InventoryStore:
-        database = runtime_scenario.pop("_inventory_working_copy")
-        store = create_inventory_store(
-            database,
-            backend=self.inventory_backend,
-            scenario_identity=self._scenario_identity(runtime_scenario),
-            take_ownership=True,
-        )
+        store = runtime_scenario.pop("_inventory_store", None)
+        if store is None:
+            database = runtime_scenario.pop("_inventory_working_copy")
+            store = create_inventory_store(
+                database,
+                backend=self.inventory_backend,
+                scenario_identity=self._scenario_identity(runtime_scenario),
+                take_ownership=True,
+            )
+        else:
+            runtime_scenario.pop("_inventory_working_copy", None)
         scenario_definition.clear()
         scenario_definition.update(runtime_scenario)
         if persist:
@@ -1439,6 +1443,18 @@ class NewDatabase:
                     # Prepare the function and arguments
                     update_func = self.sector_update_methods[sector]["func"]
                     fixed_args = self.sector_update_methods[sector]["args"]
+                    if (
+                        sector == "emissions"
+                        and self.inventory_backend == "compact"
+                        and "_inventory_store" not in scenario
+                    ):
+                        database = scenario.pop("_inventory_working_copy")
+                        scenario["_inventory_store"] = create_inventory_store(
+                            database,
+                            backend="compact",
+                            scenario_identity=self._scenario_identity(scenario),
+                            take_ownership=True,
+                        )
                     scenario = update_func(scenario, *fixed_args)
 
                     if "applied functions" not in scenario:

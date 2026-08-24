@@ -25,6 +25,10 @@ and exchange replacement must occur inside a transaction. A transaction commits
 data and index changes together and restores its complete prior state if an
 exception leaves the context.
 
+Compact transactions keep a rollback-safe structural snapshot and copy only
+rows they touch. The emissions transformation uses this path directly; sectors
+not yet migrated continue through the private list-compatible bridge.
+
 Integrations that cannot consume the store may explicitly materialize it:
 
 ```python

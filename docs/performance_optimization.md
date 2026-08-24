@@ -7,8 +7,8 @@
 > warm IMAGE SSP2-M 2050 all-sector differential run it produced the exact same
 > semantic hash as the legacy store (`39efcf273da6b52e6c6bdfce8a6546a9a0819a054340fee9062ac2a7fddf808c`),
 > with 50,938 datasets and 1,597,616 exchanges. A matched diagnostic run (not
-> the five-run acceptance median) reduced wall time from 82.67 to 61.07 seconds
-> (26.1%) and sampled peak RSS from 2.692 to 1.970 GB (26.8%). This is well
+> the five-run acceptance median) reduced wall time from 82.67 to 59.34 seconds
+> (28.2%) and sampled peak RSS from 2.692 to 1.972 GB (26.7%). This is well
 > short of the required 50%/50% activation gate.
 > The default therefore remains `legacy`; transformation hot paths still need
 > to move off their private mutable working materialization.
@@ -46,8 +46,8 @@ includes the full all-sector update and compact checkpoint write.
 
 | Metric | Legacy oracle | Compact | Change |
 | --- | ---: | ---: | ---: |
-| End-to-end wall time | 82.67 s | 61.07 s | -26.1% |
-| Sampled peak RSS | 2.692 GB | 1.970 GB | -26.8% |
+| End-to-end wall time | 82.67 s | 59.34 s | -28.2% |
+| Sampled peak RSS | 2.692 GB | 1.972 GB | -26.7% |
 | Datasets | 50,938 | 50,938 | exact |
 | Exchanges | 1,597,616 | 1,597,616 | exact |
 
@@ -58,6 +58,15 @@ and NumPy `float32` and `float64` values retain their exact scalar types when a
 checkpoint is reopened. Source and final indexes are lazy, exchange storage is
 dense and ordered, and the final single-scenario build transfers exclusive
 ownership instead of deep-copying the working graph.
+
+Emissions is the first sector migrated off the private mutable working list. A
+compact build promotes the graph to a store before the final emissions update,
+compiles the legacy GAINS contains/mask mapping against activity metadata, and
+patches only affected activities and exchanges in one atomic transaction. The
+sector fell from 4.27 to 2.90 seconds in the matched full build. Compact
+transaction rollback now snapshots graph structure and replaces touched row
+payloads, avoiding a transaction-wide deep copy while retaining exact rollback
+semantics.
 
 The seed-zero canonical hash is
 `39efcf273da6b52e6c6bdfce8a6546a9a0819a054340fee9062ac2a7fddf808c`.
