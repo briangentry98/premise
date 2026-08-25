@@ -185,7 +185,20 @@ def test_biosphere_category_filter_preserves_order_sidecars_and_overlays(
     source_exchanges = InventoryStore.open(checkpoint)._checkout_materialized()[0][
         "exchanges"
     ]
-    copper, gold = source_exchanges[1:3]
+    copper, gold, technosphere = source_exchanges[1:4]
+    storage = copper._storage
+
+    first_masks = storage.biosphere_category_masks(categories, "kilogram")
+    repeated_masks = storage.biosphere_category_masks(categories, "kilogram")
+    match_mask, decisive_mask = first_masks
+
+    assert repeated_masks is first_masks
+    assert not match_mask.flags.writeable
+    assert not decisive_mask.flags.writeable
+    assert match_mask[copper._row]
+    assert decisive_mask[copper._row]
+    assert not decisive_mask[gold._row]
+    assert decisive_mask[technosphere._row]
 
     assert filter_biosphere_category(source_exchanges, categories, "kilogram") == [
         copper,

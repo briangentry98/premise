@@ -793,6 +793,9 @@ class _ColumnarExchangeStorage:
         self._scenario_cache_deleted_metadata: dict[
             tuple[int, int], tuple[str, ...]
         ] = {}
+        self._biosphere_category_masks: dict[
+            tuple[tuple[str, str], str], tuple[np.ndarray, np.ndarray]
+        ] = {}
         self._last_metadata_activity_id: int | None = None
         self._last_metadata_group: dict[int, dict[str, Any]] = {}
         self._last_scenario_metadata_activity_id: int | None = None
@@ -1194,6 +1197,49 @@ class _ColumnarExchangeStorage:
                 return bool(value)
             raise KeyError(field_name)
         raise KeyError(field_name)
+
+    def biosphere_category_masks(
+        self, categories: tuple[str, str], unit: str
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return exact-match and fully-columnar source-row masks."""
+
+        cache_key = (categories, unit)
+        masks = self._biosphere_category_masks.get(cache_key)
+        if masks is not None:
+            return masks
+
+        string_ids = tuple(
+            self._string_ids.get(value)
+            for value in ("biosphere", categories[0], categories[1], unit)
+        )
+        type_column = self._string_columns["type"]
+        encoded_predicates = (
+            (self._string_columns["categories__0"] >= 0)
+            & (self._string_columns["categories__1"] >= 0)
+            & (self._string_columns["unit"] >= 0)
+        )
+        if any(string_id is None for string_id in string_ids):
+            mask = np.zeros(self.row_count, dtype=np.bool_)
+        else:
+            type_id, first_id, second_id, unit_id = string_ids
+            mask = (
+                (type_column == type_id)
+                & (self._string_columns["categories__0"] == first_id)
+                & (self._string_columns["categories__1"] == second_id)
+                & (self._string_columns["unit"] == unit_id)
+            )
+        biosphere_type_id = self._string_ids.get("biosphere")
+        if biosphere_type_id is None:
+            decisive = type_column >= 0
+        else:
+            decisive = (type_column >= 0) & (
+                (type_column != biosphere_type_id) | encoded_predicates
+            )
+        mask.flags.writeable = False
+        decisive.flags.writeable = False
+        masks = mask, decisive
+        self._biosphere_category_masks[cache_key] = masks
+        return masks
 
     def close(self) -> None:
         sidecar = getattr(self, "_sidecar", None)
@@ -1704,6 +1750,7 @@ def filter_biosphere_category(
     matches = []
     append = matches.append
     encoded_categories = len(categories) == 2
+    source_masks: dict[_ColumnarExchangeStorage, tuple[np.ndarray, np.ndarray]] = {}
     for exchange in exchanges:
         if (
             encoded_categories
@@ -1711,24 +1758,16 @@ def filter_biosphere_category(
             and exchange._changes is None
         ):
             storage = exchange._storage
-            row = exchange._row
-            type_id = int(storage._string_columns["type"][row])
-            if type_id >= 0:
-                if storage._string_values[type_id] != "biosphere":
-                    continue
-                first = int(storage._string_columns["categories__0"][row])
-                second = int(storage._string_columns["categories__1"][row])
-                if first >= 0 and second >= 0:
-                    if (
-                        storage._string_values[first] != categories[0]
-                        or storage._string_values[second] != categories[1]
-                    ):
-                        continue
-                    unit_id = int(storage._string_columns["unit"][row])
-                    if unit_id >= 0:
-                        if storage._string_values[unit_id] == unit:
-                            append(exchange)
-                        continue
+            masks = source_masks.get(storage)
+            if masks is None:
+                masks = storage.biosphere_category_masks(categories, unit)
+                source_masks[storage] = masks
+            match_mask, decisive_mask = masks
+            if match_mask[exchange._row]:
+                append(exchange)
+                continue
+            if decisive_mask[exchange._row]:
+                continue
 
         if (
             exchange.get("type") == "biosphere"

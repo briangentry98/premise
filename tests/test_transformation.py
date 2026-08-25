@@ -267,6 +267,72 @@ def test_relink_allocation_uses_minimal_internal_candidates_only():
     ]
 
 
+def test_relink_prepass_preserves_order_totals_and_uncertainty(monkeypatch):
+    transformation = object.__new__(BaseTransformation)
+    production = {
+        "name": "fuel production",
+        "product": "fuel",
+        "location": "GLO",
+        "unit": "kilogram",
+        "type": "production",
+        "amount": 1.0,
+    }
+    biosphere = {
+        "name": "emission",
+        "unit": "kilogram",
+        "type": "biosphere",
+        "amount": 0.2,
+    }
+    zero = {
+        "name": "market for fuel",
+        "product": "fuel",
+        "location": "GLO",
+        "unit": "kilogram",
+        "type": "technosphere",
+        "amount": 0.0,
+    }
+    uncertain = {
+        **zero,
+        "amount": 2.0,
+        "uncertainty type": 2,
+        "loc": np.log(2.0),
+        "scale": 0.2,
+    }
+    regular = {**zero, "amount": 3.0}
+    dataset = {
+        "name": "consumer",
+        "location": "CH",
+        "exchanges": [production, zero, biosphere, uncertain, regular],
+    }
+    selected = []
+
+    def find_candidates(dataset, *, technosphere_exchanges, **kwargs):
+        selected.extend(technosphere_exchanges)
+        return [
+            transformation_module._relinked_exchange(exchange, "GLO")
+            for exchange in technosphere_exchanges
+        ]
+
+    monkeypatch.setattr(transformation, "find_candidates", find_candidates)
+
+    result = transformation.relink_technosphere_exchanges(dataset)
+
+    assert selected == [uncertain, regular]
+    assert result["exchanges"][:2] == [production, biosphere]
+    assert result["exchanges"][2] == {
+        "name": "market for fuel",
+        "product": "fuel",
+        "location": "GLO",
+        "unit": "kilogram",
+        "type": "technosphere",
+        "amount": 5.0,
+        "uncertainty type": 2,
+        "loc": np.log(5.0),
+        "scale": 0.2,
+    }
+    assert sum(exchange["amount"] for exchange in result["exchanges"]) == 6.2
+
+
 def test_provider_groups_preserve_order_and_invalidate_after_index_mutation():
     transformation = object.__new__(BaseTransformation)
     key = ("market for fuel", "fuel")

@@ -2778,10 +2778,16 @@ class BaseTransformation:
         exclusive=True,
         biggest_first=False,
         contained=False,
+        technosphere_exchanges=None,
     ):
         new_exchanges = []
 
-        for exchange in filter_technosphere_exchanges(dataset["exchanges"]):
+        exchanges = (
+            filter_technosphere_exchanges(dataset["exchanges"])
+            if technosphere_exchanges is None
+            else technosphere_exchanges
+        )
+        for exchange in exchanges:
             if self.is_exchange_in_cache(exchange, dataset["location"]):
                 self.process_cached_exchange(exchange, dataset, new_exchanges)
             else:
@@ -2821,47 +2827,52 @@ class BaseTransformation:
             * ``iam_regions``: List, lists IAM regions, if additional ones need to be defined.
         Modifies the dataset in place; returns the modified dataset."""
 
-        dataset["exchanges"] = [
-            exc
-            for exc in dataset.get("exchanges", [])
-            if not (
-                exc.get("type") == "technosphere"
-                and exc.get("amount") in (0, 0.0, None)
-            )
-        ]
-
-        sum_before = sum(exc["amount"] for exc in dataset["exchanges"])
-
-        # collect the name of exchange and the sum of amounts
-        # as a dictionary, for all technosphere exchanges
-        # in the dataset
-
+        exchanges = []
+        exchange_amounts = []
+        technosphere_exchanges = []
+        non_technosphere_exchanges = []
         exchanges_before = defaultdict(float)
-        for exc in dataset["exchanges"]:
-            if exc["type"] == "technosphere":
-                exchanges_before[exc["product"]] += exc["amount"]
-
         old_uncertainty = {}
+        missing_exchange_type = object()
+        for exc in dataset.get("exchanges", []):
+            exchange_type = exc.get("type", missing_exchange_type)
+            if exchange_type == "technosphere":
+                amount = exc.get("amount")
+                if amount in (0, 0.0, None):
+                    continue
+                technosphere_exchanges.append(exc)
+                product = exc["product"]
+                exchanges_before[product] += amount
 
-        for exc in dataset["exchanges"]:
-            if exc["type"] == "technosphere":
-                if exc.get("uncertainty type", 0) != 0:
-                    old_uncertainty[(exc["name"], exc.get("product"), exc["unit"])] = {
-                        "uncertainty type": exc.get("uncertainty type", 0),
-                        "amount": exc["amount"],
+                uncertainty_type = exc.get("uncertainty type", 0)
+                if uncertainty_type != 0:
+                    uncertainty_key = (exc["name"], product, exc["unit"])
+                    uncertainty = {
+                        "uncertainty type": uncertainty_type,
+                        "amount": amount,
                     }
-
                     for key in ["loc", "scale", "negative", "minimum", "maximum"]:
                         if key in exc:
-                            old_uncertainty[
-                                (exc["name"], exc.get("product"), exc["unit"])
-                            ][key] = exc[key]
+                            uncertainty[key] = exc[key]
+                    old_uncertainty[uncertainty_key] = uncertainty
+            else:
+                if exchange_type is missing_exchange_type:
+                    # Preserve the legacy KeyError for malformed exchanges.
+                    _ = exc["type"]
+                amount = exc["amount"]
+                non_technosphere_exchanges.append(exc)
+            exchanges.append(exc)
+            exchange_amounts.append(amount)
+
+        dataset["exchanges"] = exchanges
+        sum_before = sum(exchange_amounts)
 
         new_exchanges = self.find_candidates(
             dataset,
             exclusive=exclusive,
             biggest_first=biggest_first,
             contained=contained,
+            technosphere_exchanges=technosphere_exchanges,
         )
 
         # make unique list of exchanges from new_exchanges
@@ -2915,9 +2926,7 @@ class BaseTransformation:
                     if maximum:
                         exc["maximum"] = float(maximum)
 
-        dataset["exchanges"] = [
-            exc for exc in dataset["exchanges"] if exc["type"] != "technosphere"
-        ] + new_exchanges
+        dataset["exchanges"] = non_technosphere_exchanges + new_exchanges
 
         sum_after = sum(exc["amount"] for exc in dataset["exchanges"])
 
