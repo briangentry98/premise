@@ -156,6 +156,15 @@ def _trace_sector_functions(
 ) -> None:
     """Wrap imported sector entry points without changing their behavior."""
 
+    def activity_count(scenario: dict[str, Any]) -> int:
+        store = scenario.get("_inventory_store")
+        if store is not None:
+            return len(store)
+        working_copy = scenario.get("_inventory_working_copy")
+        if working_copy is not None:
+            return len(working_copy)
+        return len(get_scenario_inventory(scenario))
+
     for function_name, sector_label in UPDATE_FUNCTION_LABELS.items():
         original = getattr(new_database_module, function_name)
 
@@ -172,7 +181,7 @@ def _trace_sector_functions(
             with recorder.phase(f"sector:{_label}") as record:
                 try:
                     updated = _original(scenario, *args, **kwargs)
-                    record["activities"] = len(get_scenario_inventory(updated))
+                    record["activities"] = activity_count(updated)
                     return updated
                 finally:
                     if should_profile:
@@ -191,7 +200,7 @@ def _trace_sector_functions(
         with recorder.phase(f"sector:{vehicle_type}") as record:
             try:
                 updated = original_vehicles(scenario, vehicle_type, *args, **kwargs)
-                record["activities"] = len(get_scenario_inventory(updated))
+                record["activities"] = activity_count(updated)
                 return updated
             finally:
                 if should_profile:

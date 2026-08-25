@@ -4,6 +4,7 @@ from GAINS.
 """
 
 import copy
+import math
 from collections import defaultdict
 from functools import lru_cache
 from typing import Union
@@ -110,6 +111,7 @@ class Emissions(BaseTransformation):
 
         self.version = version
         self.gains_IAM = self.prepare_data(iam_data.gains_data_IAM)
+        self._compile_gains_factor_lookup()
         self.ei_pollutants = fetch_mapping(EI_POLLUTANTS)
         self.gains_pollutant = {v: k for k, v in self.ei_pollutants.items()}
         self.gains_scenario = gains_scenario
@@ -150,6 +152,7 @@ class Emissions(BaseTransformation):
         updater.cache = {}
         updater.index = {}
         updater.gains_IAM = updater.prepare_data(iam_data.gains_data_IAM)
+        updater._compile_gains_factor_lookup()
         updater.ei_pollutants = fetch_mapping(EI_POLLUTANTS)
         updater.gains_pollutant = {
             value: key for key, value in updater.ei_pollutants.items()
@@ -278,6 +281,46 @@ class Emissions(BaseTransformation):
 
         return data
 
+    def _compile_gains_factor_lookup(self) -> None:
+        """Keep GAINS selections in NumPy instead of rebuilding xarray indexes."""
+
+        ordered = self.gains_IAM.transpose("region", "pollutant", "sector")
+        self._gains_factor_values = np.asarray(ordered.values)
+        self._gains_region_index = {
+            value: position
+            for position, value in enumerate(ordered.coords["region"].values)
+        }
+        self._gains_pollutant_index = {
+            value: position
+            for position, value in enumerate(ordered.coords["pollutant"].values)
+        }
+        self._gains_sector_index = {
+            value: position
+            for position, value in enumerate(ordered.coords["sector"].values)
+        }
+
+    @staticmethod
+    def _rescaled_exchange_updates(exchange, scaling_factor: float) -> dict:
+        """Return the exact field changes made by Wurst's uncertainty rescaler."""
+
+        updates = {"amount": exchange["amount"] * scaling_factor}
+        uncertainty_type = exchange.get("uncertainty type")
+        if uncertainty_type not in {1, 2, 3, 4, 5}:
+            return updates
+
+        if "loc" in exchange:
+            updates["loc"] = (
+                exchange["loc"] + math.log(scaling_factor)
+                if uncertainty_type == 2
+                else exchange["loc"] * scaling_factor
+            )
+        if "scale" in exchange and uncertainty_type != 2:
+            updates["scale"] = exchange["scale"] * abs(scaling_factor)
+        for bound in ("minimum", "maximum"):
+            if bound in exchange:
+                updates[bound] = exchange[bound] * scaling_factor
+        return updates
+
     def update_emissions_in_database(self):
         for ds in self.database:
             name = ds["name"]
@@ -332,13 +375,13 @@ class Emissions(BaseTransformation):
                     if gains_pollutant in log_parameters:
                         continue
 
-                    updated_exchange = copy.deepcopy(dict(exchange))
-                    wurst.rescale_exchange(
-                        updated_exchange,
-                        scaling_factor,
-                        remove_uncertainty=False,
+                    transaction.patch_exchange(
+                        exchange_id,
+                        self._rescaled_exchange_updates(
+                            exchange,
+                            scaling_factor,
+                        ),
                     )
-                    transaction.patch_exchange(exchange_id, updated_exchange)
                     if "GAINS sector" not in log_parameters:
                         log_parameters["GAINS sector"] = sector
                     log_parameters[gains_pollutant] = scaling_factor
@@ -414,9 +457,14 @@ class Emissions(BaseTransformation):
         :return: a
         """
 
-        data = self.gains_IAM
+        if not hasattr(self, "_gains_factor_values"):
+            self._compile_gains_factor_lookup()
 
-        sf = data.loc[dict(region=location, pollutant=pollutant, sector=sector)].item()
+        sf = self._gains_factor_values[
+            self._gains_region_index[location],
+            self._gains_pollutant_index[pollutant],
+            self._gains_sector_index[sector],
+        ].item()
 
         if np.isnan(sf) or sf == 0.0:
             return 1.0
