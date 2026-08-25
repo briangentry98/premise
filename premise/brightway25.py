@@ -432,6 +432,9 @@ def _compact_payload_for_fast_write(data: list, name: str) -> list:
     )
     try:
         for dataset in data:
+            prepare_streaming = getattr(dataset, "_premise_prepare_fast_export", None)
+            if prepare_streaming is not None:
+                prepare_streaming()
             set_correct_process_type(dataset)
             if streaming:
                 progress.update(1)

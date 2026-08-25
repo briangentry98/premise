@@ -836,7 +836,13 @@ def load_database(
         # Match the legacy cache-loading path: source activities can omit
         # storage identifiers, but every exporter requires one.
         for dataset in materialized["database"]:
-            if not dataset.get("code"):
+            common_value = getattr(dataset, "_premise_common_value", None)
+            code = (
+                common_value("code")
+                if common_value is not None
+                else dataset.get("code")
+            )
+            if not code:
                 dataset["code"] = uuid.uuid4().hex
         return materialized
 

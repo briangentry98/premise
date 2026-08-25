@@ -388,6 +388,30 @@ def test_columnar_checkpoint_checkout_and_proxy_clone_are_copy_on_write(
     assert restored_store.materialize()[0] == expected
 
 
+def test_columnar_activity_hot_fields_remain_mapping_compatible(inventory, tmp_path):
+    checkpoint = CompactInventoryStore(inventory).checkpoint(
+        tmp_path / "source.inventory-store"
+    )
+    activity = InventoryStore.open(checkpoint)._checkout_materialized()[0]
+
+    activity["database"] = "scenario-db"
+    activity["code"] = "scenario-code"
+    activity["type"] = "process"
+
+    assert activity["database"] == "scenario-db"
+    assert activity["code"] == "scenario-code"
+    assert activity["type"] == "process"
+    assert list(activity).count("code") == 1
+    assert dict(activity)["database"] == "scenario-db"
+    assert activity.copy()["type"] == "process"
+
+    del activity["type"]
+    assert "type" not in activity
+    activity["type"] = "processwithreferenceproduct"
+    assert activity.pop("type") == "processwithreferenceproduct"
+    assert "type" not in activity
+
+
 def test_load_database_transfers_compact_store_without_exchange_materialization(
     inventory, tmp_path
 ):
@@ -439,6 +463,27 @@ def test_load_database_assigns_missing_codes_for_compact_store(
 
     assert isinstance(loaded["database"][0]["code"], str)
     assert loaded["database"][0]["code"]
+
+
+def test_consuming_loader_assigns_code_without_reading_activity_sidecar(
+    inventory, tmp_path
+):
+    inventory_without_code = copy.deepcopy(inventory)
+    inventory_without_code[0].pop("code")
+    checkpoint = CompactInventoryStore(inventory_without_code).checkpoint(
+        tmp_path / "source.inventory-store"
+    )
+    store = InventoryStore.open(checkpoint)
+    storage = store._state.activities[0]._storage
+
+    loaded = utils_module.load_database(
+        {"_inventory_store": store},
+        original_database=[],
+        consume_compact=True,
+    )
+
+    assert loaded["database"][0]["code"]
+    assert len(storage._activity_cache) == 0
 
 
 def test_compact_scenario_mapping_keeps_metadata_lazy_and_lossless(inventory, tmp_path):

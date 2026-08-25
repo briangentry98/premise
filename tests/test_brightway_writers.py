@@ -579,9 +579,7 @@ def test_brightway25_fast_compaction_keeps_required_descriptive_fields(
     assert dataset["type"] == "process"
 
 
-def test_brightway25_fast_compaction_streams_columnar_exchange_views(
-    monkeypatch, tmp_path
-):
+def test_brightway25_fast_compaction_streams_columnar_exchange_views(tmp_path):
     data = [
         {
             "database": "source-db",
@@ -590,7 +588,7 @@ def test_brightway25_fast_compaction_streams_columnar_exchange_views(
             "reference product": "product",
             "location": "CH",
             "unit": "kilogram",
-            "type": "process",
+            "comment": "remains lazy during payload preparation",
             "exchanges": [
                 {
                     "name": "activity",
@@ -599,6 +597,7 @@ def test_brightway25_fast_compaction_streams_columnar_exchange_views(
                     "location": "CH",
                     "amount": 1.0,
                     "type": "production",
+                    "input": ("source-db", "act-1"),
                     "output": ("source-db", "act-1"),
                 }
             ],
@@ -609,12 +608,14 @@ def test_brightway25_fast_compaction_streams_columnar_exchange_views(
     )
     columnar = InventoryStore.open(checkpoint)._checkout_materialized()
     exchange = columnar[0]["exchanges"][0]
-    monkeypatch.setattr("bw2data.utils.set_correct_process_type", lambda dataset: None)
+    storage = columnar[0]._storage
 
     brightway25_module._compact_payload_for_fast_write(columnar, "fast-db")
 
     assert columnar[0]["exchanges"][0] is exchange
     assert type(exchange).__name__ == "_ColumnarExchangeMapping"
+    assert columnar[0]["type"] == "processwithreferenceproduct"
+    assert len(storage._activity_cache) == 0
     assert brightway25_module._prepare_fast_exchange_payload(
         exchange
     ) == brightway25_module._prepare_fast_exchange_payload(data[0]["exchanges"][0])

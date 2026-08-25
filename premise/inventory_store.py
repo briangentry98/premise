@@ -39,6 +39,7 @@ ActivityId: TypeAlias = int
 ExchangeId: TypeAlias = int
 STORE_SCHEMA_VERSION = 5
 _UNHASHABLE = object()
+_COLUMNAR_ACTIVITY_MISSING = object()
 
 _ACTIVITY_COMMON_FIELDS = (
     "name",
@@ -50,6 +51,11 @@ _ACTIVITY_COMMON_FIELDS = (
     "code",
     "type",
 )
+_ACTIVITY_HOT_FIELD_ATTRIBUTES = {
+    "database": "_database",
+    "code": "_code",
+    "type": "_type",
+}
 _EXCHANGE_STRING_FIELDS = (
     "name",
     "product",
@@ -1144,7 +1150,14 @@ class _ColumnarExchangeMapping(MutableMapping[str, Any]):
 class _ColumnarActivityMapping(dict[str, Any]):
     """Dictionary-compatible activity with lazy uncommon metadata."""
 
-    __slots__ = ("_storage", "_activity_id", "_deleted")
+    __slots__ = (
+        "_storage",
+        "_activity_id",
+        "_deleted",
+        "_database",
+        "_code",
+        "_type",
+    )
 
     def __init__(
         self,
@@ -1152,13 +1165,37 @@ class _ColumnarActivityMapping(dict[str, Any]):
         activity_id: ActivityId,
         common: Mapping[str, Any],
     ) -> None:
-        super().__init__(common)
+        resident = dict(common)
+        self._database = resident.pop("database", _COLUMNAR_ACTIVITY_MISSING)
+        self._code = resident.pop("code", _COLUMNAR_ACTIVITY_MISSING)
+        self._type = resident.pop("type", _COLUMNAR_ACTIVITY_MISSING)
+        super().__init__(resident)
         self._storage = storage
         self._activity_id = activity_id
         self._deleted: set[str] = set()
 
     def _metadata(self) -> Mapping[str, Any]:
         return self._storage.activity_payload(self._activity_id)
+
+    def _premise_common_value(self, key: str, default: Any = None) -> Any:
+        """Read an Arrow-resident field without touching the metadata sidecar."""
+
+        if key in self._deleted:
+            return default
+        hot_attribute = _ACTIVITY_HOT_FIELD_ATTRIBUTES.get(key)
+        if hot_attribute is not None:
+            value = getattr(self, hot_attribute)
+            return default if value is _COLUMNAR_ACTIVITY_MISSING else value
+        if dict.__contains__(self, key):
+            return dict.__getitem__(self, key)
+        return default
+
+    def _premise_prepare_fast_export(self) -> None:
+        """Seed missing hot fields without decoding uncommon metadata."""
+
+        if self._type is _COLUMNAR_ACTIVITY_MISSING:
+            self._deleted.discard("type")
+            self._type = None
 
     @staticmethod
     def _requires_private_copy(value: Any) -> bool:
@@ -1179,6 +1216,13 @@ class _ColumnarActivityMapping(dict[str, Any]):
         )
 
     def __getitem__(self, key: str) -> Any:
+        hot_attribute = _ACTIVITY_HOT_FIELD_ATTRIBUTES.get(key)
+        if hot_attribute is not None:
+            if key in self._deleted:
+                raise KeyError(key)
+            value = getattr(self, hot_attribute)
+            if value is not _COLUMNAR_ACTIVITY_MISSING:
+                return value
         if dict.__contains__(self, key):
             return dict.__getitem__(self, key)
         if key in self._deleted:
@@ -1189,31 +1233,55 @@ class _ColumnarActivityMapping(dict[str, Any]):
         value = metadata[key]
         if self._requires_private_copy(value):
             value = copy.deepcopy(value)
-            dict.__setitem__(self, key, value)
+            if hot_attribute is not None:
+                setattr(self, hot_attribute, value)
+            else:
+                dict.__setitem__(self, key, value)
         return value
 
     def __setitem__(self, key: str, value: Any) -> None:
         self._deleted.discard(key)
+        hot_attribute = _ACTIVITY_HOT_FIELD_ATTRIBUTES.get(key)
+        if hot_attribute is not None:
+            setattr(self, hot_attribute, value)
+            return
         dict.__setitem__(self, key, value)
 
     def __delitem__(self, key: str) -> None:
         if not self.__contains__(key):
             raise KeyError(key)
+        hot_attribute = _ACTIVITY_HOT_FIELD_ATTRIBUTES.get(key)
+        if hot_attribute is not None:
+            setattr(self, hot_attribute, _COLUMNAR_ACTIVITY_MISSING)
         if dict.__contains__(self, key):
             dict.__delitem__(self, key)
         self._deleted.add(key)
 
     def __contains__(self, key: object) -> bool:
-        if dict.__contains__(self, key):
-            return True
         if not isinstance(key, str) or key in self._deleted:
             return False
+        hot_attribute = _ACTIVITY_HOT_FIELD_ATTRIBUTES.get(key)
+        if (
+            hot_attribute is not None
+            and getattr(self, hot_attribute) is not _COLUMNAR_ACTIVITY_MISSING
+        ):
+            return True
+        if dict.__contains__(self, key):
+            return True
         return key in self._metadata()
 
     def __iter__(self) -> Iterator[str]:
         yielded = set()
         for key in dict.__iter__(self):
             if key not in self._deleted:
+                yielded.add(key)
+                yield key
+        for key, hot_attribute in _ACTIVITY_HOT_FIELD_ATTRIBUTES.items():
+            if (
+                key not in yielded
+                and key not in self._deleted
+                and getattr(self, hot_attribute) is not _COLUMNAR_ACTIVITY_MISSING
+            ):
                 yielded.add(key)
                 yield key
         for key in self._metadata():
@@ -1259,6 +1327,9 @@ class _ColumnarActivityMapping(dict[str, Any]):
 
     def clear(self) -> None:
         self._deleted.update(self)
+        self._database = _COLUMNAR_ACTIVITY_MISSING
+        self._code = _COLUMNAR_ACTIVITY_MISSING
+        self._type = _COLUMNAR_ACTIVITY_MISSING
         dict.clear(self)
 
     def copy(self) -> dict[str, Any]:
