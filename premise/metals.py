@@ -20,7 +20,11 @@ import yaml
 
 from .export import biosphere_flows_dictionary
 from .logger import create_logger
-from .inventory_store import get_scenario_inventory, replace_scenario_inventory
+from .inventory_store import (
+    filter_biosphere_category,
+    get_scenario_inventory,
+    replace_scenario_inventory,
+)
 from .transformation import (
     BaseTransformation,
     Dict,
@@ -1046,13 +1050,9 @@ def is_market_dataset(dataset: dict) -> bool:
 
 def get_in_ground_resource_exchanges(dataset: dict) -> List[dict]:
     """Return natural-resource in-ground kilogram biosphere exchanges."""
-    return [
-        exc
-        for exc in dataset.get("exchanges", [])
-        if exc.get("type") == "biosphere"
-        and tuple(exc.get("categories", ())) == NATURAL_RESOURCE_IN_GROUND
-        and exc.get("unit") == "kilogram"
-    ]
+    return filter_biosphere_category(
+        dataset.get("exchanges", []), NATURAL_RESOURCE_IN_GROUND, "kilogram"
+    )
 
 
 @lru_cache(maxsize=None)

@@ -1507,6 +1507,51 @@ class _ColumnarExchangeMapping(MutableMapping[str, Any]):
         return repr(self.copy())
 
 
+def filter_biosphere_category(
+    exchanges: Iterable[Mapping[str, Any]],
+    categories: tuple[str, ...],
+    unit: str,
+) -> list[Mapping[str, Any]]:
+    """Filter biosphere exchanges while preserving ordered mapping semantics."""
+
+    matches = []
+    append = matches.append
+    encoded_categories = len(categories) == 2
+    for exchange in exchanges:
+        if (
+            encoded_categories
+            and isinstance(exchange, _ColumnarExchangeMapping)
+            and exchange._changes is None
+        ):
+            storage = exchange._storage
+            row = exchange._row
+            type_id = int(storage._string_columns["type"][row])
+            if type_id >= 0:
+                if storage._string_values[type_id] != "biosphere":
+                    continue
+                first = int(storage._string_columns["categories__0"][row])
+                second = int(storage._string_columns["categories__1"][row])
+                if first >= 0 and second >= 0:
+                    if (
+                        storage._string_values[first] != categories[0]
+                        or storage._string_values[second] != categories[1]
+                    ):
+                        continue
+                    unit_id = int(storage._string_columns["unit"][row])
+                    if unit_id >= 0:
+                        if storage._string_values[unit_id] == unit:
+                            append(exchange)
+                        continue
+
+        if (
+            exchange.get("type") == "biosphere"
+            and tuple(exchange.get("categories", ())) == categories
+            and exchange.get("unit") == unit
+        ):
+            append(exchange)
+    return matches
+
+
 class _ColumnarActivityMapping(dict[str, Any]):
     """Dictionary-compatible activity with lazy uncommon metadata."""
 

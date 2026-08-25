@@ -28,6 +28,7 @@ from premise.inventory_store import (
     _compact_scenario_mapping,
     _hydrate_scenario_mapping,
     compact_exchange_payload,
+    filter_biosphere_category,
     get_scenario_inventory,
     replace_scenario_inventory,
 )
@@ -148,6 +149,53 @@ def test_columnar_exchange_get_preserves_sidecar_and_overlay_semantics(
     assert exchange.get("location", marker) == "DE"
     del exchange["location"]
     assert exchange.get("location", marker) is marker
+
+
+def test_biosphere_category_filter_preserves_order_sidecars_and_overlays(
+    inventory, tmp_path
+):
+    categories = ("natural resource", "in ground")
+    exchanges = [
+        {
+            "name": "Copper",
+            "unit": "kilogram",
+            "type": "biosphere",
+            "categories": categories,
+            "amount": 1.0,
+        },
+        {
+            "name": "Gold",
+            "unit": "kilogram",
+            "type": "biosphere",
+            "categories": list(categories),
+            "amount": 2.0,
+        },
+        {
+            "name": "market for copper",
+            "product": "copper",
+            "unit": "kilogram",
+            "type": "technosphere",
+            "amount": 1.0,
+        },
+    ]
+    inventory[0]["exchanges"].extend(exchanges)
+    checkpoint = CompactInventoryStore(inventory).checkpoint(
+        tmp_path / "source.inventory-store"
+    )
+    source_exchanges = InventoryStore.open(checkpoint)._checkout_materialized()[0][
+        "exchanges"
+    ]
+    copper, gold = source_exchanges[1:3]
+
+    assert filter_biosphere_category(
+        source_exchanges, categories, "kilogram"
+    ) == [copper, gold]
+    copper["categories"] = ("air", "urban air close to ground")
+    assert filter_biosphere_category(
+        source_exchanges, categories, "kilogram"
+    ) == [gold]
+    compact = compact_exchange_payload(exchanges[0])
+    assert filter_biosphere_category([compact], categories, "kilogram") == [compact]
 
 
 @pytest.mark.parametrize("store_class", [LegacyInventoryStore, CompactInventoryStore])
