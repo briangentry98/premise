@@ -211,6 +211,62 @@ def test_inventory_dataset_clone_is_lossless_and_isolated():
     assert dataset["exchanges"][0]["amount"] == np.float64(1.0)
 
 
+def test_relink_allocation_uses_minimal_internal_candidates_only():
+    exchange = {
+        "name": "market for fuel",
+        "product": "fuel",
+        "location": "GLO",
+        "unit": "kilogram",
+        "type": "technosphere",
+        "amount": 8.0,
+        "uncertainty type": 2,
+        "loc": np.log(8.0),
+        "custom metadata": {"kept": True},
+    }
+    providers = [
+        {
+            "name": "market for fuel",
+            "location": "CH",
+            "production volume": 3.0,
+        },
+        {
+            "name": "market for fuel",
+            "location": "DE",
+            "production volume": 1.0,
+        },
+    ]
+
+    default, default_shares = transformation_module.allocate_inputs(
+        exchange.copy(), providers
+    )
+    minimal, minimal_shares = transformation_module.allocate_inputs(
+        exchange.copy(),
+        providers,
+        exchange_factory=transformation_module._relinked_exchange,
+    )
+
+    assert default[0]["custom metadata"] == {"kept": True}
+    assert default_shares == minimal_shares == [0.75, 0.25]
+    assert minimal == [
+        {
+            "name": "market for fuel",
+            "product": "fuel",
+            "location": "CH",
+            "unit": "kilogram",
+            "type": "technosphere",
+            "amount": 6.0,
+        },
+        {
+            "name": "market for fuel",
+            "product": "fuel",
+            "location": "DE",
+            "unit": "kilogram",
+            "type": "technosphere",
+            "amount": 2.0,
+        },
+    ]
+
+
 def test_provider_groups_preserve_order_and_invalidate_after_index_mutation():
     transformation = object.__new__(BaseTransformation)
     key = ("market for fuel", "fuel")

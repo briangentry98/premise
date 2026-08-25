@@ -413,7 +413,20 @@ def new_exchange(exc, location, factor):
     return rescale_exchange(copied_exc, factor, remove_uncertainty=False)
 
 
-def allocate_inputs(exc, lst):
+def _relinked_exchange(exc, location, factor=1.0, *, name=None, product=None):
+    """Return only fields consumed by the relinking aggregation pass."""
+
+    return {
+        "name": exc["name"] if name is None else name,
+        "product": exc["product"] if product is None else product,
+        "unit": exc["unit"],
+        "location": location,
+        "type": "technosphere",
+        "amount": exc["amount"] * factor,
+    }
+
+
+def allocate_inputs(exc, lst, exchange_factory=new_exchange):
     """
     Allocate the input exchanges in ``lst`` to ``exc``,
     using production volumes where possible, and equal splitting otherwise.
@@ -434,7 +447,7 @@ def allocate_inputs(exc, lst):
 
     return (
         [
-            new_exchange(exc, obj["location"], factor / total)
+            exchange_factory(exc, obj["location"], factor / total)
             for obj, factor in zip(lst, pvs)
             if factor > 0
         ],
@@ -2495,10 +2508,12 @@ class BaseTransformation:
             single_dataset.get("reference product") == exchange["product"]
         ), f"Candidate: {single_dataset}, exchange: {exchange}"
 
-        new_exc = exchange.copy()
-        new_exc["location"] = single_dataset["location"]
-        new_exc["name"] = single_dataset["name"]
-        new_exc["product"] = single_dataset["reference product"]
+        new_exc = _relinked_exchange(
+            exchange,
+            single_dataset["location"],
+            name=single_dataset["name"],
+            product=single_dataset["reference product"],
+        )
 
         new_exchanges.append(new_exc)
 
@@ -2538,10 +2553,12 @@ class BaseTransformation:
         if dataset["location"] in locations_set:
             candidate = by_location[dataset["location"]][0]
 
-            new_exc = exchange.copy()
-            new_exc["location"] = candidate["location"]
-            new_exc["name"] = candidate["name"]
-            new_exc["product"] = candidate["reference product"]
+            new_exc = _relinked_exchange(
+                exchange,
+                candidate["location"],
+                name=candidate["name"],
+                product=candidate["reference product"],
+            )
 
             self.add_new_entry_to_cache(
                 dataset["location"],
@@ -2647,7 +2664,9 @@ class BaseTransformation:
             if dataset["location"] == "World" and "GLO" in locs:
                 kept = [ds for ds in kept if ds["location"] == "GLO"]
 
-            allocated, share = allocate_inputs(exchange, kept)
+            allocated, share = allocate_inputs(
+                exchange, kept, exchange_factory=_relinked_exchange
+            )
 
             new_exchanges.extend(allocated)
             self.add_new_entry_to_cache(dataset["location"], exchange, allocated, share)
@@ -2666,7 +2685,9 @@ class BaseTransformation:
             kept = [
                 ds for loc in ("GLO", "RoW", "World") for ds in by_location.get(loc, [])
             ]
-            allocated, share = allocate_inputs(exchange, kept)
+            allocated, share = allocate_inputs(
+                exchange, kept, exchange_factory=_relinked_exchange
+            )
             new_exchanges.extend(allocated)
             self.add_new_entry_to_cache(dataset["location"], exchange, allocated, share)
 
@@ -2711,7 +2732,9 @@ class BaseTransformation:
         kept = [ds for loc in gis_match for ds in by_location.get(loc, [])]
 
         if kept:
-            allocated, share = allocate_inputs(exchange, kept)
+            allocated, share = allocate_inputs(
+                exchange, kept, exchange_factory=_relinked_exchange
+            )
             new_exchanges.extend(allocated)
             self.add_new_entry_to_cache(dataset["location"], exchange, allocated, share)
 
@@ -2731,10 +2754,12 @@ class BaseTransformation:
                 if default_location in locations_set:
                     default_dataset = by_location[default_location][0]
 
-                    new_exc = exchange.copy()
-                    new_exc["name"] = default_dataset["name"]
-                    new_exc["product"] = default_dataset["reference product"]
-                    new_exc["location"] = default_dataset["location"]
+                    new_exc = _relinked_exchange(
+                        exchange,
+                        default_dataset["location"],
+                        name=default_dataset["name"],
+                        product=default_dataset["reference product"],
+                    )
                     new_exchanges.append(new_exc)
 
                     break
