@@ -1098,6 +1098,16 @@ class _CompactExchangeMapping(MutableMapping[str, Any]):
             raise KeyError(key)
         return self._extra[key]
 
+    def get(self, key: str, default: Any = None) -> Any:
+        field_bit = _COMPACT_EXCHANGE_FIELD_BITS.get(key)
+        if field_bit is not None:
+            if self._present & field_bit:
+                return getattr(self, _COMPACT_EXCHANGE_FIELD_ATTRIBUTES[key])
+            return default
+        if self._extra is None:
+            return default
+        return self._extra.get(key, default)
+
     def __setitem__(self, key: str, value: Any) -> None:
         field_bit = _COMPACT_EXCHANGE_FIELD_BITS.get(key)
         if field_bit is not None:
@@ -1387,6 +1397,18 @@ class _ColumnarExchangeMapping(MutableMapping[str, Any]):
                 raise KeyError(key)
             return value
         return self._base_value(key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        if self._changes is not None:
+            value = self._changed_value(key)
+            if value is _COLUMNAR_DELETED:
+                return default
+            if value is not _COLUMNAR_MISSING:
+                return value
+        try:
+            return self._base_value(key)
+        except KeyError:
+            return default
 
     def __setitem__(self, key: str, value: Any) -> None:
         self._set_change(key, value)

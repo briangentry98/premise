@@ -115,6 +115,8 @@ def test_compact_added_exchange_preserves_mutable_mapping_semantics():
 
     assert dict(exchange) == payload
     assert exchange._extra is not None
+    assert exchange.get("amount") == np.float32(2.5)
+    assert exchange.get("missing", "fallback") == "fallback"
     exchange["amount"] = 4.0
     exchange["minimum"] = 1.0
     del exchange["uncertainty type"]
@@ -126,6 +128,26 @@ def test_compact_added_exchange_preserves_mutable_mapping_semantics():
     cloned["custom"]["values"].append(3)
     assert exchange["custom"] == {"values": [1, 2]}
     assert dict(pickle.loads(pickle.dumps(exchange))) == dict(exchange)
+
+
+def test_columnar_exchange_get_preserves_sidecar_and_overlay_semantics(
+    inventory, tmp_path
+):
+    inventory[0]["exchanges"][0]["location"] = None
+    checkpoint = CompactInventoryStore(inventory).checkpoint(
+        tmp_path / "source.inventory-store"
+    )
+    exchange = InventoryStore.open(checkpoint)._checkout_materialized()[0][
+        "exchanges"
+    ][0]
+    marker = object()
+
+    assert exchange.get("location", marker) is None
+    assert exchange.get("missing", marker) is marker
+    exchange["location"] = "DE"
+    assert exchange.get("location", marker) == "DE"
+    del exchange["location"]
+    assert exchange.get("location", marker) is marker
 
 
 @pytest.mark.parametrize("store_class", [LegacyInventoryStore, CompactInventoryStore])
