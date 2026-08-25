@@ -698,6 +698,7 @@ class _DenseExchangeTable:
 
 
 _COLUMNAR_DELETED = object()
+_COLUMNAR_MISSING = object()
 
 
 class _ColumnarExchangeStorage:
@@ -1028,7 +1029,43 @@ class _ColumnarExchangeMapping(MutableMapping[str, Any]):
     def __init__(self, storage: _ColumnarExchangeStorage, row: int) -> None:
         self._storage = storage
         self._row = row
-        self._changes: dict[str, Any] | None = None
+        self._changes: tuple[str, Any] | list[Any] | None = None
+
+    def _changed_value(self, key: str) -> Any:
+        if self._changes is None:
+            return _COLUMNAR_MISSING
+        if isinstance(self._changes, tuple):
+            return self._changes[1] if self._changes[0] == key else _COLUMNAR_MISSING
+        for position in range(0, len(self._changes), 2):
+            if self._changes[position] == key:
+                return self._changes[position + 1]
+        return _COLUMNAR_MISSING
+
+    def _set_change(self, key: str, value: Any) -> None:
+        if self._changes is None:
+            self._changes = (key, value)
+        elif isinstance(self._changes, tuple):
+            previous_key, previous_value = self._changes
+            if previous_key == key:
+                self._changes = (key, value)
+            else:
+                self._changes = [previous_key, previous_value, key, value]
+        else:
+            for position in range(0, len(self._changes), 2):
+                if self._changes[position] == key:
+                    self._changes[position + 1] = value
+                    break
+            else:
+                self._changes.extend((key, value))
+
+    def _iter_changes(self) -> Iterator[tuple[str, Any]]:
+        if self._changes is None:
+            return
+        if isinstance(self._changes, tuple):
+            yield self._changes
+        else:
+            for position in range(0, len(self._changes), 2):
+                yield self._changes[position], self._changes[position + 1]
 
     def _base_value(self, key: str) -> Any:
         try:
@@ -1040,49 +1077,42 @@ class _ColumnarExchangeMapping(MutableMapping[str, Any]):
             value = metadata[key]
             if isinstance(value, (dict, list, set)):
                 value = copy.deepcopy(value)
-                if self._changes is None:
-                    self._changes = {}
-                self._changes[key] = value
+                self._set_change(key, value)
             return value
 
     def __getitem__(self, key: str) -> Any:
-        if self._changes is not None and key in self._changes:
-            value = self._changes[key]
+        value = self._changed_value(key)
+        if value is not _COLUMNAR_MISSING:
             if value is _COLUMNAR_DELETED:
                 raise KeyError(key)
             return value
         return self._base_value(key)
 
     def __setitem__(self, key: str, value: Any) -> None:
-        if self._changes is None:
-            self._changes = {}
-        self._changes[key] = value
+        self._set_change(key, value)
 
     def __delitem__(self, key: str) -> None:
         try:
             self[key]
         except KeyError:
             raise KeyError(key) from None
-        if self._changes is None:
-            self._changes = {}
-        self._changes[key] = _COLUMNAR_DELETED
+        self._set_change(key, _COLUMNAR_DELETED)
 
     def __iter__(self) -> Iterator[str]:
         yielded = set()
         for key in self._storage.common_keys(self._row):
-            if self._changes is None or self._changes.get(key) is not _COLUMNAR_DELETED:
+            if self._changed_value(key) is not _COLUMNAR_DELETED:
                 yielded.add(key)
                 yield key
         for key in self._storage.metadata(self._row):
             if key in yielded:
                 continue
-            if self._changes is None or self._changes.get(key) is not _COLUMNAR_DELETED:
+            if self._changed_value(key) is not _COLUMNAR_DELETED:
                 yielded.add(key)
                 yield key
-        if self._changes is not None:
-            for key, value in self._changes.items():
-                if key not in yielded and value is not _COLUMNAR_DELETED:
-                    yield key
+        for key, value in self._iter_changes():
+            if key not in yielded and value is not _COLUMNAR_DELETED:
+                yield key
 
     def __len__(self) -> int:
         return sum(1 for _ in self)
