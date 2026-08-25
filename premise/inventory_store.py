@@ -1286,6 +1286,7 @@ class _ColumnarExchangeMapping(MutableMapping[str, Any]):
         self,
         columns: Mapping[str, list[Any]],
         collect_string: Callable[[Any], None] | None,
+        scenario_cache_compatibility: bool = False,
     ) -> Mapping[str, Any]:
         """Append this row directly to checkpoint columns.
 
@@ -1300,6 +1301,12 @@ class _ColumnarExchangeMapping(MutableMapping[str, Any]):
             for field_name in _EXCHANGE_STRING_FIELDS:
                 string_id = int(storage._string_columns[field_name][row])
                 value = storage._string_values[string_id] if string_id >= 0 else None
+                if (
+                    scenario_cache_compatibility
+                    and isinstance(value, str)
+                    and value in {"", "None", "nan"}
+                ):
+                    value = None
                 columns[field_name].append(value)
                 if collect_string is not None:
                     collect_string(value)
@@ -1318,18 +1325,25 @@ class _ColumnarExchangeMapping(MutableMapping[str, Any]):
 
             for field_name in _EXCHANGE_NUMERIC_FIELDS:
                 kind = int(storage._numeric_kinds[field_name][row])
-                columns[f"{field_name}__kind"].append(kind)
-                columns[f"{field_name}__float"].append(
-                    (
-                        float(storage._numeric_floats[field_name][row])
-                        if kind in {
-                            _NUMERIC_PYTHON_FLOAT,
-                            _NUMERIC_FLOAT32,
-                            _NUMERIC_FLOAT64,
-                        }
-                        else None
-                    )
+                float_value = (
+                    float(storage._numeric_floats[field_name][row])
+                    if kind
+                    in {
+                        _NUMERIC_PYTHON_FLOAT,
+                        _NUMERIC_FLOAT32,
+                        _NUMERIC_FLOAT64,
+                    }
+                    else None
                 )
+                if (
+                    scenario_cache_compatibility
+                    and float_value is not None
+                    and float_value != float_value
+                ):
+                    kind = _NUMERIC_MISSING
+                    float_value = None
+                columns[f"{field_name}__kind"].append(kind)
+                columns[f"{field_name}__float"].append(float_value)
                 columns[f"{field_name}__int"].append(
                     int(storage._numeric_ints[field_name][row])
                     if kind == _NUMERIC_PYTHON_INT
@@ -1345,6 +1359,12 @@ class _ColumnarExchangeMapping(MutableMapping[str, Any]):
         metadata = dict(storage.metadata(row))
         for field_name in _EXCHANGE_STRING_FIELDS:
             value = self._checkpoint_value(field_name, metadata)
+            if (
+                scenario_cache_compatibility
+                and isinstance(value, str)
+                and value in {"", "None", "nan"}
+            ):
+                value = None
             columns[field_name].append(value if isinstance(value, str) else None)
             if collect_string is not None:
                 collect_string(value)
@@ -1365,6 +1385,12 @@ class _ColumnarExchangeMapping(MutableMapping[str, Any]):
         for field_name in _EXCHANGE_NUMERIC_FIELDS:
             value = self._checkpoint_value(field_name, metadata)
             kind, float_value, int_value = _numeric_column_parts(value)
+            if (
+                scenario_cache_compatibility
+                and float_value is not None
+                and float_value != float_value
+            ):
+                kind, float_value, int_value = _NUMERIC_MISSING, None, None
             numeric_kinds[field_name] = kind
             columns[f"{field_name}__kind"].append(kind)
             columns[f"{field_name}__float"].append(float_value)
@@ -2011,19 +2037,43 @@ class _InMemoryInventoryStore(InventoryStore):
         *,
         scenario_identity: Any = None,
         take_ownership: bool = False,
+        scenario_cache_compatibility: bool = False,
     ) -> None:
         self._state = self._new_state()
         self._scenario_identity = scenario_identity
         self._lock = threading.RLock()
         self._active_transaction = False
         self._shared_state = False
-        self._ingest(database, take_ownership=take_ownership)
+        self._scenario_cache_compatibility = scenario_cache_compatibility
+        self._ingest(
+            database,
+            take_ownership=take_ownership,
+            scenario_cache_compatibility=scenario_cache_compatibility,
+        )
 
     def _new_state(self) -> _StoreState:
         state = _StoreState()
         if self.dense_exchange_table:
             state.exchanges = _DenseExchangeTable()
         return state
+
+    def _normalize_scenario_activity(
+        self, payload: MutableMapping[str, Any]
+    ) -> MutableMapping[str, Any]:
+        if self._scenario_cache_compatibility:
+            from .utils import _normalize_scenario_cache_activity
+
+            _normalize_scenario_cache_activity(payload)
+        return payload
+
+    def _normalize_scenario_exchange(
+        self, payload: MutableMapping[str, Any]
+    ) -> MutableMapping[str, Any]:
+        if self._scenario_cache_compatibility:
+            from .utils import _normalize_scenario_cache_exchange
+
+            _normalize_scenario_cache_exchange(payload)
+        return payload
 
     @property
     def generation(self) -> int:
@@ -2038,13 +2088,27 @@ class _InMemoryInventoryStore(InventoryStore):
         database: Iterable[Mapping[str, Any]],
         *,
         take_ownership: bool,
+        scenario_cache_compatibility: bool,
     ) -> None:
+        normalize_activity = None
+        normalize_exchange = None
+        if scenario_cache_compatibility:
+            from .utils import (
+                _normalize_scenario_cache_activity,
+                _normalize_scenario_cache_exchange,
+            )
+
+            normalize_activity = _normalize_scenario_cache_activity
+            normalize_exchange = _normalize_scenario_cache_exchange
+
         for dataset in database:
             payload = (
                 dataset
                 if take_ownership and isinstance(dataset, dict)
                 else copy.deepcopy(dict(dataset))
             )
+            if normalize_activity is not None:
+                normalize_activity(payload)
             exchanges = payload.pop("exchanges", [])
             activity_id = self._state.next_activity_id
             self._state.next_activity_id += 1
@@ -2053,19 +2117,28 @@ class _InMemoryInventoryStore(InventoryStore):
             if self.dense_exchange_table:
                 exchange_start = self._state.next_exchange_id
                 for exchange in exchanges:
-                    exchange_id = self._state.next_exchange_id
-                    self._state.next_exchange_id += 1
-                    self._state.exchanges[exchange_id] = (
+                    stored_exchange = (
                         exchange
                         if take_ownership and isinstance(exchange, Mapping)
                         else copy.deepcopy(dict(exchange))
                     )
+                    if normalize_exchange is not None:
+                        normalize_exchange(stored_exchange)
+                    exchange_id = self._state.next_exchange_id
+                    self._state.next_exchange_id += 1
+                    self._state.exchanges[exchange_id] = stored_exchange
                 self._state.activity_exchanges[activity_id] = range(
                     exchange_start, self._state.next_exchange_id
                 )
             else:
                 self._state.activity_exchanges[activity_id] = []
                 for exchange in exchanges:
+                    if normalize_exchange is not None:
+                        exchange = normalize_exchange(
+                            exchange
+                            if take_ownership and isinstance(exchange, MutableMapping)
+                            else copy.deepcopy(dict(exchange))
+                        )
                     self._add_exchange_unchecked(
                         activity_id, exchange, take_ownership=take_ownership
                     )
@@ -2310,6 +2383,7 @@ class _InMemoryInventoryStore(InventoryStore):
         child._lock = threading.RLock()
         child._active_transaction = False
         child._shared_state = False
+        child._scenario_cache_compatibility = self._scenario_cache_compatibility
         return child
 
     def iter_materialized(
@@ -2324,6 +2398,7 @@ class _InMemoryInventoryStore(InventoryStore):
 
     def _add_activity_unchecked(self, payload: Mapping[str, Any]) -> ActivityId:
         data = copy.deepcopy(dict(payload))
+        self._normalize_scenario_activity(data)
         exchanges = data.pop("exchanges", [])
         activity_id = self._state.next_activity_id
         self._state.next_activity_id += 1
@@ -2350,6 +2425,7 @@ class _InMemoryInventoryStore(InventoryStore):
             if take_ownership and isinstance(payload, Mapping)
             else copy.deepcopy(dict(payload))
         )
+        self._normalize_scenario_exchange(self._state.exchanges[exchange_id])
         if self.eager_exchange_owners:
             self._state.exchange_owner[exchange_id] = activity_id
         exchange_ids = self._state.activity_exchanges[activity_id]
@@ -2511,6 +2587,7 @@ class CompactInventoryStore(_InMemoryInventoryStore):
             child._lock = threading.RLock()
             child._active_transaction = False
             child._shared_state = False
+            child._scenario_cache_compatibility = self._scenario_cache_compatibility
             child._shares_source_storage = True
             return child
 
@@ -2560,6 +2637,7 @@ class CompactInventoryStore(_InMemoryInventoryStore):
         child._lock = threading.RLock()
         child._active_transaction = False
         child._shared_state = True
+        child._scenario_cache_compatibility = self._scenario_cache_compatibility
         self._shared_state = True
         return child
 
@@ -2888,6 +2966,7 @@ class InventoryTransaction:
         payload.update(changes)
         for field_name in delete_fields:
             payload.pop(field_name, None)
+        self.store._normalize_scenario_activity(payload)
         self.store._state.activities[activity_id] = payload
         if exchanges is not None:
             self.replace_exchanges(activity_id, exchanges)
@@ -2925,6 +3004,7 @@ class InventoryTransaction:
         payload.update(copy.deepcopy(dict(updates)))
         for field_name in delete_fields:
             payload.pop(field_name, None)
+        self.store._normalize_scenario_exchange(payload)
         self.store._state.exchanges[exchange_id] = payload
         self.store._invalidate_indexes()
 
@@ -2983,18 +3063,21 @@ def create_inventory_store(
     backend: Literal["compact", "legacy"] = "compact",
     scenario_identity: Any = None,
     take_ownership: bool = False,
+    scenario_cache_compatibility: bool = False,
 ) -> InventoryStore:
     if backend == "compact":
         return CompactInventoryStore(
             database,
             scenario_identity=scenario_identity,
             take_ownership=take_ownership,
+            scenario_cache_compatibility=scenario_cache_compatibility,
         )
     if backend == "legacy":
         return LegacyInventoryStore(
             database,
             scenario_identity=scenario_identity,
             take_ownership=take_ownership,
+            scenario_cache_compatibility=scenario_cache_compatibility,
         )
     raise ValueError("inventory_backend must be either 'compact' or 'legacy'.")
 
@@ -3183,6 +3266,23 @@ def _write_checkpoint_payloads(
 ) -> tuple[dict[str, list[Any]], dict[str, list[Any]], list[str]]:
     """Serialize metadata and Arrow rows in one ordered graph traversal."""
 
+    scenario_cache_compatibility = getattr(
+        store, "_scenario_cache_compatibility", False
+    )
+    normalize_activity_metadata = None
+    normalize_exchange_metadata = None
+    exchange_field_is_restored = None
+    if scenario_cache_compatibility:
+        from .utils import (
+            _normalize_scenario_cache_activity,
+            _normalize_scenario_cache_exchange,
+            _scenario_cache_exchange_field_is_restored,
+        )
+
+        normalize_activity_metadata = _normalize_scenario_cache_activity
+        normalize_exchange_metadata = _normalize_scenario_cache_exchange
+        exchange_field_is_restored = _scenario_cache_exchange_field_is_restored
+
     id_columns = ("exchange_id", "activity_id", "exchange_ordinal")
     category_columns = ("categories__0", "categories__1")
     numeric_columns = tuple(
@@ -3213,39 +3313,64 @@ def _write_checkpoint_payloads(
     def append_payload(columns, payload) -> dict[str, Any]:
         append_columnar = getattr(payload, "_premise_append_checkpoint_payload", None)
         if append_columnar is not None:
-            return append_columnar(
+            metadata = append_columnar(
                 columns,
                 collect_string if pa is None else None,
+                scenario_cache_compatibility,
             )
-        for field_name in _EXCHANGE_STRING_FIELDS:
-            value = payload.get(field_name)
-            columns[field_name].append(value if isinstance(value, str) else None)
-            if pa is None:
-                collect_string(value)
-        categories = payload.get("categories")
-        valid_categories = (
-            isinstance(categories, tuple)
-            and len(categories) == 2
-            and all(isinstance(item, str) for item in categories)
-        )
-        columns["categories__0"].append(categories[0] if valid_categories else None)
-        columns["categories__1"].append(categories[1] if valid_categories else None)
-        if pa is None and valid_categories:
-            collect_string(categories[0])
-            collect_string(categories[1])
-        numeric_kinds = {}
-        for field_name in _EXCHANGE_NUMERIC_FIELDS:
-            kind, float_value, int_value = _numeric_column_parts(
-                payload.get(field_name, _UNHASHABLE)
+        else:
+            for field_name in _EXCHANGE_STRING_FIELDS:
+                value = payload.get(field_name)
+                if (
+                    scenario_cache_compatibility
+                    and isinstance(value, str)
+                    and value in {"", "None", "nan"}
+                ):
+                    value = None
+                columns[field_name].append(value if isinstance(value, str) else None)
+                if pa is None:
+                    collect_string(value)
+            categories = payload.get("categories")
+            valid_categories = (
+                isinstance(categories, tuple)
+                and len(categories) == 2
+                and all(isinstance(item, str) for item in categories)
             )
-            numeric_kinds[field_name] = kind
-            columns[f"{field_name}__kind"].append(kind)
-            columns[f"{field_name}__float"].append(float_value)
-            columns[f"{field_name}__int"].append(int_value)
-        for field_name in _EXCHANGE_BOOLEAN_FIELDS:
-            value = payload.get(field_name)
-            columns[field_name].append(value if type(value) is bool else None)
-        return _exchange_sidecar_metadata(payload, numeric_kinds=numeric_kinds)
+            columns["categories__0"].append(categories[0] if valid_categories else None)
+            columns["categories__1"].append(categories[1] if valid_categories else None)
+            if pa is None and valid_categories:
+                collect_string(categories[0])
+                collect_string(categories[1])
+            numeric_kinds = {}
+            for field_name in _EXCHANGE_NUMERIC_FIELDS:
+                kind, float_value, int_value = _numeric_column_parts(
+                    payload.get(field_name, _UNHASHABLE)
+                )
+                if (
+                    scenario_cache_compatibility
+                    and float_value is not None
+                    and float_value != float_value
+                ):
+                    kind, float_value, int_value = _NUMERIC_MISSING, None, None
+                numeric_kinds[field_name] = kind
+                columns[f"{field_name}__kind"].append(kind)
+                columns[f"{field_name}__float"].append(float_value)
+                columns[f"{field_name}__int"].append(int_value)
+            for field_name in _EXCHANGE_BOOLEAN_FIELDS:
+                value = payload.get(field_name)
+                columns[field_name].append(value if type(value) is bool else None)
+            metadata = _exchange_sidecar_metadata(payload, numeric_kinds=numeric_kinds)
+
+        if scenario_cache_compatibility:
+            assert exchange_field_is_restored is not None
+            assert normalize_exchange_metadata is not None
+            if any(
+                not exchange_field_is_restored(field_name, value)
+                for field_name, value in metadata.items()
+            ):
+                metadata = dict(metadata)
+                normalize_exchange_metadata(metadata)
+        return metadata
 
     schema = None
     if pa is not None:
@@ -3327,11 +3452,14 @@ def _write_checkpoint_payloads(
             activity_metadata = (
                 materialize() if materialize is not None else dict(payload)
             )
+            activity_metadata = _activity_sidecar_metadata(activity_metadata)
+            if normalize_activity_metadata is not None:
+                normalize_activity_metadata(activity_metadata)
             write_sidecar_record(
                 activity_sidecar,
                 "activity",
                 activity_id,
-                _activity_sidecar_metadata(activity_metadata),
+                activity_metadata,
             )
             if exchange_metadata:
                 write_sidecar_record(
@@ -3563,6 +3691,7 @@ def _open_checkpoint(path: Path) -> InventoryStore:
         store._lock = threading.RLock()
         store._active_transaction = False
         store._shared_state = False
+        store._scenario_cache_compatibility = False
         return store
 
     activity_payloads: dict[int, dict[str, Any]] = {}

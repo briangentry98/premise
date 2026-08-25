@@ -1179,6 +1179,61 @@ def _has_cache_value(value: Any) -> bool:
         return True
 
 
+def _scenario_metadata_value_is_restored(value: Any) -> bool:
+    """Return whether the legacy scenario-cache loader restores ``value``.
+
+    Scenario payloads historically passed through ``create_scenario_cache``
+    followed by ``load_database`` before callers could inspect or export them.
+    The writer drops null-like values, while the loader additionally skips
+    false and empty metadata values.  Compact scenario stores must reproduce
+    that observable boundary without weakening the lossless generic store
+    contract.
+    """
+
+    if not _has_cache_value(value):
+        return False
+    try:
+        return bool(value)
+    except (TypeError, ValueError):
+        # The legacy loader cannot truth-test arbitrary vector values. Keep
+        # them here so scenario sealing remains lossless for custom metadata.
+        return True
+
+
+def _normalize_scenario_cache_activity(
+    dataset: MutableMapping[str, Any],
+) -> MutableMapping[str, Any]:
+    """Apply legacy post-cache field-presence semantics to one activity."""
+
+    for field, value in list(dataset.items()):
+        if (
+            field not in _SCENARIO_TRIMMED_DATASET_FIELDS
+            and not _scenario_metadata_value_is_restored(value)
+        ):
+            del dataset[field]
+    return dataset
+
+
+def _scenario_cache_exchange_field_is_restored(field: str, value: Any) -> bool:
+    """Return whether one exchange field survives a legacy cache round trip."""
+
+    return _has_cache_value(value) and (
+        field in _SCENARIO_TRIMMED_EXCHANGE_FIELDS
+        or _scenario_metadata_value_is_restored(value)
+    )
+
+
+def _normalize_scenario_cache_exchange(
+    exchange: MutableMapping[str, Any],
+) -> MutableMapping[str, Any]:
+    """Apply legacy post-cache field-presence semantics to one exchange."""
+
+    for field, value in list(exchange.items()):
+        if not _scenario_cache_exchange_field_is_restored(field, value):
+            del exchange[field]
+    return exchange
+
+
 def _metadata_for_cache_dataset(ds: Dict[str, Any]) -> Tuple[tuple, Dict[str, Any]]:
     key = (ds["name"], ds["reference product"], ds["location"])
     metadata = {

@@ -266,6 +266,62 @@ def test_scenario_cache_preserves_regionalized_without_metadata_reload(tmp_path)
     assert scenario["database"][0]["classifications"] == [("CPC", "17100")]
 
 
+def test_scenario_compatible_store_matches_legacy_cache_roundtrip(tmp_path):
+    database = [
+        {
+            "database": "test-db",
+            "code": "activity-code",
+            "name": "activity",
+            "reference product": "service",
+            "location": "GLO",
+            "unit": "unit",
+            "regionalized": False,
+            "comment": "None",
+            "has_downstream_consumer": False,
+            "empty metadata": [],
+            "meaningful metadata": {"kept": True},
+            "exchanges": [
+                {
+                    "name": "activity",
+                    "product": "service",
+                    "location": "None",
+                    "unit": "unit",
+                    "type": "production",
+                    "amount": 0,
+                    "uncertainty type": 0,
+                    "production volume": float("nan"),
+                    "comment": 0,
+                    "categories": [],
+                    "custom false": False,
+                    "custom value": "kept",
+                }
+            ],
+        }
+    ]
+    legacy_database = deepcopy(database)
+    database_ref, metadata_ref = create_scenario_cache(
+        legacy_database,
+        tmp_path / "scenario-cache.pickle",
+    )
+    scenario = {
+        "database filepath": database_ref,
+        "database metadata filepath": metadata_ref,
+    }
+    load_database(
+        scenario,
+        original_database=[],
+        delete=False,
+        load_metadata=True,
+    )
+
+    compact = CompactInventoryStore(
+        deepcopy(database),
+        scenario_cache_compatibility=True,
+    ).materialize()
+
+    assert compact == scenario["database"]
+
+
 def test_scenario_cache_compacts_each_exchange_only_once(tmp_path, monkeypatch):
     calls = 0
     original = utils_module._trim_scenario_exchange

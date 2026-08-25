@@ -1425,6 +1425,7 @@ class NewDatabase:
                 backend=self.inventory_backend,
                 scenario_identity=self._scenario_identity(runtime_scenario),
                 take_ownership=True,
+                scenario_cache_compatibility=not persist,
             )
         else:
             runtime_scenario.pop("_inventory_working_copy", None)
@@ -1432,6 +1433,7 @@ class NewDatabase:
         scenario_definition.clear()
         scenario_definition.update(runtime_scenario)
         if persist:
+            store._scenario_cache_compatibility = True
             checkpoint = DIR_CACHED_FILES / f"{uuid.uuid4().hex}.inventory-store"
             checkpoint = store.checkpoint(checkpoint)
             scenario_definition["_inventory_checkpoint"] = checkpoint
@@ -1645,6 +1647,7 @@ class NewDatabase:
                             backend="compact",
                             scenario_identity=self._scenario_identity(scenario),
                             take_ownership=True,
+                            scenario_cache_compatibility=not persist,
                         )
                     scenario = update_func(scenario, *fixed_args)
 

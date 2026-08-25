@@ -949,7 +949,23 @@ def test_new_database_update_keeps_only_private_inventory_state(
                 "location": "GLO",
                 "unit": "unit",
                 "code": "updated",
-                "exchanges": [],
+                "comment": None,
+                "has_downstream_consumer": False,
+                "regionalized": False,
+                "exchanges": [
+                    {
+                        "name": "updated activity",
+                        "product": "service",
+                        "location": "None",
+                        "unit": "unit",
+                        "type": "production",
+                        "amount": 0,
+                        "uncertainty type": 0,
+                        "production volume": np.nan,
+                        "comment": 0,
+                        "categories": [],
+                    }
+                ],
             }
         )
         replace_scenario_inventory(scenario, database)
@@ -969,6 +985,21 @@ def test_new_database_update_keeps_only_private_inventory_state(
     assert obj.get_inventory_store().find_one({"code": "updated"})["name"] == (
         "updated activity"
     )
+    updated = obj.materialize_inventory()[-1]
+    assert updated["regionalized"] is False
+    assert "comment" not in updated
+    assert "has_downstream_consumer" not in updated
+    assert updated["exchanges"] == [
+        {
+            "name": "updated activity",
+            "product": "service",
+            "unit": "unit",
+            "type": "production",
+            "amount": 0,
+            "uncertainty type": 0,
+            "categories": [],
+        }
+    ]
 
 
 def test_new_database_promotes_compact_emissions_to_store_native_path(
@@ -993,7 +1024,14 @@ def test_new_database_promotes_compact_emissions_to_store_native_path(
         store = scenario["_inventory_store"]
         assert isinstance(store, CompactInventoryStore)
         with store.transaction("sector:emissions") as transaction:
-            transaction.patch_activity(2, {"store native": True})
+            transaction.patch_activity(
+                2,
+                {"store native": True, "has_downstream_consumer": False},
+            )
+            transaction.patch_exchange(
+                1,
+                {"comment": 0, "production volume": np.nan},
+            )
         return scenario
 
     monkeypatch.setattr(new_database_module, "_update_emissions", fake_update)
@@ -1004,6 +1042,9 @@ def test_new_database_promotes_compact_emissions_to_store_native_path(
     assert "_inventory_working_copy" not in scenario
     assert isinstance(scenario["_inventory_store"], CompactInventoryStore)
     assert obj.get_inventory_store().activity(2)["store native"] is True
+    assert "has_downstream_consumer" not in obj.get_inventory_store().activity(2)
+    assert "comment" not in obj.get_inventory_store().exchange(1)
+    assert "production volume" not in obj.get_inventory_store().exchange(1)
 
 
 def test_legacy_and_compact_match_after_randomized_mutations(inventory):
