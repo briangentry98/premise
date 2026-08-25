@@ -12,10 +12,24 @@ from premise.activity_maps import InventorySet
 from premise.marginal_mixes import get_list_contrained_suppliers
 from premise.transformation import (
     BaseTransformation,
+    _exclude_exchange_objects,
     clone_inventory_dataset,
     find_fuel_efficiency,
     prepare_fuel_filters,
 )
+
+
+def test_exclude_exchange_objects_does_not_compare_mapping_contents():
+    class EqualityRaises(dict):
+        def __eq__(self, other):
+            raise AssertionError("exchange equality must not be evaluated")
+
+    selected = EqualityRaises(amount=1)
+    equal_but_distinct = EqualityRaises(amount=1)
+
+    assert _exclude_exchange_objects([selected, equal_but_distinct], [selected]) == [
+        equal_but_distinct
+    ]
 
 
 def make_market_transformation(monkeypatch, technology_shares):

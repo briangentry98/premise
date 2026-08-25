@@ -52,6 +52,13 @@ logger = logging.getLogger("module")
 _SCENARIO_GIS_CACHE_KEY = "__premise_gis_match_v1__"
 
 
+def _exclude_exchange_objects(exchanges, excluded):
+    """Return exchanges whose object identities are not selected."""
+
+    excluded_ids = {id(exchange) for exchange in excluded}
+    return [exchange for exchange in exchanges if id(exchange) not in excluded_ids]
+
+
 @dataclass(frozen=True, slots=True, eq=False)
 class _ProviderRecord(Mapping[str, Any]):
     """Compact mapping-compatible provider snapshot used by activity indexes."""
@@ -1984,8 +1991,14 @@ class BaseTransformation:
                         if negative:
                             exc["negative"] = float(negative)
 
-            # Update act["exchanges"] by removing the exchanges to relink
-            act["exchanges"] = [e for e in act["exchanges"] if e not in excs_to_relink]
+            # ``excs_to_relink`` contains the exact objects selected from this
+            # exchange list. Identity membership avoids quadratic full-mapping
+            # equality checks, which are especially expensive for lazy compact
+            # exchange views. The selection predicate is content-based, so
+            # equal duplicate exchanges are selected together.
+            act["exchanges"] = _exclude_exchange_objects(
+                act["exchanges"], excs_to_relink
+            )
             # Update act["exchanges"] by adding new exchanges
             act["exchanges"].extend(new_exchanges)
 
