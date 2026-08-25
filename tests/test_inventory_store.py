@@ -31,6 +31,7 @@ from premise.inventory_store import (
     replace_scenario_inventory,
 )
 from premise.new_database import NewDatabase
+from premise.transformation import clone_inventory_dataset
 
 
 @pytest.fixture
@@ -351,6 +352,40 @@ def test_checkpoint_roundtrip_preserves_arbitrary_metadata(
         "metadata_offsets.arrow",
         "checksums.json",
     }
+
+
+def test_columnar_checkpoint_checkout_and_proxy_clone_are_copy_on_write(
+    inventory, tmp_path
+):
+    checkpoint = CompactInventoryStore(inventory).checkpoint(
+        tmp_path / "source.inventory-store"
+    )
+    reopened = InventoryStore.open(checkpoint)
+
+    assert type(reopened._state.exchanges).__name__ == "_ColumnarExchangeTable"
+    working_copy = reopened._checkout_materialized()
+    source_exchange = working_copy[2]["exchanges"][0]
+    cloned = clone_inventory_dataset(working_copy[2])
+    cloned_exchange = cloned["exchanges"][0]
+
+    assert type(source_exchange).__name__ == "_ColumnarExchangeMapping"
+    assert cloned_exchange is not source_exchange
+    assert cloned_exchange._storage is source_exchange._storage
+
+    cloned_exchange["amount"] = np.float64(7)
+    del cloned_exchange["input"]
+
+    assert source_exchange["amount"] == np.float64(2)
+    assert source_exchange["input"] == ("ecoinvent", "ch-grid")
+    assert cloned_exchange["amount"] == np.float64(7)
+    assert "input" not in cloned_exchange
+
+    expected = copy.deepcopy(cloned)
+    restored_store = CompactInventoryStore(
+        [cloned], take_ownership=True, scenario_identity="clone"
+    )
+    assert restored_store._state.exchanges[0] is cloned_exchange
+    assert restored_store.materialize()[0] == expected
 
 
 def test_compact_scenario_mapping_keeps_metadata_lazy_and_lossless(inventory, tmp_path):

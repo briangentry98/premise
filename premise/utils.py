@@ -3,6 +3,7 @@ Various utils functions.
 """
 
 import json
+import hashlib
 import os
 import pickle
 import sys
@@ -618,6 +619,21 @@ def cache_ref_exists(file_name: Path) -> bool:
 
     file_name = Path(file_name)
     return file_name.exists() or get_cache_manifest_path(file_name).exists()
+
+
+def cache_ref_fingerprint(file_name: Path) -> str:
+    """Return a cheap invalidation fingerprint for a cache and its shards."""
+
+    cache_ref = resolve_cache_ref(Path(file_name))
+    paths = [cache_ref]
+    if _is_cache_manifest(cache_ref):
+        paths.extend(_iter_cache_bundle_paths(cache_ref))
+    records = []
+    for path in paths:
+        stat = path.stat()
+        records.append((str(path.resolve()), int(stat.st_size), int(stat.st_mtime_ns)))
+    encoded = json.dumps(records, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _is_cache_manifest(file_name: Path) -> bool:

@@ -35,6 +35,7 @@ except ModuleNotFoundError:
 
 import premise.new_database as new_database_module
 import premise.pathways as pathways_module
+from premise.inventory_store import CompactInventoryStore
 from premise.new_database import NewDatabase, check_presence_biosphere_database
 from premise.pathways import PathwaysDataPackage
 from premise.utils import get_cache_manifest_path
@@ -900,6 +901,49 @@ def test_find_cached_db_supports_manifest_bundle(monkeypatch, tmp_path):
     assert loaded == [{"name": "base"}]
     assert obj.database_cache_filepath == manifest_path
     assert obj.database_metadata_cache_filepath == metadata_manifest_path
+
+
+def test_compact_source_checkpoint_is_invalidated_with_underlying_caches(
+    monkeypatch, tmp_path
+):
+    obj = object.__new__(NewDatabase)
+    obj.source_type = "brightway"
+    obj.system_model = "cutoff"
+    obj.version = "3.12"
+    obj.keep_source_db_uncertainty = False
+    obj.keep_imports_uncertainty = False
+    monkeypatch.setattr(new_database_module, "DIR_CACHED_DB", tmp_path)
+
+    source = obj._database_cache_path("source-db")
+    inventories = obj._database_cache_path("source-db", inventories=True)
+    cache_paths = (
+        source,
+        obj._metadata_cache_path(source),
+        inventories,
+        obj._metadata_cache_path(inventories),
+    )
+    for cache_path in cache_paths:
+        cache_path.write_bytes(b"cache")
+
+    store = CompactInventoryStore(
+        [
+            {
+                "name": "activity",
+                "reference product": "product",
+                "location": "GLO",
+                "unit": "kilogram",
+                "exchanges": [],
+            }
+        ]
+    )
+    checkpoint = obj._write_compact_source_checkpoint("source-db", store)
+
+    found = obj._find_compact_source_checkpoint("source-db")
+    assert found is not None
+    assert found[0] == checkpoint
+
+    source.write_bytes(b"changed-cache")
+    assert obj._find_compact_source_checkpoint("source-db") is None
 
 
 def test_constructor_marks_database_complete_after_inventory_cache_miss(monkeypatch):

@@ -11,14 +11,15 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import mmap
 import os
 import pickle
 import shutil
 import tempfile
 import threading
 from abc import ABC, abstractmethod
-from collections import defaultdict
-from collections.abc import Iterable, Iterator, Mapping
+from collections import OrderedDict, defaultdict
+from collections.abc import Iterable, Iterator, Mapping, MutableMapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
@@ -36,7 +37,7 @@ except ImportError:  # pragma: no cover - exercised only in minimal environments
 
 ActivityId: TypeAlias = int
 ExchangeId: TypeAlias = int
-STORE_SCHEMA_VERSION = 4
+STORE_SCHEMA_VERSION = 5
 _UNHASHABLE = object()
 
 _ACTIVITY_COMMON_FIELDS = (
@@ -120,6 +121,16 @@ def _exchange_sidecar_metadata(
             continue
         metadata[key] = value
     return metadata
+
+
+def _activity_sidecar_metadata(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Return activity fields not represented losslessly in Arrow columns."""
+
+    return {
+        key: value
+        for key, value in payload.items()
+        if key not in _ACTIVITY_COMMON_FIELDS or not isinstance(value, str)
+    }
 
 
 class InventoryStoreError(RuntimeError):
@@ -612,7 +623,7 @@ class ActivityRecord(_ImmutableRecord):
 class _StoreState:
     activities: dict[ActivityId, dict[str, Any]] = field(default_factory=dict)
     activity_order: list[ActivityId] = field(default_factory=list)
-    exchanges: dict[ExchangeId, dict[str, Any]] = field(default_factory=dict)
+    exchanges: Any = field(default_factory=dict)
     exchange_owner: dict[ExchangeId, ActivityId] = field(default_factory=dict)
     activity_exchanges: dict[ActivityId, list[ExchangeId] | range] = field(
         default_factory=dict
@@ -642,7 +653,7 @@ class _DenseExchangeTable:
     __slots__ = ("_rows", "_length")
 
     def __init__(self) -> None:
-        self._rows: list[dict[str, Any] | None] = []
+        self._rows: list[Mapping[str, Any] | None] = []
         self._length = 0
 
     def __len__(self) -> int:
@@ -655,12 +666,12 @@ class _DenseExchangeTable:
             and self._rows[exchange_id] is not None
         )
 
-    def __getitem__(self, exchange_id: ExchangeId) -> dict[str, Any]:
+    def __getitem__(self, exchange_id: ExchangeId) -> Mapping[str, Any]:
         if exchange_id not in self:
             raise KeyError(exchange_id)
         return self._rows[exchange_id]
 
-    def __setitem__(self, exchange_id: ExchangeId, payload: dict[str, Any]) -> None:
+    def __setitem__(self, exchange_id: ExchangeId, payload: Mapping[str, Any]) -> None:
         if exchange_id == len(self._rows):
             self._rows.append(payload)
             self._length += 1
@@ -682,6 +693,630 @@ class _DenseExchangeTable:
 
         duplicate = type(self)()
         duplicate._rows = self._rows.copy()
+        duplicate._length = self._length
+        return duplicate
+
+
+_COLUMNAR_DELETED = object()
+
+
+class _ColumnarExchangeStorage:
+    """Compact immutable exchange columns plus lazy sidecar metadata.
+
+    Arrow dictionaries are normalised into small NumPy integer columns when a
+    checkpoint is opened.  This keeps repeated field access fast enough for the
+    remaining list-based transformations without recreating a dictionary for
+    every source exchange.  Arbitrary fields stay in the memory-mapped sidecar
+    and are decoded one activity at a time through a bounded LRU cache.
+    """
+
+    _CACHE_SIZE = 128
+
+    def __init__(
+        self,
+        checkpoint: Path,
+        *,
+        exchange_count: int,
+        activity_ids: np.ndarray,
+        exchange_starts: np.ndarray,
+        exchange_counts: np.ndarray,
+        activity_offsets: Mapping[int, tuple[int, int]],
+        exchange_metadata_offsets: Mapping[int, tuple[int, int]],
+    ) -> None:
+        if pa is None or pa_ipc is None:
+            raise RuntimeError("PyArrow is required for lazy compact checkpoints.")
+        self.checkpoint = checkpoint
+        self.row_count = int(exchange_count)
+        self.activity_ids = activity_ids
+        self.exchange_starts = exchange_starts
+        self.exchange_ends = exchange_starts + exchange_counts
+        self.activity_offsets = dict(activity_offsets)
+        self.exchange_metadata_offsets = dict(exchange_metadata_offsets)
+        self._activity_cache: OrderedDict[int, dict[str, Any]] = OrderedDict()
+        self._metadata_cache: OrderedDict[int, dict[int, dict[str, Any]]] = (
+            OrderedDict()
+        )
+        self._metadata_lock = threading.RLock()
+        self._sidecar_file = (checkpoint / "metadata.bin").open("rb")
+        self._sidecar = mmap.mmap(
+            self._sidecar_file.fileno(), length=0, access=mmap.ACCESS_READ
+        )
+        self._string_values: list[str] = []
+        self._string_ids: dict[str, int] = {}
+        self._string_columns: dict[str, np.ndarray] = {
+            field_name: np.full(self.row_count, -1, dtype=np.int32)
+            for field_name in (
+                *_EXCHANGE_STRING_FIELDS,
+                "categories__0",
+                "categories__1",
+            )
+        }
+        self._numeric_kinds = {
+            field_name: np.zeros(self.row_count, dtype=np.int8)
+            for field_name in _EXCHANGE_NUMERIC_FIELDS
+        }
+        self._numeric_floats = {
+            field_name: np.zeros(self.row_count, dtype=np.float64)
+            for field_name in _EXCHANGE_NUMERIC_FIELDS
+        }
+        self._numeric_ints = {
+            field_name: np.zeros(self.row_count, dtype=np.int64)
+            for field_name in _EXCHANGE_NUMERIC_FIELDS
+        }
+        self._boolean_columns = {
+            field_name: np.full(self.row_count, -1, dtype=np.int8)
+            for field_name in _EXCHANGE_BOOLEAN_FIELDS
+        }
+        self.exchange_ids = np.empty(self.row_count, dtype=np.int64)
+        self._load_exchange_columns(checkpoint / "exchanges.arrow")
+        expected = np.arange(self.row_count, dtype=np.int64)
+        self._dense_ids = bool(np.array_equal(self.exchange_ids, expected))
+        self._row_by_id = (
+            None
+            if self._dense_ids
+            else {
+                int(exchange_id): row
+                for row, exchange_id in enumerate(self.exchange_ids)
+            }
+        )
+
+    def _global_string_id(self, value: str) -> int:
+        string_id = self._string_ids.get(value)
+        if string_id is None:
+            string_id = len(self._string_values)
+            self._string_ids[value] = string_id
+            self._string_values.append(value)
+        return string_id
+
+    def _copy_dictionary_column(
+        self, array: Any, target: np.ndarray, start: int, stop: int
+    ) -> None:
+        if not pa.types.is_dictionary(array.type):
+            array = array.dictionary_encode()
+        local_values = array.dictionary.to_pylist()
+        local_to_global = np.fromiter(
+            (self._global_string_id(value) for value in local_values),
+            dtype=np.int32,
+            count=len(local_values),
+        )
+        if not local_values:
+            target[start:stop] = -1
+            return
+        indices = array.indices.fill_null(0).to_numpy(zero_copy_only=False)
+        target[start:stop] = local_to_global[indices]
+        if array.null_count:
+            nulls = array.is_null().to_numpy(zero_copy_only=False)
+            target[start:stop][nulls] = -1
+
+    def _load_exchange_columns(self, path: Path) -> None:
+        cursor = 0
+        try:
+            with pa.memory_map(str(path), "r") as source:
+                try:
+                    reader = pa_ipc.open_stream(source)
+                    batches = reader
+                except pa.ArrowInvalid:
+                    reader = pa_ipc.open_file(source)
+                    batches = (
+                        reader.get_batch(index)
+                        for index in range(reader.num_record_batches)
+                    )
+                for batch in batches:
+                    start = cursor
+                    stop = start + batch.num_rows
+                    if stop > self.row_count:
+                        raise InventoryStoreCorruptionError(
+                            "Exchange rows exceed the checkpoint manifest count."
+                        )
+                    names = {
+                        name: index for index, name in enumerate(batch.schema.names)
+                    }
+                    self.exchange_ids[start:stop] = batch.column(
+                        names["exchange_id"]
+                    ).to_numpy(zero_copy_only=False)
+                    for field_name, target in self._string_columns.items():
+                        self._copy_dictionary_column(
+                            batch.column(names[field_name]), target, start, stop
+                        )
+                    for field_name in _EXCHANGE_NUMERIC_FIELDS:
+                        self._numeric_kinds[field_name][start:stop] = batch.column(
+                            names[f"{field_name}__kind"]
+                        ).to_numpy(zero_copy_only=False)
+                        self._numeric_floats[field_name][start:stop] = (
+                            batch.column(names[f"{field_name}__float"])
+                            .fill_null(0)
+                            .to_numpy(zero_copy_only=False)
+                        )
+                        self._numeric_ints[field_name][start:stop] = (
+                            batch.column(names[f"{field_name}__int"])
+                            .fill_null(0)
+                            .to_numpy(zero_copy_only=False)
+                        )
+                    for field_name in _EXCHANGE_BOOLEAN_FIELDS:
+                        values = batch.column(names[field_name])
+                        target = self._boolean_columns[field_name]
+                        target[start:stop] = values.fill_null(False).to_numpy(
+                            zero_copy_only=False
+                        )
+                        if values.null_count:
+                            target[start:stop][
+                                values.is_null().to_numpy(zero_copy_only=False)
+                            ] = -1
+                    cursor = stop
+        except (pa.ArrowInvalid, pa.ArrowIOError) as error:
+            raise InventoryStoreCorruptionError(
+                f"Cannot memory-map exchange columns from {path}."
+            ) from error
+        if cursor != self.row_count:
+            raise InventoryStoreCorruptionError(
+                "Exchange row count does not match the checkpoint manifest."
+            )
+
+    def row_for_id(self, exchange_id: ExchangeId) -> int:
+        if self._dense_ids:
+            if 0 <= exchange_id < self.row_count:
+                return exchange_id
+            raise KeyError(exchange_id)
+        try:
+            return self._row_by_id[exchange_id]
+        except KeyError as error:
+            raise KeyError(exchange_id) from error
+
+    def exchange_id(self, row: int) -> ExchangeId:
+        return int(self.exchange_ids[row])
+
+    def activity_exchange_ids(self, activity_position: int) -> range | list[int]:
+        start = int(self.exchange_starts[activity_position])
+        stop = int(self.exchange_ends[activity_position])
+        if self._dense_ids:
+            return range(start, stop)
+        return self.exchange_ids[start:stop].tolist()
+
+    def _decode_sidecar_record(
+        self,
+        activity_id: ActivityId,
+        offsets: Mapping[int, tuple[int, int]],
+        record_kind: str,
+    ) -> Any:
+        try:
+            offset, length = offsets[activity_id]
+        except KeyError as error:
+            raise InventoryStoreCorruptionError(
+                f"Missing {record_kind} for activity {activity_id}."
+            ) from error
+        try:
+            return pickle.loads(self._sidecar[offset : offset + length])
+        except Exception as error:
+            raise InventoryStoreCorruptionError(
+                f"Invalid {record_kind} for activity {activity_id}."
+            ) from error
+
+    def activity_payload(self, activity_id: ActivityId) -> dict[str, Any]:
+        with self._metadata_lock:
+            payload = self._activity_cache.get(activity_id)
+            if payload is None:
+                payload = self._decode_sidecar_record(
+                    activity_id, self.activity_offsets, "activity metadata"
+                )
+                if not isinstance(payload, dict):
+                    raise InventoryStoreCorruptionError(
+                        f"Invalid activity metadata for activity {activity_id}."
+                    )
+                self._activity_cache[activity_id] = payload
+                if len(self._activity_cache) > self._CACHE_SIZE:
+                    self._activity_cache.popitem(last=False)
+            else:
+                self._activity_cache.move_to_end(activity_id)
+            return payload
+
+    def _activity_and_ordinal(self, row: int) -> tuple[ActivityId, int]:
+        position = int(np.searchsorted(self.exchange_ends, row, side="right"))
+        if position >= len(self.activity_ids):
+            raise KeyError(row)
+        return (
+            int(self.activity_ids[position]),
+            row - int(self.exchange_starts[position]),
+        )
+
+    def metadata(self, row: int) -> Mapping[str, Any]:
+        activity_id, ordinal = self._activity_and_ordinal(row)
+        with self._metadata_lock:
+            metadata = self._metadata_cache.get(activity_id)
+            if metadata is None:
+                if activity_id in self.exchange_metadata_offsets:
+                    records = self._decode_sidecar_record(
+                        activity_id,
+                        self.exchange_metadata_offsets,
+                        "exchange metadata",
+                    )
+                    metadata = dict(records)
+                else:
+                    metadata = {}
+                self._metadata_cache[activity_id] = metadata
+                if len(self._metadata_cache) > self._CACHE_SIZE:
+                    self._metadata_cache.popitem(last=False)
+            else:
+                self._metadata_cache.move_to_end(activity_id)
+        return metadata.get(ordinal, {})
+
+    def common_keys(self, row: int) -> Iterator[str]:
+        for field_name in _EXCHANGE_STRING_FIELDS:
+            if self._string_columns[field_name][row] >= 0:
+                yield field_name
+        if (
+            self._string_columns["categories__0"][row] >= 0
+            and self._string_columns["categories__1"][row] >= 0
+        ):
+            yield "categories"
+        for field_name in _EXCHANGE_NUMERIC_FIELDS:
+            if self._numeric_kinds[field_name][row] != _NUMERIC_MISSING:
+                yield field_name
+        for field_name in _EXCHANGE_BOOLEAN_FIELDS:
+            if self._boolean_columns[field_name][row] >= 0:
+                yield field_name
+
+    def common_value(self, row: int, field_name: str) -> Any:
+        if field_name in _EXCHANGE_STRING_FIELDS:
+            string_id = int(self._string_columns[field_name][row])
+            if string_id >= 0:
+                return self._string_values[string_id]
+            raise KeyError(field_name)
+        if field_name == "categories":
+            first = int(self._string_columns["categories__0"][row])
+            second = int(self._string_columns["categories__1"][row])
+            if first >= 0 and second >= 0:
+                return self._string_values[first], self._string_values[second]
+            raise KeyError(field_name)
+        if field_name in _EXCHANGE_NUMERIC_FIELDS:
+            kind = int(self._numeric_kinds[field_name][row])
+            if kind != _NUMERIC_MISSING:
+                return _decode_numeric_column(
+                    kind,
+                    self._numeric_floats[field_name][row],
+                    self._numeric_ints[field_name][row],
+                )
+            raise KeyError(field_name)
+        if field_name in _EXCHANGE_BOOLEAN_FIELDS:
+            value = int(self._boolean_columns[field_name][row])
+            if value >= 0:
+                return bool(value)
+            raise KeyError(field_name)
+        raise KeyError(field_name)
+
+    def close(self) -> None:
+        sidecar = getattr(self, "_sidecar", None)
+        if sidecar is not None:
+            sidecar.close()
+            self._sidecar = None
+        sidecar_file = getattr(self, "_sidecar_file", None)
+        if sidecar_file is not None:
+            sidecar_file.close()
+            self._sidecar_file = None
+
+    def __del__(self) -> None:  # pragma: no cover - interpreter shutdown varies
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
+class _ColumnarExchangeMapping(MutableMapping[str, Any]):
+    """Mutable copy-on-write view over one compact exchange row."""
+
+    __slots__ = ("_storage", "_row", "_changes")
+
+    def __init__(self, storage: _ColumnarExchangeStorage, row: int) -> None:
+        self._storage = storage
+        self._row = row
+        self._changes: dict[str, Any] | None = None
+
+    def _base_value(self, key: str) -> Any:
+        try:
+            return self._storage.common_value(self._row, key)
+        except KeyError:
+            metadata = self._storage.metadata(self._row)
+            if key not in metadata:
+                raise KeyError(key)
+            value = metadata[key]
+            if isinstance(value, (dict, list, set)):
+                value = copy.deepcopy(value)
+                if self._changes is None:
+                    self._changes = {}
+                self._changes[key] = value
+            return value
+
+    def __getitem__(self, key: str) -> Any:
+        if self._changes is not None and key in self._changes:
+            value = self._changes[key]
+            if value is _COLUMNAR_DELETED:
+                raise KeyError(key)
+            return value
+        return self._base_value(key)
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        if self._changes is None:
+            self._changes = {}
+        self._changes[key] = value
+
+    def __delitem__(self, key: str) -> None:
+        try:
+            self[key]
+        except KeyError:
+            raise KeyError(key) from None
+        if self._changes is None:
+            self._changes = {}
+        self._changes[key] = _COLUMNAR_DELETED
+
+    def __iter__(self) -> Iterator[str]:
+        yielded = set()
+        for key in self._storage.common_keys(self._row):
+            if self._changes is None or self._changes.get(key) is not _COLUMNAR_DELETED:
+                yielded.add(key)
+                yield key
+        for key in self._storage.metadata(self._row):
+            if key in yielded:
+                continue
+            if self._changes is None or self._changes.get(key) is not _COLUMNAR_DELETED:
+                yielded.add(key)
+                yield key
+        if self._changes is not None:
+            for key, value in self._changes.items():
+                if key not in yielded and value is not _COLUMNAR_DELETED:
+                    yield key
+
+    def __len__(self) -> int:
+        return sum(1 for _ in self)
+
+    def copy(self) -> dict[str, Any]:
+        return dict(self.items())
+
+    def __copy__(self) -> dict[str, Any]:
+        return self.copy()
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> dict[str, Any]:
+        copied = copy.deepcopy(self.copy(), memo)
+        memo[id(self)] = copied
+        return copied
+
+    def _premise_clone(self, memo: dict[int, Any]) -> "_ColumnarExchangeMapping":
+        """Clone an overlay while retaining the immutable source row."""
+
+        duplicate = type(self)(self._storage, self._row)
+        memo[id(self)] = duplicate
+        if self._changes is not None:
+            duplicate._changes = copy.deepcopy(self._changes, memo)
+        return duplicate
+
+    def __repr__(self) -> str:
+        return repr(self.copy())
+
+
+class _ColumnarActivityMapping(dict[str, Any]):
+    """Dictionary-compatible activity with lazy uncommon metadata."""
+
+    __slots__ = ("_storage", "_activity_id", "_deleted")
+
+    def __init__(
+        self,
+        storage: _ColumnarExchangeStorage,
+        activity_id: ActivityId,
+        common: Mapping[str, Any],
+    ) -> None:
+        super().__init__(common)
+        self._storage = storage
+        self._activity_id = activity_id
+        self._deleted: set[str] = set()
+
+    def _metadata(self) -> Mapping[str, Any]:
+        return self._storage.activity_payload(self._activity_id)
+
+    @staticmethod
+    def _requires_private_copy(value: Any) -> bool:
+        return not isinstance(
+            value,
+            (
+                type(None),
+                bool,
+                int,
+                float,
+                complex,
+                str,
+                bytes,
+                tuple,
+                frozenset,
+                np.generic,
+            ),
+        )
+
+    def __getitem__(self, key: str) -> Any:
+        if dict.__contains__(self, key):
+            return dict.__getitem__(self, key)
+        if key in self._deleted:
+            raise KeyError(key)
+        metadata = self._metadata()
+        if key not in metadata:
+            raise KeyError(key)
+        value = metadata[key]
+        if self._requires_private_copy(value):
+            value = copy.deepcopy(value)
+            dict.__setitem__(self, key, value)
+        return value
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        self._deleted.discard(key)
+        dict.__setitem__(self, key, value)
+
+    def __delitem__(self, key: str) -> None:
+        if not self.__contains__(key):
+            raise KeyError(key)
+        if dict.__contains__(self, key):
+            dict.__delitem__(self, key)
+        self._deleted.add(key)
+
+    def __contains__(self, key: object) -> bool:
+        if dict.__contains__(self, key):
+            return True
+        if not isinstance(key, str) or key in self._deleted:
+            return False
+        return key in self._metadata()
+
+    def __iter__(self) -> Iterator[str]:
+        yielded = set()
+        for key in dict.__iter__(self):
+            if key not in self._deleted:
+                yielded.add(key)
+                yield key
+        for key in self._metadata():
+            if key not in yielded and key not in self._deleted:
+                yield key
+
+    def __len__(self) -> int:
+        return sum(1 for _ in self)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def keys(self):
+        return MutableMapping.keys(self)
+
+    def items(self):
+        return MutableMapping.items(self)
+
+    def values(self):
+        return MutableMapping.values(self)
+
+    def pop(self, key: str, *default: Any) -> Any:
+        if len(default) > 1:
+            raise TypeError(f"pop expected at most 2 arguments, got {len(default) + 1}")
+        try:
+            value = self[key]
+        except KeyError:
+            if default:
+                return default[0]
+            raise
+        del self[key]
+        return value
+
+    def setdefault(self, key: str, default: Any = None) -> Any:
+        try:
+            return self[key]
+        except KeyError:
+            self[key] = default
+            return default
+
+    def clear(self) -> None:
+        self._deleted.update(self)
+        dict.clear(self)
+
+    def copy(self) -> dict[str, Any]:
+        return dict(self.items())
+
+    def _premise_materialize(self) -> dict[str, Any]:
+        return self.copy()
+
+    def __copy__(self) -> dict[str, Any]:
+        return self.copy()
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> dict[str, Any]:
+        copied = copy.deepcopy(self.copy(), memo)
+        memo[id(self)] = copied
+        return copied
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Mapping):
+            return False
+        return self.copy() == dict(other.items())
+
+    def __repr__(self) -> str:
+        return repr(self.copy())
+
+    def __reduce_ex__(self, protocol: int):
+        del protocol
+        return dict, (self.copy(),)
+
+
+class _ColumnarExchangeTable:
+    """Dense exchange-ID facade backed by compact checkpoint columns."""
+
+    __slots__ = ("_storage", "_overrides", "_tombstones", "_length")
+
+    def __init__(self, storage: _ColumnarExchangeStorage) -> None:
+        self._storage = storage
+        self._overrides: dict[int, Mapping[str, Any]] = {}
+        self._tombstones: set[int] = set()
+        self._length = storage.row_count
+
+    def __len__(self) -> int:
+        return self._length
+
+    def __contains__(self, exchange_id: object) -> bool:
+        if not isinstance(exchange_id, int) or exchange_id in self._tombstones:
+            return False
+        if exchange_id in self._overrides:
+            return True
+        try:
+            self._storage.row_for_id(exchange_id)
+            return True
+        except KeyError:
+            return False
+
+    def __getitem__(self, exchange_id: ExchangeId) -> Mapping[str, Any]:
+        if exchange_id not in self:
+            raise KeyError(exchange_id)
+        override = self._overrides.get(exchange_id)
+        if override is not None:
+            return override
+        return _ColumnarExchangeMapping(
+            self._storage, self._storage.row_for_id(exchange_id)
+        )
+
+    def __setitem__(self, exchange_id: ExchangeId, payload: Mapping[str, Any]) -> None:
+        existed = exchange_id in self
+        if not existed:
+            largest = max(
+                int(self._storage.exchange_ids[-1]) if self._storage.row_count else -1,
+                max(self._overrides, default=-1),
+            )
+            if exchange_id != largest + 1:
+                raise IndexError(f"Non-contiguous exchange id: {exchange_id}")
+            self._length += 1
+        self._tombstones.discard(exchange_id)
+        self._overrides[exchange_id] = payload
+
+    def __delitem__(self, exchange_id: ExchangeId) -> None:
+        if exchange_id not in self:
+            raise KeyError(exchange_id)
+        self._overrides.pop(exchange_id, None)
+        self._tombstones.add(exchange_id)
+        self._length -= 1
+
+    def shallow_copy(self) -> "_ColumnarExchangeTable":
+        duplicate = type(self)(self._storage)
+        duplicate._overrides = self._overrides.copy()
+        duplicate._tombstones = self._tombstones.copy()
         duplicate._length = self._length
         return duplicate
 
@@ -886,7 +1521,7 @@ class _InMemoryInventoryStore(InventoryStore):
                     self._state.next_exchange_id += 1
                     self._state.exchanges[exchange_id] = (
                         exchange
-                        if take_ownership and isinstance(exchange, dict)
+                        if take_ownership and isinstance(exchange, Mapping)
                         else copy.deepcopy(dict(exchange))
                     )
                 self._state.activity_exchanges[activity_id] = range(
@@ -1176,7 +1811,7 @@ class _InMemoryInventoryStore(InventoryStore):
         self._state.next_exchange_id += 1
         self._state.exchanges[exchange_id] = (
             payload
-            if take_ownership and isinstance(payload, dict)
+            if take_ownership and isinstance(payload, Mapping)
             else copy.deepcopy(dict(payload))
         )
         if self.eager_exchange_owners:
@@ -2026,15 +2661,15 @@ def _write_checkpoint_payloads(
             return
         assert schema is not None
         arrays = []
-        for field in schema:
-            values = columns[field.name]
-            if pa.types.is_dictionary(field.type):
+        for arrow_field in schema:
+            values = columns[arrow_field.name]
+            if pa.types.is_dictionary(arrow_field.type):
                 array = pa.array(values, type=pa.string()).dictionary_encode()
                 for value in array.dictionary.to_pylist():
                     collect_string(value)
                 arrays.append(array)
             else:
-                arrays.append(pa.array(values, type=field.type))
+                arrays.append(pa.array(values, type=arrow_field.type))
         writer.write_batch(pa.RecordBatch.from_arrays(arrays, schema=schema))
         for values in columns.values():
             values.clear()
@@ -2042,7 +2677,16 @@ def _write_checkpoint_payloads(
     offsets = {"kind": [], "id": [], "offset": [], "length": []}
     activities: dict[str, list[Any]] = defaultdict(list)
 
-    def serialize(sidecar, writer=None) -> None:
+    def write_sidecar_record(sidecar, kind: str, record_id: int, payload: Any) -> None:
+        encoded = pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL)
+        offset = sidecar.tell()
+        sidecar.write(encoded)
+        offsets["kind"].append(kind)
+        offsets["id"].append(record_id)
+        offsets["offset"].append(offset)
+        offsets["length"].append(len(encoded))
+
+    def serialize(activity_sidecar, exchange_sidecar, writer=None) -> None:
         exchange_cursor = 0
         for ordinal, activity_id in enumerate(store.iter_activity_ids()):
             payload = store._state.activities[activity_id]
@@ -2059,17 +2703,23 @@ def _write_checkpoint_payloads(
                 if writer is not None and len(columns["exchange_id"]) >= batch_size:
                     flush(writer)
 
-            bundle = {
-                "activity": payload,
-                "exchange_metadata": exchange_metadata,
-            }
-            encoded = pickle.dumps(bundle, protocol=pickle.HIGHEST_PROTOCOL)
-            offset = sidecar.tell()
-            sidecar.write(encoded)
-            offsets["kind"].append("activity-bundle")
-            offsets["id"].append(activity_id)
-            offsets["offset"].append(offset)
-            offsets["length"].append(len(encoded))
+            materialize = getattr(payload, "_premise_materialize", None)
+            activity_metadata = (
+                materialize() if materialize is not None else dict(payload)
+            )
+            write_sidecar_record(
+                activity_sidecar,
+                "activity",
+                activity_id,
+                _activity_sidecar_metadata(activity_metadata),
+            )
+            if exchange_metadata:
+                write_sidecar_record(
+                    exchange_sidecar,
+                    "exchange-metadata",
+                    activity_id,
+                    exchange_metadata,
+                )
             activities["activity_id"].append(activity_id)
             activities["source_ordinal"].append(ordinal)
             exchange_count = len(exchange_ids)
@@ -2084,15 +2734,30 @@ def _write_checkpoint_payloads(
         if writer is not None:
             flush(writer)
 
-    with (temporary / "metadata.bin").open("wb") as sidecar:
+    activity_metadata_path = temporary / ".activity-metadata.bin"
+    exchange_metadata_path = temporary / ".exchange-metadata.bin"
+    with (
+        activity_metadata_path.open("wb") as activity_sidecar,
+        exchange_metadata_path.open("wb") as exchange_sidecar,
+    ):
         if pa is None:
-            serialize(sidecar)
+            serialize(activity_sidecar, exchange_sidecar)
         else:
             with pa.OSFile(str(temporary / "exchanges.arrow"), "wb") as sink:
                 # IPC streams permit independent dictionaries per bounded batch,
                 # avoiding a second graph traversal to build a global dictionary.
                 with pa_ipc.new_stream(sink, schema) as writer:
-                    serialize(sidecar, writer)
+                    serialize(activity_sidecar, exchange_sidecar, writer)
+
+    activity_metadata_size = activity_metadata_path.stat().st_size
+    for position, kind in enumerate(offsets["kind"]):
+        if kind == "exchange-metadata":
+            offsets["offset"][position] += activity_metadata_size
+    with (temporary / "metadata.bin").open("wb") as combined:
+        for metadata_path in (activity_metadata_path, exchange_metadata_path):
+            with metadata_path.open("rb") as source:
+                shutil.copyfileobj(source, combined, length=1024 * 1024)
+            metadata_path.unlink()
 
     if pa is None:
         _write_table(temporary / "exchanges.arrow", columns)
@@ -2137,7 +2802,7 @@ def _write_checkpoint(store: _InMemoryInventoryStore, path: Path) -> Path:
             "inventory_fingerprints": [],
             "uncertainty_settings": {},
             "columnar_format": "arrow-ipc" if pa is not None else "pickle-fallback",
-            "metadata_layout": "activity-extras-v4",
+            "metadata_layout": "split-activity-exchange-v5",
         }
         try:
             manifest_text = json.dumps(manifest, sort_keys=True, indent=2)
@@ -2210,49 +2875,117 @@ def _open_checkpoint(path: Path) -> InventoryStore:
             )
 
     offsets = _read_table(path / "metadata_offsets.arrow")
-    bundles: dict[int, dict[str, Any]] = {}
-    with (path / "metadata.bin").open("rb") as sidecar:
-        for kind, record_id, offset, length in zip(
-            offsets["kind"], offsets["id"], offsets["offset"], offsets["length"]
-        ):
-            if kind != "activity-bundle":
-                raise InventoryStoreCorruptionError(
-                    f"Invalid metadata record kind {kind!r} for schema "
-                    f"{STORE_SCHEMA_VERSION}."
-                )
-            sidecar.seek(offset)
-            encoded = sidecar.read(length)
-            try:
-                bundle = pickle.loads(encoded)
-            except Exception as error:
-                raise InventoryStoreCorruptionError(
-                    f"Invalid metadata payload for {kind} {record_id}."
-                ) from error
-            if not isinstance(bundle, dict) or not {
-                "activity",
-                "exchange_metadata",
-            }.issubset(bundle):
-                raise InventoryStoreCorruptionError(
-                    f"Invalid activity bundle for activity {record_id}."
-                )
-            bundles[record_id] = bundle
+    activity_offsets: dict[int, tuple[int, int]] = {}
+    exchange_metadata_offsets: dict[int, tuple[int, int]] = {}
+    for kind, record_id, offset, length in zip(
+        offsets["kind"], offsets["id"], offsets["offset"], offsets["length"]
+    ):
+        target = {
+            "activity": activity_offsets,
+            "exchange-metadata": exchange_metadata_offsets,
+        }.get(kind)
+        if target is None:
+            raise InventoryStoreCorruptionError(
+                f"Invalid metadata record kind {kind!r} for schema "
+                f"{STORE_SCHEMA_VERSION}."
+            )
+        target[int(record_id)] = (int(offset), int(length))
 
     activities = _read_table(path / "activities.arrow")
+    backend = manifest.get("backend", "compact")
+    if (
+        backend == "compact"
+        and pa is not None
+        and manifest.get("columnar_format") == "arrow-ipc"
+    ):
+        activity_ids = np.asarray(activities.get("activity_id", ()), dtype=np.int64)
+        exchange_starts = np.asarray(
+            activities.get("exchange_start", ()), dtype=np.int64
+        )
+        exchange_counts = np.asarray(
+            activities.get("exchange_count", ()), dtype=np.int64
+        )
+        if len(activity_ids) != manifest.get("activity_count"):
+            raise InventoryStoreCorruptionError(
+                "Activity row count does not match the checkpoint manifest."
+            )
+        storage = _ColumnarExchangeStorage(
+            path,
+            exchange_count=int(manifest.get("exchange_count", 0)),
+            activity_ids=activity_ids,
+            exchange_starts=exchange_starts,
+            exchange_counts=exchange_counts,
+            activity_offsets=activity_offsets,
+            exchange_metadata_offsets=exchange_metadata_offsets,
+        )
+        store = object.__new__(CompactInventoryStore)
+        store._state = store._new_state()
+        store._state.exchanges = _ColumnarExchangeTable(storage)
+        for position, activity_id_value in enumerate(activity_ids):
+            activity_id = int(activity_id_value)
+            common = {
+                field_name: activities[field_name][position]
+                for field_name in _ACTIVITY_COMMON_FIELDS
+                if activities[field_name][position] is not None
+            }
+            payload = _ColumnarActivityMapping(storage, activity_id, common)
+            store._state.activities[activity_id] = payload
+            store._state.activity_order.append(activity_id)
+            store._state.activity_exchanges[activity_id] = (
+                storage.activity_exchange_ids(position)
+            )
+        store._state.next_activity_id = max(store._state.activity_order, default=-1) + 1
+        store._state.next_exchange_id = (
+            int(storage.exchange_ids.max()) + 1 if storage.row_count else 0
+        )
+        store._state.generation = int(manifest.get("generation", 0))
+        store._scenario_identity = manifest.get("scenario_identity")
+        store._lock = threading.RLock()
+        store._active_transaction = False
+        store._shared_state = False
+        return store
+
+    activity_payloads: dict[int, dict[str, Any]] = {}
+    exchange_metadata_by_id: dict[int, dict[int, dict[str, Any]]] = {}
+    with (path / "metadata.bin").open("rb") as sidecar:
+        for kind, records, target in (
+            ("activity", activity_offsets, activity_payloads),
+            (
+                "exchange-metadata",
+                exchange_metadata_offsets,
+                exchange_metadata_by_id,
+            ),
+        ):
+            for record_id, (offset, length) in records.items():
+                sidecar.seek(offset)
+                encoded = sidecar.read(length)
+                try:
+                    payload = pickle.loads(encoded)
+                except Exception as error:
+                    raise InventoryStoreCorruptionError(
+                        f"Invalid {kind} payload for activity {record_id}."
+                    ) from error
+                target[record_id] = payload
+
     database: list[dict[str, Any]] = []
     datasets_by_id = {}
-    exchange_metadata_by_id = {}
-    for activity_id in activities.get("activity_id", []):
+    for position, activity_id in enumerate(activities.get("activity_id", [])):
         try:
-            bundle = bundles[activity_id]
+            payload = activity_payloads[activity_id]
         except KeyError as error:
             raise InventoryStoreCorruptionError(
-                f"Missing activity bundle for activity {activity_id}."
+                f"Missing activity metadata for activity {activity_id}."
             ) from error
-        payload = bundle["activity"]
+        for field_name in _ACTIVITY_COMMON_FIELDS:
+            value = activities[field_name][position]
+            if value is not None and field_name not in payload:
+                payload[field_name] = value
         payload["exchanges"] = []
         database.append(payload)
         datasets_by_id[activity_id] = payload
-        exchange_metadata_by_id[activity_id] = dict(bundle["exchange_metadata"])
+        exchange_metadata_by_id[activity_id] = dict(
+            exchange_metadata_by_id.get(activity_id, ())
+        )
 
     exchange_count = 0
     for row in _iter_table_rows(path / "exchanges.arrow"):
@@ -2278,7 +3011,6 @@ def _open_checkpoint(path: Path) -> InventoryStore:
             "Exchange row count does not match the checkpoint manifest."
         )
 
-    backend = manifest.get("backend", "compact")
     store = create_inventory_store(
         database,
         backend=backend if backend in {"compact", "legacy"} else "compact",

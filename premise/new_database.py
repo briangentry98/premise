@@ -6,6 +6,7 @@ as well as export it back.
 
 import gc
 import inspect
+import json
 import logging
 import os
 import uuid
@@ -60,6 +61,7 @@ from .inventory_store import (
     InventoryStoreCorruptionError,
     InventoryStoreVersionError,
     ReadOnlyInventoryStore,
+    STORE_SCHEMA_VERSION,
     _compact_scenario_mapping,
     _hydrate_scenario_mapping,
     create_inventory_store,
@@ -75,6 +77,7 @@ from .steel import _update_steel
 from .transport import _update_vehicles
 from .utils import (
     CACHE_SCHEMA_VERSION,
+    cache_ref_fingerprint,
     cache_ref_exists,
     database_metadata,
     clear_existing_cache,
@@ -645,6 +648,7 @@ class NewDatabase:
             raise ValueError("inventory_backend must be either 'compact' or 'legacy'.")
         self.inventory_backend = inventory_backend
         self._source_inventory_store = None
+        self._compact_source_checkpoint = None
         self.database_cache_filepath = None
         self.inventories_cache_filepath = None
         self._database_is_complete = False
@@ -716,39 +720,68 @@ class NewDatabase:
                     scenario["external scenarios"]
                 )
 
-        print("- Extracting source database")
-        if use_cached_database:
-            self._database = self.__find_cached_db(source_db)
+        compact_cache_hit = None
+        compact_cache_eligible = (
+            self.inventory_backend == "compact"
+            and use_cached_database
+            and use_cached_inventories
+            and self.additional_inventories is None
+        )
+        if compact_cache_eligible:
+            compact_cache_hit = self._find_compact_source_checkpoint(source_db)
+
+        imported_inventory_data = False
+        if compact_cache_hit is not None:
+            checkpoint, cache_refs = compact_cache_hit
+            print("- Opening compact source database")
+            self.database_cache_filepath = cache_refs["source"]
+            self.database_metadata_cache_filepath = cache_refs["source_metadata"]
+            self.inventories_cache_filepath = cache_refs["inventories"]
+            self.inventories_metadata_cache_filepath = cache_refs[
+                "inventories_metadata"
+            ]
             for scenario in self.scenarios:
                 scenario["database metadata cache filepath"] = (
                     self.database_metadata_cache_filepath
                 )
-        else:
-            self._database = self.__clean_database()
-
-        imported_inventory_data = False
-
-        print("- Extracting inventories")
-        if use_cached_inventories:
-            data = self.__find_cached_inventories(source_db)
-            for scenario in self.scenarios:
                 scenario["inventories metadata cache filepath"] = (
                     self.inventories_metadata_cache_filepath
                 )
-            if data is not None:
-                self._database.extend(data)
-            else:
-                imported_inventory_data = True
-            # A cache miss imports inventories directly into ``self._database``
-            # before replacing the imported tail with the trimmed cached
-            # representation, so the inventory coverage is complete in both the
-            # hit and miss cases here and the original form can be reloaded from
-            # cache when needed.
+            self._database = None
             self._database_is_complete = True
+            self._compact_source_checkpoint = checkpoint
         else:
-            self.__import_inventories()
-            imported_inventory_data = True
-            self._database_is_complete = True
+            print("- Extracting source database")
+            if use_cached_database:
+                self._database = self.__find_cached_db(source_db)
+                for scenario in self.scenarios:
+                    scenario["database metadata cache filepath"] = (
+                        self.database_metadata_cache_filepath
+                    )
+            else:
+                self._database = self.__clean_database()
+
+            print("- Extracting inventories")
+            if use_cached_inventories:
+                data = self.__find_cached_inventories(source_db)
+                for scenario in self.scenarios:
+                    scenario["inventories metadata cache filepath"] = (
+                        self.inventories_metadata_cache_filepath
+                    )
+                if data is not None:
+                    self._database.extend(data)
+                else:
+                    imported_inventory_data = True
+                # A cache miss imports inventories directly into ``self._database``
+                # before replacing the imported tail with the trimmed cached
+                # representation, so the inventory coverage is complete in both the
+                # hit and miss cases here and the original form can be reloaded from
+                # cache when needed.
+                self._database_is_complete = True
+            else:
+                self.__import_inventories()
+                imported_inventory_data = True
+                self._database_is_complete = True
 
         if self.additional_inventories:
             print("- Importing additional inventories")
@@ -763,12 +796,50 @@ class NewDatabase:
         for scenario in self.scenarios:
             _fetch_iam_data(scenario)
 
-        self._source_inventory_store = create_inventory_store(
-            self._database,
-            backend=self.inventory_backend,
-            scenario_identity="source",
-            take_ownership=True,
-        )
+        if self._compact_source_checkpoint is not None:
+            try:
+                self._source_inventory_store = InventoryStore.open(
+                    self._compact_source_checkpoint
+                )
+            except (InventoryStoreCorruptionError, InventoryStoreVersionError):
+                # The versioned pickle caches remain the source of truth. A
+                # partial or corrupt compact derivative is rebuilt wholesale.
+                assert compact_cache_hit is not None
+                _, cache_refs = compact_cache_hit
+                self._database = self._load_compact_source_cache_payload(cache_refs)
+                self._source_inventory_store = create_inventory_store(
+                    self._database,
+                    backend="compact",
+                    scenario_identity="source",
+                    take_ownership=True,
+                )
+                self._compact_source_checkpoint = self._write_compact_source_checkpoint(
+                    source_db, self._source_inventory_store
+                )
+                self._source_inventory_store = None
+                self._database = None
+                gc.collect()
+                self._source_inventory_store = InventoryStore.open(
+                    self._compact_source_checkpoint
+                )
+        else:
+            self._source_inventory_store = create_inventory_store(
+                self._database,
+                backend=self.inventory_backend,
+                scenario_identity="source",
+                take_ownership=True,
+            )
+            if compact_cache_eligible:
+                self._compact_source_checkpoint = self._write_compact_source_checkpoint(
+                    source_db, self._source_inventory_store
+                )
+                if self._compact_source_checkpoint is not None:
+                    self._source_inventory_store = None
+                    self._database = None
+                    gc.collect()
+                    self._source_inventory_store = InventoryStore.open(
+                        self._compact_source_checkpoint
+                    )
         # The mutable extraction list is an implementation detail only.  From
         # this point onward all scenario ownership goes through InventoryStore.
         self._database = None
@@ -800,6 +871,109 @@ class NewDatabase:
             )
         self._database = value
 
+    def _cache_database_name(self, db_name: str | None) -> str:
+        if db_name is None and self.source_type == "ecospold":
+            db_name = f"ecospold_{self.system_model}_{self.version}"
+        if db_name is None:
+            raise ValueError("A source database name is required for caching.")
+        return db_name.strip().lower()
+
+    def _database_cache_path(
+        self, db_name: str | None, *, inventories: bool = False
+    ) -> Path:
+        uncertainty = (
+            self.keep_imports_uncertainty
+            if inventories
+            else self.keep_source_db_uncertainty
+        )
+        uncertainty_label = "w_uncertainty" if uncertainty else "wo_uncertainty"
+        inventory_label = "_inventories" if inventories else ""
+        return (
+            DIR_CACHED_DB
+            / f"cached_{''.join(tuple(map(str, __version__)))}_v{CACHE_SCHEMA_VERSION}_"
+            f"{self._cache_database_name(db_name)}_{uncertainty_label}"
+            f"{inventory_label}.pickle"
+        )
+
+    @staticmethod
+    def _metadata_cache_path(cache_path: Path) -> Path:
+        return Path(str(cache_path).replace(".pickle", " (metadata).pickle"))
+
+    def _compact_source_cache_references(
+        self, db_name: str | None
+    ) -> dict[str, Path] | None:
+        source = self._database_cache_path(db_name)
+        inventories = self._database_cache_path(db_name, inventories=True)
+        candidates = {
+            "source": source,
+            "source_metadata": self._metadata_cache_path(source),
+            "inventories": inventories,
+            "inventories_metadata": self._metadata_cache_path(inventories),
+        }
+        if not all(cache_ref_exists(path) for path in candidates.values()):
+            return None
+        return {name: resolve_cache_ref(path) for name, path in candidates.items()}
+
+    def _compact_source_checkpoint_path(self, db_name: str | None) -> Path:
+        source = self._database_cache_path(db_name)
+        return source.with_name(
+            f"{source.stem}_with_inventories_store_v{STORE_SCHEMA_VERSION}"
+            ".inventory-store"
+        )
+
+    @staticmethod
+    def _compact_source_signature(cache_refs: dict[str, Path]) -> dict[str, str]:
+        return {
+            name: cache_ref_fingerprint(cache_ref)
+            for name, cache_ref in sorted(cache_refs.items())
+        }
+
+    def _find_compact_source_checkpoint(
+        self, db_name: str | None
+    ) -> tuple[Path, dict[str, Path]] | None:
+        cache_refs = self._compact_source_cache_references(db_name)
+        if cache_refs is None:
+            return None
+        checkpoint = self._compact_source_checkpoint_path(db_name)
+        marker = checkpoint / "source-cache.json"
+        if not checkpoint.is_dir() or not marker.is_file():
+            return None
+        try:
+            recorded = json.loads(marker.read_text(encoding="utf-8"))
+            current = self._compact_source_signature(cache_refs)
+        except (OSError, ValueError, TypeError):
+            return None
+        if recorded.get("cache_fingerprints") != current:
+            return None
+        return checkpoint, cache_refs
+
+    def _write_compact_source_checkpoint(
+        self,
+        db_name: str | None,
+        store: CompactInventoryStore,
+    ) -> Path | None:
+        cache_refs = self._compact_source_cache_references(db_name)
+        if cache_refs is None:
+            return None
+        checkpoint = store.checkpoint(self._compact_source_checkpoint_path(db_name))
+        marker = {
+            "store_schema_version": STORE_SCHEMA_VERSION,
+            "cache_fingerprints": self._compact_source_signature(cache_refs),
+        }
+        (checkpoint / "source-cache.json").write_text(
+            json.dumps(marker, sort_keys=True, indent=2), encoding="utf-8"
+        )
+        return checkpoint
+
+    @staticmethod
+    def _load_compact_source_cache_payload(cache_refs: dict[str, Path]) -> list[dict]:
+        database = load_cached_database(cache_refs["source"])
+        restore_cached_classifications(database, cache_refs["source_metadata"])
+        inventories = load_cached_database(cache_refs["inventories"])
+        restore_cached_classifications(inventories, cache_refs["inventories_metadata"])
+        database.extend(inventories)
+        return database
+
     def __find_cached_db(self, db_name: str) -> List[dict]:
         """
         If `use_cached_db` = True, then we look for a cached database.
@@ -807,20 +981,7 @@ class NewDatabase:
         :param db_name: database name
         :return: database
         """
-        # build file path
-        if db_name is None and self.source_type == "ecospold":
-            db_name = f"ecospold_{self.system_model}_{self.version}"
-
-        uncertainty_data = (
-            "w_uncertainty"
-            if self.keep_source_db_uncertainty is True
-            else "wo_uncertainty"
-        )
-
-        file_name = (
-            DIR_CACHED_DB
-            / f"cached_{''.join(tuple(map(str, __version__)))}_v{CACHE_SCHEMA_VERSION}_{db_name.strip().lower()}_{uncertainty_data}.pickle"
-        )
+        file_name = self._database_cache_path(db_name)
 
         # check that file path leads to an existing file
         if cache_ref_exists(file_name):
@@ -851,20 +1012,7 @@ class NewDatabase:
         :param db_name: database name
         :return: database
         """
-        # build file path
-        if db_name is None and self.source_type == "ecospold":
-            db_name = f"ecospold_{self.system_model}_{self.version}"
-
-        uncertainty_data = (
-            "w_uncertainty"
-            if self.keep_imports_uncertainty is True
-            else "wo_uncertainty"
-        )
-
-        file_name = (
-            DIR_CACHED_DB
-            / f"cached_{''.join(tuple(map(str, __version__)))}_v{CACHE_SCHEMA_VERSION}_{db_name.strip().lower()}_{uncertainty_data}_inventories.pickle"
-        )
+        file_name = self._database_cache_path(db_name, inventories=True)
 
         # check that file path leads to an existing file
         if cache_ref_exists(file_name):
@@ -1137,6 +1285,13 @@ class NewDatabase:
 
         if store is None:
             source_store = getattr(self, "_source_inventory_store", None)
+            if source_store is None:
+                compact_checkpoint = getattr(self, "_compact_source_checkpoint", None)
+                if (
+                    getattr(self, "inventory_backend", "legacy") == "compact"
+                    and compact_checkpoint is not None
+                ):
+                    source_store = InventoryStore.open(compact_checkpoint)
             if source_store is None:
                 # Supports narrowly constructed NewDatabase instances in tools
                 # and tests without reintroducing a public mutable attribute.

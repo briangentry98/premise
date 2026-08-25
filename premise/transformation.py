@@ -143,7 +143,11 @@ def clone_inventory_dataset(dataset: dict) -> dict:
         if value_id in memo:
             return memo[value_id]
 
-        if value_type is dict:
+        compact_clone = getattr(value, "_premise_clone", None)
+        if compact_clone is not None:
+            return compact_clone(memo)
+
+        if value_type is dict or hasattr(value, "_premise_materialize"):
             duplicate = {}
             memo[value_id] = duplicate
             for key, item in value.items():
