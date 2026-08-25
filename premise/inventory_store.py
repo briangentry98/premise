@@ -69,6 +69,7 @@ _NUMERIC_PYTHON_FLOAT = 1
 _NUMERIC_PYTHON_INT = 2
 _NUMERIC_FLOAT32 = 3
 _NUMERIC_FLOAT64 = 4
+_CandidatePositions: TypeAlias = set[int] | frozenset[int]
 
 
 def _numeric_column_parts(value: Any) -> tuple[int, float | None, int | None]:
@@ -219,19 +220,32 @@ class IndexedInventoryList(list):
             self._query_indexes = exact, strings, {}
         return self._query_indexes
 
-    def _candidate_positions(self, expression: _CompiledWurstFilter) -> set[int] | None:
+    def _all_positions(self) -> frozenset[int]:
+        _, _, predicate_cache = self._indexes()
+        cache_key = ("all-positions", len(self))
+        cached = predicate_cache.get(cache_key)
+        if cached is None:
+            cached = frozenset(range(len(self)))
+            predicate_cache[cache_key] = cached
+        return cached
+
+    def _candidate_positions(
+        self, expression: _CompiledWurstFilter
+    ) -> _CandidatePositions | None:
         exact, strings, predicate_cache = self._indexes()
         operation = expression.operation
         if operation == "equals" and expression.field_name in exact:
             value = _hashable(expression.value)
             if value is _UNHASHABLE:
                 return None
-            return set(exact[expression.field_name].get(value, ()))
+            # Query callers treat candidates as read-only. Returning the index
+            # set avoids copying it for every exact predicate.
+            return exact[expression.field_name].get(value, frozenset())
         if operation in {"contains", "startswith"} and expression.field_name in strings:
             cache_key = (operation, expression.field_name, expression.value)
             cached = predicate_cache.get(cache_key)
             if cached is not None:
-                return set(cached)
+                return cached
             result: set[int] = set()
             for value, positions in strings[expression.field_name].items():
                 matches = (
@@ -241,9 +255,18 @@ class IndexedInventoryList(list):
                 )
                 if matches:
                     result.update(positions)
-            predicate_cache[cache_key] = frozenset(result)
-            return result
+            candidates = frozenset(result)
+            predicate_cache[cache_key] = candidates
+            return candidates
         if operation == "either":
+            cache_key = ("compiled", expression)
+            try:
+                cached = predicate_cache.get(cache_key)
+            except TypeError:
+                cache_key = None
+                cached = None
+            if cached is not None:
+                return cached
             candidates = [
                 self._candidate_positions(child) for child in expression.children
             ]
@@ -252,35 +275,59 @@ class IndexedInventoryList(list):
             result: set[int] = set()
             for candidate in candidates:
                 result.update(candidate)
-            return result
+            immutable_result = frozenset(result)
+            if cache_key is not None:
+                predicate_cache[cache_key] = immutable_result
+            return immutable_result
         if operation == "exclude":
+            cache_key = ("compiled", expression)
+            try:
+                cached = predicate_cache.get(cache_key)
+            except TypeError:
+                cache_key = None
+                cached = None
+            if cached is not None:
+                return cached
             candidates = self._candidate_positions(expression.children[0])
-            return None if candidates is None else set(range(len(self))) - candidates
+            if candidates is None:
+                return None
+            result = self._all_positions().difference(candidates)
+            if cache_key is not None:
+                predicate_cache[cache_key] = result
+            return result
         if operation == "doesnt-contain-any" and expression.field_name in strings:
             cache_key = (operation, expression.field_name, expression.value)
             cached = predicate_cache.get(cache_key)
             if cached is not None:
-                return set(cached)
+                return cached
             excluded: set[int] = set()
             for value, positions in strings[expression.field_name].items():
                 if any(item in value for item in expression.value):
                     excluded.update(positions)
-            result = set(range(len(self))) - excluded
+            result = self._all_positions().difference(excluded)
             predicate_cache[cache_key] = frozenset(result)
             return result
         return None
 
     def query_wurst(self, filters: tuple[_CompiledWurstFilter, ...]):
-        candidates: set[int] | None = None
+        candidate_groups: list[_CandidatePositions] = []
         for expression in filters:
             positions = self._candidate_positions(expression)
             if positions is None:
                 return None
-            candidates = (
-                positions if candidates is None else candidates.intersection(positions)
-            )
-        if candidates is None:
-            candidates = set(range(len(self)))
+            candidate_groups.append(positions)
+        if not candidate_groups:
+            candidates: Iterable[int] = range(len(self))
+        elif len(candidate_groups) == 1:
+            candidates = candidate_groups[0]
+        else:
+            candidate_groups.sort(key=len)
+            intersection = set(candidate_groups[0])
+            for positions in candidate_groups[1:]:
+                intersection.intersection_update(positions)
+                if not intersection:
+                    break
+            candidates = intersection
         return (
             self[position]
             for position in sorted(candidates)

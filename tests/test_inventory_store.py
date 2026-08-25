@@ -622,6 +622,25 @@ def test_indexed_wurst_bridge_preserves_order_and_invalidates(inventory):
     ]
 
 
+def test_indexed_wurst_bridge_intersection_does_not_mutate_exact_indexes(inventory):
+    database = IndexedInventoryList(inventory)
+    name_filter = ws.equals("name", "market for electricity, low voltage")
+
+    assert [
+        dataset["code"]
+        for dataset in ws.get_many(
+            database,
+            name_filter,
+            ws.equals("location", "GLO"),
+        )
+    ] == ["glo-grid"]
+    assert [dataset["code"] for dataset in ws.get_many(database, name_filter)] == [
+        "ch-grid",
+        "ch-grid-duplicate",
+        "glo-grid",
+    ]
+
+
 def test_indexed_wurst_bridge_uses_ordered_fallback_for_dynamic_predicates(inventory):
     database = IndexedInventoryList(inventory)
     dynamic = lambda dataset: dataset.get("code", "").endswith("grid")
