@@ -66,6 +66,48 @@ def make_supplier(name, product="fuel"):
     }
 
 
+def test_production_share_extraction_preserves_coordinate_order_and_scalars():
+    transformation = object.__new__(BaseTransformation)
+    transformation.regions = ["R1", "R2", "World"]
+    transformation.year = 2050
+    production_volumes = xr.DataArray(
+        [
+            [[3.0], [1.0]],
+            [[1.0], [3.0]],
+        ],
+        dims=("variables", "region", "year"),
+        coords={
+            "variables": ["tech-a", "tech-b"],
+            "region": ["R1", "R2"],
+            "year": [2050],
+        },
+    )
+    mapping = {"tech-b": {}, "missing": {}, "tech-a": {}}
+
+    selected, technology_shares, regional_shares = (
+        transformation.get_technology_and_regional_production_shares(
+            production_volumes, mapping
+        )
+    )
+
+    assert selected.variables.values.tolist() == ["tech-b", "tech-a"]
+    assert list(technology_shares) == [
+        ("tech-b", "R1"),
+        ("tech-b", "R2"),
+        ("tech-a", "R1"),
+        ("tech-a", "R2"),
+    ]
+    assert technology_shares == {
+        ("tech-b", "R1"): 0.25,
+        ("tech-b", "R2"): 0.75,
+        ("tech-a", "R1"): 0.75,
+        ("tech-a", "R2"): 0.25,
+    }
+    assert regional_shares == {"R1": 0.5, "R2": 0.5}
+    assert all(type(value) is float for value in technology_shares.values())
+    assert all(type(value) is float for value in regional_shares.values())
+
+
 def test_inventory_dataset_clone_is_lossless_and_isolated():
     class CustomMetadataKey(str):
         pass

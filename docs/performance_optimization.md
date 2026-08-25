@@ -255,6 +255,16 @@ versus 45.39 seconds before this change. Because compaction happens after the
 working-graph peak, no new peak-RSS claim is made. Canonical inventory output
 and the Pathways mapping YAML remain exact.
 
+Technology and regional production shares now traverse the computed xarray
+matrices once in coordinate order instead of issuing a scalar `.sel()` for
+every variable-region pair. The xarray reductions, floating-point values,
+coordinate order, and Python scalar conversion are unchanged. In the matched
+compact final-energy profile, 6,852 scalar selections were removed, share
+extraction fell from 0.779 to 0.005 seconds, and the profiled sector fell from
+2.607 to 1.757 seconds. The complete profiled update fell from 42.23 to 40.39
+seconds, although that wider difference includes ordinary sector-to-sector
+noise. The exact canonical hash and inventory counts remained unchanged.
+
 The seed-zero canonical hash is
 `39efcf273da6b52e6c6bdfce8a6546a9a0819a054340fee9062ac2a7fddf808c`.
 Compact builds refuse an unfixed hash seed in the benchmark harness so an

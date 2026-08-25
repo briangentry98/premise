@@ -998,15 +998,24 @@ class BaseTransformation:
         regional_shares = (production_volumes / regional_totals).fillna(0)
         world_shares = (regional_totals / regional_totals.sum()).fillna(0)
 
+        # The reductions above define the numerical semantics. Extract their
+        # already-computed values in coordinate order rather than issuing one
+        # scalar xarray selection per variable and region (thousands of calls
+        # for final-energy mappings).
+        variables = regional_shares.variables.values
+        share_regions = regional_shares.region.values
+        share_values = regional_shares.transpose("variables", "region").values
         technology_shares_dict = {
-            (var, reg): regional_shares.sel(variables=var, region=reg).values.item(0)
-            for var in regional_shares.variables.values
-            for reg in regional_shares.region.values
+            (var, reg): share_values[var_idx, region_idx].item()
+            for var_idx, var in enumerate(variables)
+            for region_idx, reg in enumerate(share_regions)
         }
 
+        world_regions = world_shares.region.values
+        world_values = world_shares.transpose("region").values
         regional_shares_dict = {
-            reg: world_shares.sel(region=reg).item()
-            for reg in world_shares.region.values
+            reg: world_values[region_idx].item()
+            for region_idx, reg in enumerate(world_regions)
         }
 
         return production_volumes, technology_shares_dict, regional_shares_dict
