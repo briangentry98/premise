@@ -60,6 +60,8 @@ from .inventory_store import (
     InventoryStoreCorruptionError,
     InventoryStoreVersionError,
     ReadOnlyInventoryStore,
+    _compact_scenario_mapping,
+    _hydrate_scenario_mapping,
     create_inventory_store,
 )
 from .metals import _update_metals
@@ -1220,13 +1222,19 @@ class NewDatabase:
             scenario_position == len(self.scenarios) - 1
             and self._can_reload_original_database()
         )
+        has_mapping = bool(runtime_scenario.get("mapping"))
+        activity_ids = tuple(store.iter_activity_ids()) if has_mapping else ()
         if isinstance(store, CompactInventoryStore) and can_release_source:
-            runtime_scenario["_inventory_working_copy"] = store._checkout_materialized(
-                discard_shared_state=True
-            )
+            working_copy = store._checkout_materialized(discard_shared_state=True)
         else:
-            runtime_scenario["_inventory_working_copy"] = IndexedInventoryList(
+            working_copy = IndexedInventoryList(
                 store.materialize(restore_metadata=True)
+            )
+        runtime_scenario["_inventory_working_copy"] = working_copy
+        if has_mapping:
+            runtime_scenario["mapping"] = _hydrate_scenario_mapping(
+                runtime_scenario["mapping"],
+                dict(zip(activity_ids, working_copy)),
             )
         # Once the final scenario has its private working graph, a reloadable
         # source store only inflates the high-water mark. Exporters can restore
@@ -1261,7 +1269,14 @@ class NewDatabase:
         scenario_definition.update(runtime_scenario)
         if persist:
             checkpoint = DIR_CACHED_FILES / f"{uuid.uuid4().hex}.inventory-store"
-            scenario_definition["_inventory_checkpoint"] = store.checkpoint(checkpoint)
+            checkpoint = store.checkpoint(checkpoint)
+            scenario_definition["_inventory_checkpoint"] = checkpoint
+            if isinstance(store, CompactInventoryStore) and scenario_definition.get(
+                "mapping"
+            ):
+                scenario_definition["mapping"] = _compact_scenario_mapping(
+                    scenario_definition["mapping"], store, checkpoint
+                )
         else:
             scenario_definition["_inventory_store"] = store
         return store

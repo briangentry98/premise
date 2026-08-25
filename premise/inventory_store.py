@@ -1304,6 +1304,182 @@ class CompactInventoryStore(_InMemoryInventoryStore):
         return child
 
 
+_SCENARIO_MAPPING_MISSING = object()
+_SCENARIO_MAPPING_RESIDENT_FIELDS = (
+    "name",
+    "reference product",
+    "product",
+    "location",
+    "unit",
+    "lhv",
+)
+_SCENARIO_MAPPING_RESIDENT_ATTRIBUTES = tuple(
+    field_name.replace(" ", "_") for field_name in _SCENARIO_MAPPING_RESIDENT_FIELDS
+)
+_SCENARIO_MAPPING_RESIDENT_FIELD_BITS = {
+    field_name: 1 << position
+    for position, field_name in enumerate(_SCENARIO_MAPPING_RESIDENT_FIELDS)
+}
+
+
+class _CheckpointActivityResolver:
+    """Load uncommon scenario-mapping metadata only when it is requested."""
+
+    __slots__ = ("checkpoint", "_store", "_lock")
+
+    def __init__(self, checkpoint: Path) -> None:
+        self.checkpoint = checkpoint
+        self._store: InventoryStore | None = None
+        self._lock = threading.Lock()
+
+    def __getstate__(self) -> dict[str, Path]:
+        return {"checkpoint": self.checkpoint}
+
+    def __setstate__(self, state: Mapping[str, Path]) -> None:
+        self.checkpoint = state["checkpoint"]
+        self._store = None
+        self._lock = threading.Lock()
+
+    def _payload(self, activity_id: ActivityId) -> Mapping[str, Any]:
+        if self._store is None:
+            with self._lock:
+                if self._store is None:
+                    self._store = InventoryStore.open(self.checkpoint)
+        try:
+            return self._store._state.activities[activity_id]
+        except KeyError as error:
+            raise KeyError(f"Unknown checkpoint activity id: {activity_id}") from error
+
+    def value(self, activity_id: ActivityId, field_name: str) -> Any:
+        payload = self._payload(activity_id)
+        if field_name not in payload:
+            raise KeyError(field_name)
+        return copy.deepcopy(payload[field_name])
+
+    def keys(self, activity_id: ActivityId) -> tuple[str, ...]:
+        return tuple(self._payload(activity_id))
+
+    def contains(self, activity_id: ActivityId, field_name: object) -> bool:
+        return field_name in self._payload(activity_id)
+
+
+class _ScenarioActivityReference(Mapping[str, Any]):
+    """Small activity mapping backed by a versioned inventory checkpoint."""
+
+    __slots__ = (
+        "_resolver",
+        "_activity_id",
+        "_resident_mask",
+        *_SCENARIO_MAPPING_RESIDENT_ATTRIBUTES,
+    )
+
+    def __init__(
+        self,
+        resolver: _CheckpointActivityResolver,
+        activity_id: ActivityId,
+        payload: Mapping[str, Any],
+    ) -> None:
+        self._resolver = resolver
+        self._activity_id = activity_id
+        resident_mask = 0
+        for field_name in _SCENARIO_MAPPING_RESIDENT_FIELDS:
+            if field_name in payload:
+                resident_mask |= _SCENARIO_MAPPING_RESIDENT_FIELD_BITS[field_name]
+                value = copy.deepcopy(payload[field_name])
+            else:
+                value = None
+            setattr(
+                self,
+                field_name.replace(" ", "_"),
+                value,
+            )
+        self._resident_mask = resident_mask
+
+    def _resident_value(self, field_name: str) -> Any:
+        field_bit = _SCENARIO_MAPPING_RESIDENT_FIELD_BITS.get(field_name)
+        if field_bit is None or not self._resident_mask & field_bit:
+            return _SCENARIO_MAPPING_MISSING
+        return getattr(self, field_name.replace(" ", "_"))
+
+    def __getitem__(self, field_name: str) -> Any:
+        resident = self._resident_value(field_name)
+        if resident is not _SCENARIO_MAPPING_MISSING:
+            return copy.deepcopy(resident)
+        return self._resolver.value(self._activity_id, field_name)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._resolver.keys(self._activity_id))
+
+    def __len__(self) -> int:
+        return len(self._resolver.keys(self._activity_id))
+
+    def __contains__(self, field_name: object) -> bool:
+        if isinstance(field_name, str):
+            resident = self._resident_value(field_name)
+            if resident is not _SCENARIO_MAPPING_MISSING:
+                return True
+            if field_name in _SCENARIO_MAPPING_RESIDENT_FIELDS:
+                return False
+        return self._resolver.contains(self._activity_id, field_name)
+
+
+def _compact_scenario_mapping(
+    mapping: Mapping[str, Mapping[str, Iterable[Mapping[str, Any]]]],
+    store: CompactInventoryStore,
+    checkpoint: Path,
+) -> dict[str, dict[str, list[Mapping[str, Any]]]]:
+    """Replace store-owned mapping payloads with shared lazy references."""
+
+    activity_ids = {
+        id(payload): activity_id
+        for activity_id, payload in store._state.activities.items()
+    }
+    resolver = _CheckpointActivityResolver(checkpoint)
+    references: dict[ActivityId, _ScenarioActivityReference] = {}
+    compacted: dict[str, dict[str, list[Mapping[str, Any]]]] = {}
+
+    for sector, sector_mapping in mapping.items():
+        compacted[sector] = {}
+        for variable, activities in sector_mapping.items():
+            compacted_activities: list[Mapping[str, Any]] = []
+            for activity in activities:
+                activity_id = activity_ids.get(id(activity))
+                if activity_id is None:
+                    compacted_activities.append(activity)
+                    continue
+                reference = references.get(activity_id)
+                if reference is None:
+                    reference = _ScenarioActivityReference(
+                        resolver, activity_id, activity
+                    )
+                    references[activity_id] = reference
+                compacted_activities.append(reference)
+            compacted[sector][variable] = compacted_activities
+
+    return compacted
+
+
+def _hydrate_scenario_mapping(
+    mapping: Mapping[str, Mapping[str, Iterable[Mapping[str, Any]]]],
+    activities_by_id: Mapping[ActivityId, dict[str, Any]],
+) -> dict[str, dict[str, list[Mapping[str, Any]]]]:
+    """Rebind lazy mapping entries to an incremental update's working graph."""
+
+    hydrated: dict[str, dict[str, list[Mapping[str, Any]]]] = {}
+    for sector, sector_mapping in mapping.items():
+        hydrated[sector] = {}
+        for variable, activities in sector_mapping.items():
+            hydrated[sector][variable] = [
+                (
+                    activities_by_id.get(activity._activity_id, activity)
+                    if isinstance(activity, _ScenarioActivityReference)
+                    else activity
+                )
+                for activity in activities
+            ]
+    return hydrated
+
+
 class ReadOnlyInventoryStore(InventoryStore):
     """Read-only facade returned by ``NewDatabase.get_inventory_store``."""
 

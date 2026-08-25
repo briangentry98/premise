@@ -242,6 +242,19 @@ stable 2.030 GB reference, constructor-to-peak growth was 18.8 MB lower while
 wall time remained within noise. The checkpoint retained the exact canonical
 hash, 50,938 datasets, and 1,597,616 exchanges.
 
+Persisted compact scenarios now replace store-owned sector-mapping activities
+with shared checkpoint-backed references. The fields needed by
+`PathwaysDataPackage` remain resident, while comments, classifications, and
+other metadata are loaded losslessly only if requested. Duplicate mapping
+entries retain shared identity, detached external entries remain untouched,
+and incremental updates hydrate references back onto the mutable working graph
+before transformations resume. The IMAGE mapping contained 18,720 entries and
+11,079 unique activity dictionaries; a same-process replacement released
+54.7 MB of RSS after checkpointing. The full diagnostic took 45.73 seconds
+versus 45.39 seconds before this change. Because compaction happens after the
+working-graph peak, no new peak-RSS claim is made. Canonical inventory output
+and the Pathways mapping YAML remain exact.
+
 The seed-zero canonical hash is
 `39efcf273da6b52e6c6bdfce8a6546a9a0819a054340fee9062ac2a7fddf808c`.
 Compact builds refuse an unfixed hash seed in the benchmark harness so an

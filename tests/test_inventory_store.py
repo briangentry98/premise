@@ -1,5 +1,7 @@
-import json
+import copy
 import inspect
+import json
+import pickle
 import random
 
 import numpy as np
@@ -23,6 +25,8 @@ from premise.inventory_store import (
     LegacyInventoryStore,
     ProviderKey,
     ReadOnlyInventoryStore,
+    _compact_scenario_mapping,
+    _hydrate_scenario_mapping,
     get_scenario_inventory,
     replace_scenario_inventory,
 )
@@ -341,6 +345,58 @@ def test_checkpoint_roundtrip_preserves_arbitrary_metadata(
         "metadata_offsets.arrow",
         "checksums.json",
     }
+
+
+def test_compact_scenario_mapping_keeps_metadata_lazy_and_lossless(inventory, tmp_path):
+    mapped_activity = inventory[0]
+    detached_activity = {"name": "detached", "reference product": "service"}
+    mapping = {
+        "electricity": {
+            "grid": [mapped_activity, mapped_activity, detached_activity],
+        }
+    }
+    store = CompactInventoryStore(inventory, take_ownership=True)
+    checkpoint = store.checkpoint(tmp_path / "scenario.inventory-store")
+
+    compacted = _compact_scenario_mapping(mapping, store, checkpoint)
+    first, repeated, detached = compacted["electricity"]["grid"]
+
+    assert first is repeated
+    assert first is not mapped_activity
+    assert detached is detached_activity
+    assert first._resolver._store is None
+    assert first["name"] == "market for electricity, low voltage"
+    assert first.get("location") == "CH"
+    assert "lhv" not in first
+    assert first._resolver._store is None
+    assert "classifications" in first
+    assert first._resolver._store is not None
+    assert dict(first) == store._state.activities[0]
+    assert "_activity_id" not in first
+    assert "exchanges" not in first
+
+    custom = first["custom"]
+    custom["list"].append("changed")
+    assert first["custom"]["list"] == [np.float64(3.5)]
+
+    copied = copy.deepcopy(first)
+    restored = pickle.loads(pickle.dumps(first))
+    assert copied["name"] == restored["name"] == first["name"]
+    assert copied._resolver._store is None
+    assert restored._resolver._store is None
+
+    activity_ids = tuple(store.iter_activity_ids())
+    working_copy = store._checkout_materialized()
+    hydrated = _hydrate_scenario_mapping(
+        compacted,
+        dict(zip(activity_ids, working_copy)),
+    )
+    hydrated_first, hydrated_repeated, hydrated_detached = hydrated["electricity"][
+        "grid"
+    ]
+    assert hydrated_first is hydrated_repeated
+    assert hydrated_first is working_copy[0]
+    assert hydrated_detached is detached_activity
 
 
 def test_checkpoint_corruption_and_schema_are_rejected(inventory, tmp_path):
