@@ -4,6 +4,7 @@ from copy import deepcopy
 from pathlib import Path
 from unittest.mock import call, patch
 
+import numpy as np
 import pytest
 from wurst import rescale_exchange as wurst_rescale_exchange
 
@@ -14,6 +15,48 @@ from premise.inventory_store import CompactInventoryStore, InventoryStore
 from premise.utils import *
 from premise.fuels.utils import get_crops_properties
 import premise.utils as utils_module
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, False),
+        ("", False),
+        ("None", False),
+        ("nan", False),
+        ("metadata", True),
+        ([], True),
+        ({}, True),
+        ((), True),
+        (set(), True),
+        (False, True),
+        (0, True),
+        (float("nan"), False),
+        (np.float32("nan"), False),
+        (np.float64(1.0), True),
+        (np.int64(0), True),
+        (np.bool_(False), True),
+        (np.array([np.nan, np.nan]), True),
+    ],
+)
+def test_has_cache_value_preserves_legacy_presence_semantics(value, expected):
+    assert utils_module._has_cache_value(value) is expected
+
+
+def test_scenario_exchange_presence_checks_metadata_truth_only_once(monkeypatch):
+    calls = 0
+    original = utils_module._has_cache_value
+
+    def counted(value):
+        nonlocal calls
+        calls += 1
+        return original(value)
+
+    monkeypatch.setattr(utils_module, "_has_cache_value", counted)
+
+    assert utils_module._scenario_cache_exchange_field_is_restored("amount", 0)
+    assert not utils_module._scenario_cache_exchange_field_is_restored("comment", "")
+    assert calls == 2
 
 
 @pytest.mark.parametrize("remove_uncertainty", [False, True])

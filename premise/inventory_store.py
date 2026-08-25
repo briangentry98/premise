@@ -793,6 +793,8 @@ class _ColumnarExchangeStorage:
         self._scenario_cache_deleted_metadata: dict[
             tuple[int, int], tuple[str, ...]
         ] = {}
+        self._scenario_cache_deleted_fields_by_row: dict[int, tuple[str, ...]] = {}
+        self._scenario_cache_scan_complete = not self.exchange_metadata_offsets
         self._biosphere_category_masks: dict[
             tuple[tuple[str, str], str], tuple[np.ndarray, np.ndarray]
         ] = {}
@@ -1100,20 +1102,15 @@ class _ColumnarExchangeStorage:
         metadata = self._metadata_for_activity(activity_id)
         with self._metadata_lock:
             if activity_id not in self._scenario_cache_scanned_metadata_activities:
-                from .utils import (
-                    _normalize_scenario_cache_exchange,
-                    _scenario_cache_exchange_field_is_restored,
-                )
+                from .utils import _scenario_cache_exchange_field_is_restored
 
                 for metadata_ordinal, payload in metadata.items():
-                    if any(
-                        not _scenario_cache_exchange_field_is_restored(
-                            field_name, value
-                        )
+                    filtered = {
+                        field_name: value
                         for field_name, value in payload.items()
-                    ):
-                        filtered = dict(payload)
-                        _normalize_scenario_cache_exchange(filtered)
+                        if _scenario_cache_exchange_field_is_restored(field_name, value)
+                    }
+                    if len(filtered) != len(payload):
                         compatible_metadata = (
                             self._scenario_cache_filtered_metadata.get(activity_id)
                         )
@@ -1123,19 +1120,38 @@ class _ColumnarExchangeStorage:
                                 compatible_metadata
                             )
                         compatible_metadata[metadata_ordinal] = filtered
+                        deleted_fields = tuple(payload.keys() - filtered.keys())
                         self._scenario_cache_deleted_metadata[
                             (activity_id, metadata_ordinal)
-                        ] = tuple(payload.keys() - filtered.keys())
+                        ] = deleted_fields
+                        if self._activity_position_by_id is None:
+                            activity_position = activity_id
+                        else:
+                            activity_position = self._activity_position_by_id[
+                                activity_id
+                            ]
+                        row = (
+                            int(self.exchange_starts[activity_position])
+                            + metadata_ordinal
+                        )
+                        self._scenario_cache_deleted_fields_by_row[row] = deleted_fields
                 self._scenario_cache_scanned_metadata_activities.add(activity_id)
+                self._scenario_cache_scan_complete = len(
+                    self._scenario_cache_scanned_metadata_activities
+                ) >= len(self.exchange_metadata_offsets)
         return self._scenario_cache_filtered_metadata.get(activity_id, metadata)
 
     def scenario_cache_deleted_fields(self, row: int) -> tuple[str, ...]:
         """Return sidecar fields omitted by legacy scenario-cache loading."""
 
+        if self._scenario_cache_scan_complete:
+            return self._scenario_cache_deleted_fields_by_row.get(row, ())
         activity_id, ordinal = self._activity_and_ordinal(row)
+        if activity_id not in self.exchange_metadata_offsets:
+            return ()
         if activity_id not in self._scenario_cache_scanned_metadata_activities:
             self._scenario_cache_metadata_for_activity(activity_id)
-        return self._scenario_cache_deleted_metadata.get((activity_id, ordinal), ())
+        return self._scenario_cache_deleted_fields_by_row.get(row, ())
 
     def scenario_cache_metadata(self, row: int) -> Mapping[str, Any]:
         """Return metadata with legacy scenario-cache semantics.

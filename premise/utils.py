@@ -1169,14 +1169,27 @@ _SCENARIO_METADATA_EXCLUDED_FIELDS = {
 def _has_cache_value(value: Any) -> bool:
     if value is None:
         return False
-    if isinstance(value, str) and value in {"None", "nan", ""}:
-        return False
+    if isinstance(value, np.floating):
+        return not np.isnan(value)
+
+    value_type = type(value)
+    if value_type is str:
+        return value not in {"None", "nan", ""}
+    if value_type in {list, tuple, dict, set}:
+        return True
+    if value_type in {bool, int}:
+        return True
+    if value_type is float:
+        return not np.isnan(value)
+
+    # Preserve support for subclasses and the complete NumPy integer family
+    # after the exact built-in hot paths above.
+    if isinstance(value, str):
+        return value not in {"None", "nan", ""}
     if isinstance(value, (list, tuple, dict, set)):
         return True
     if isinstance(value, (bool, int, np.integer)):
         return True
-    if isinstance(value, (float, np.floating)):
-        return not np.isnan(value)
     try:
         return bool(pd.notna(value))
     except Exception:
@@ -1221,10 +1234,9 @@ def _normalize_scenario_cache_activity(
 def _scenario_cache_exchange_field_is_restored(field: str, value: Any) -> bool:
     """Return whether one exchange field survives a legacy cache round trip."""
 
-    return _has_cache_value(value) and (
-        field in _SCENARIO_TRIMMED_EXCHANGE_FIELDS
-        or _scenario_metadata_value_is_restored(value)
-    )
+    if field in _SCENARIO_TRIMMED_EXCHANGE_FIELDS:
+        return _has_cache_value(value)
+    return _scenario_metadata_value_is_restored(value)
 
 
 def _normalize_scenario_cache_exchange(
