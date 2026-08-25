@@ -32,6 +32,46 @@ def test_exclude_exchange_objects_does_not_compare_mapping_contents():
     ]
 
 
+@pytest.mark.parametrize(
+    ("backend", "is_compact"),
+    [("compact", True), ("legacy", False), (None, False)],
+)
+def test_summarize_exchanges_compacts_only_compact_builds(backend, is_compact):
+    transformation = object.__new__(BaseTransformation)
+    transformation._inventory_backend = backend
+    exchanges = [
+        {
+            "name": "market for fuel",
+            "product": "fuel",
+            "location": "GLO",
+            "unit": "kilogram",
+            "amount": 1.5,
+        },
+        {
+            "name": "market for fuel",
+            "product": "fuel",
+            "location": "GLO",
+            "unit": "kilogram",
+            "amount": 2.5,
+        },
+    ]
+
+    summarized = transformation.summarize_exchanges(exchanges)
+
+    assert len(summarized) == 1
+    assert summarized[0] == {
+        "name": "market for fuel",
+        "product": "fuel",
+        "location": "GLO",
+        "unit": "kilogram",
+        "type": "technosphere",
+        "amount": 4.0,
+    }
+    assert (
+        bool(getattr(summarized[0], "_premise_compact_exchange", False)) is is_compact
+    )
+
+
 def make_market_transformation(monkeypatch, technology_shares):
     transformation = object.__new__(BaseTransformation)
     transformation.regions = ["WEU"]

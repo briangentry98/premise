@@ -33,6 +33,7 @@ from .activity_maps import InventorySet
 from .data_collection import IAMDataCollection
 from .filesystem_constants import DATA_DIR
 from .geomap import Geomap
+from .inventory_store import compact_exchange_payload
 from .utils import get_fuel_properties, rescale_exchange
 
 LOG_CONFIG = DATA_DIR / "utils" / "logging" / "logconfig.yaml"
@@ -694,6 +695,7 @@ class BaseTransformation:
     ) -> None:
         self.mapping = None
         self.database: List[dict] = database
+        self._inventory_backend = getattr(database, "_inventory_backend", None)
         self.iam_data: IAMDataCollection = iam_data
         self.model: str = model
         self.regions: List[str] = iam_data.regions
@@ -2236,7 +2238,7 @@ class BaseTransformation:
             ),
             key=itemgetter("name", "product", "location", "unit"),
         )
-        return [
+        summarized = (
             {
                 "name": name,
                 "product": prod,
@@ -2246,7 +2248,10 @@ class BaseTransformation:
                 "amount": sum(e["amount"] for e in excs),
             }
             for (name, prod, loc, unit), excs in grouped_exchanges
-        ]
+        )
+        if getattr(self, "_inventory_backend", None) == "compact":
+            return [compact_exchange_payload(exchange) for exchange in summarized]
+        return list(summarized)
 
     def find_iam_efficiency_change(
         self,

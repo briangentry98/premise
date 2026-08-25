@@ -65,6 +65,22 @@ _EXCHANGE_STRING_FIELDS = (
 )
 _EXCHANGE_NUMERIC_FIELDS = ("amount",)
 _EXCHANGE_BOOLEAN_FIELDS = ()
+_COMPACT_EXCHANGE_FIELDS = (
+    "name",
+    "product",
+    "amount",
+    "type",
+    "unit",
+    "location",
+)
+_COMPACT_EXCHANGE_FIELD_ATTRIBUTES = {
+    field_name: f"_{field_name.replace(' ', '_')}"
+    for field_name in _COMPACT_EXCHANGE_FIELDS
+}
+_COMPACT_EXCHANGE_FIELD_BITS = {
+    field_name: 1 << position
+    for position, field_name in enumerate(_COMPACT_EXCHANGE_FIELDS)
+}
 _NUMERIC_MISSING = 0
 _NUMERIC_PYTHON_FLOAT = 1
 _NUMERIC_PYTHON_INT = 2
@@ -200,8 +216,11 @@ class IndexedInventoryList(list):
         "code",
     )
 
-    def __init__(self, iterable=()):
+    def __init__(self, iterable=(), *, inventory_backend: str | None = None):
         super().__init__(iterable)
+        self._inventory_backend = inventory_backend or getattr(
+            iterable, "_inventory_backend", None
+        )
         self._query_indexes = None
         self._indexed_query_fields: set[str] = set()
 
@@ -1025,6 +1044,131 @@ class _ColumnarExchangeStorage:
             self.close()
         except Exception:
             pass
+
+
+class _CompactExchangeMapping(MutableMapping[str, Any]):
+    """Low-overhead mutable mapping for exchanges created during a build.
+
+    Relinking creates hundreds of thousands of exchanges with the same six
+    fields. A regular dictionary allocates a hash table for every one of them;
+    this mapping keeps those common values in slots and allocates an overflow
+    dictionary only if uncommon metadata is added later.
+    """
+
+    __slots__ = (
+        "_name",
+        "_product",
+        "_amount",
+        "_type",
+        "_unit",
+        "_location",
+        "_present",
+        "_extra",
+    )
+    _premise_compact_exchange = True
+
+    def __init__(self, payload: Mapping[str, Any] | None = None) -> None:
+        self._name = None
+        self._product = None
+        self._amount = None
+        self._type = None
+        self._unit = None
+        self._location = None
+        self._present = 0
+        self._extra: dict[Any, Any] | None = None
+        if payload is not None:
+            for key, value in payload.items():
+                self[key] = value
+
+    def __getitem__(self, key: str) -> Any:
+        field_bit = _COMPACT_EXCHANGE_FIELD_BITS.get(key)
+        if field_bit is not None:
+            if not self._present & field_bit:
+                raise KeyError(key)
+            return getattr(self, _COMPACT_EXCHANGE_FIELD_ATTRIBUTES[key])
+        if self._extra is None:
+            raise KeyError(key)
+        return self._extra[key]
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        field_bit = _COMPACT_EXCHANGE_FIELD_BITS.get(key)
+        if field_bit is not None:
+            setattr(self, _COMPACT_EXCHANGE_FIELD_ATTRIBUTES[key], value)
+            self._present |= field_bit
+            return
+        if self._extra is None:
+            self._extra = {}
+        self._extra[key] = value
+
+    def __delitem__(self, key: str) -> None:
+        field_bit = _COMPACT_EXCHANGE_FIELD_BITS.get(key)
+        if field_bit is not None:
+            if not self._present & field_bit:
+                raise KeyError(key)
+            self._present &= ~field_bit
+            setattr(self, _COMPACT_EXCHANGE_FIELD_ATTRIBUTES[key], None)
+            return
+        if self._extra is None:
+            raise KeyError(key)
+        del self._extra[key]
+        if not self._extra:
+            self._extra = None
+
+    def __iter__(self) -> Iterator[str]:
+        for field_name in _COMPACT_EXCHANGE_FIELDS:
+            if self._present & _COMPACT_EXCHANGE_FIELD_BITS[field_name]:
+                yield field_name
+        if self._extra is not None:
+            yield from self._extra
+
+    def __len__(self) -> int:
+        return self._present.bit_count() + (
+            len(self._extra) if self._extra is not None else 0
+        )
+
+    def copy(self) -> dict[str, Any]:
+        return dict(self.items())
+
+    def _premise_materialize(self) -> dict[str, Any]:
+        return self.copy()
+
+    def _premise_clone(self, memo: dict[int, Any]) -> "_CompactExchangeMapping":
+        duplicate = type(self)()
+        memo[id(self)] = duplicate
+        duplicate._name = copy.deepcopy(self._name, memo)
+        duplicate._product = copy.deepcopy(self._product, memo)
+        duplicate._amount = copy.deepcopy(self._amount, memo)
+        duplicate._type = copy.deepcopy(self._type, memo)
+        duplicate._unit = copy.deepcopy(self._unit, memo)
+        duplicate._location = copy.deepcopy(self._location, memo)
+        duplicate._present = self._present
+        if self._extra is not None:
+            duplicate._extra = copy.deepcopy(self._extra, memo)
+        return duplicate
+
+    def __copy__(self) -> "_CompactExchangeMapping":
+        return self._premise_clone({})
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> "_CompactExchangeMapping":
+        existing = memo.get(id(self))
+        if existing is not None:
+            return existing
+        return self._premise_clone(memo)
+
+    def __repr__(self) -> str:
+        return repr(self.copy())
+
+    def __reduce_ex__(self, protocol: int):
+        del protocol
+        return type(self), (self.copy(),)
+
+
+def compact_exchange_payload(payload: Mapping[str, Any]) -> MutableMapping[str, Any]:
+    """Return a compact mutable exchange without changing mapping semantics."""
+
+    if isinstance(payload, _CompactExchangeMapping):
+        return payload
+    return _CompactExchangeMapping(payload)
 
 
 class _ColumnarExchangeMapping(MutableMapping[str, Any]):
@@ -2110,7 +2254,7 @@ class CompactInventoryStore(_InMemoryInventoryStore):
                     "every other reference."
                 )
             state = self._state
-            database = IndexedInventoryList()
+            database = IndexedInventoryList(inventory_backend=self.backend_name)
             # Bypass IndexedInventoryList.append: no query index exists yet,
             # and building it incrementally would only add overhead here.
             append = list.append
@@ -2586,7 +2730,10 @@ def get_scenario_inventory(scenario: dict[str, Any]) -> list[dict[str, Any]]:
     if "_inventory_working_copy" in scenario:
         database = scenario["_inventory_working_copy"]
         if not isinstance(database, IndexedInventoryList):
-            database = IndexedInventoryList(database)
+            database = IndexedInventoryList(
+                database,
+                inventory_backend=scenario.get("_inventory_backend"),
+            )
             scenario["_inventory_working_copy"] = database
         return database
     if "database" in scenario:  # Compatibility for standalone legacy callers.
@@ -2603,7 +2750,11 @@ def get_scenario_inventory(scenario: dict[str, Any]) -> list[dict[str, Any]]:
         working_copy = store._checkout_materialized()
         scenario.pop("_inventory_store", None)
     else:
-        working_copy = IndexedInventoryList(store.materialize(restore_metadata=True))
+        working_copy = IndexedInventoryList(
+            store.materialize(restore_metadata=True),
+            inventory_backend=store.backend_name,
+        )
+    scenario["_inventory_backend"] = store.backend_name
     scenario["_inventory_working_copy"] = working_copy
     return working_copy
 
@@ -2618,7 +2769,17 @@ def replace_scenario_inventory(
         return
     store = scenario.get("_inventory_store")
     if store is None:
-        scenario["_inventory_working_copy"] = IndexedInventoryList(database)
+        current = scenario.get("_inventory_working_copy")
+        inventory_backend = getattr(
+            database,
+            "_inventory_backend",
+            getattr(current, "_inventory_backend", scenario.get("_inventory_backend")),
+        )
+        scenario["_inventory_backend"] = inventory_backend
+        scenario["_inventory_working_copy"] = IndexedInventoryList(
+            database,
+            inventory_backend=inventory_backend,
+        )
         return
     scenario["_inventory_store"] = create_inventory_store(
         database,
@@ -3220,6 +3381,7 @@ __all__ = [
     "InventoryStoreCorruptionError",
     "InventoryStoreVersionError",
     "STORE_SCHEMA_VERSION",
+    "compact_exchange_payload",
     "create_inventory_store",
     "get_scenario_inventory",
     "replace_scenario_inventory",

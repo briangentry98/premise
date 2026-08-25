@@ -27,6 +27,7 @@ from premise.inventory_store import (
     ReadOnlyInventoryStore,
     _compact_scenario_mapping,
     _hydrate_scenario_mapping,
+    compact_exchange_payload,
     get_scenario_inventory,
     replace_scenario_inventory,
 )
@@ -96,6 +97,35 @@ def inventory():
             "exchanges": [],
         },
     ]
+
+
+def test_compact_added_exchange_preserves_mutable_mapping_semantics():
+    payload = {
+        "name": "market for fuel",
+        "product": "fuel",
+        "amount": np.float32(2.5),
+        "type": "technosphere",
+        "unit": "kilogram",
+        "location": "GLO",
+        "uncertainty type": 2,
+        "custom": {"values": [1, 2]},
+    }
+
+    exchange = compact_exchange_payload(payload)
+
+    assert dict(exchange) == payload
+    assert exchange._extra is not None
+    exchange["amount"] = 4.0
+    exchange["minimum"] = 1.0
+    del exchange["uncertainty type"]
+    assert exchange["amount"] == 4.0
+    assert exchange["minimum"] == 1.0
+    assert "uncertainty type" not in exchange
+
+    cloned = copy.deepcopy(exchange)
+    cloned["custom"]["values"].append(3)
+    assert exchange["custom"] == {"values": [1, 2]}
+    assert dict(pickle.loads(pickle.dumps(exchange))) == dict(exchange)
 
 
 @pytest.mark.parametrize("store_class", [LegacyInventoryStore, CompactInventoryStore])
@@ -740,6 +770,7 @@ def test_new_database_update_keeps_only_private_inventory_state(
         assert system_model == "cutoff"
         assert "database" not in scenario
         database = get_scenario_inventory(scenario)
+        assert database._inventory_backend == "compact"
         database.append(
             {
                 "name": "updated activity",
@@ -760,6 +791,7 @@ def test_new_database_update_keeps_only_private_inventory_state(
 
     scenario = obj.scenarios[0]
     assert "database" not in scenario
+    assert "_inventory_backend" not in scenario
     assert "_inventory_working_copy" not in scenario
     assert ("_inventory_checkpoint" in scenario) is persist
     assert ("_inventory_store" in scenario) is (not persist)

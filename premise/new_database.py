@@ -1381,8 +1381,10 @@ class NewDatabase:
             working_copy = store._checkout_materialized(discard_shared_state=True)
         else:
             working_copy = IndexedInventoryList(
-                store.materialize(restore_metadata=True)
+                store.materialize(restore_metadata=True),
+                inventory_backend=store.backend_name,
             )
+        runtime_scenario["_inventory_backend"] = store.backend_name
         runtime_scenario["_inventory_working_copy"] = working_copy
         if has_mapping:
             runtime_scenario["mapping"] = _hydrate_scenario_mapping(
@@ -1418,6 +1420,7 @@ class NewDatabase:
             )
         else:
             runtime_scenario.pop("_inventory_working_copy", None)
+        runtime_scenario.pop("_inventory_backend", None)
         scenario_definition.clear()
         scenario_definition.update(runtime_scenario)
         if persist:
