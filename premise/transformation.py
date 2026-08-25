@@ -646,6 +646,7 @@ class BaseTransformation:
         self._provider_index_generation = 0
         self._provider_group_cache: dict[tuple[int, tuple[str, str]], tuple] = {}
         self._provider_location_cache: dict[tuple[int, tuple[str, str]], set[str]] = {}
+        self._provider_semantic_index: dict[tuple[str, str, str], int] | None = None
 
     def create_index(self):
         idx = defaultdict(list)
@@ -671,6 +672,7 @@ class BaseTransformation:
         if isinstance(ds, dict):
             ds = [ds]
 
+        provider_semantics = self._get_provider_semantic_index()
         for d in ds:
             key = (copy.deepcopy(d["name"]), copy.deepcopy(d["reference product"]))
             self.index[key].append(
@@ -684,9 +686,14 @@ class BaseTransformation:
                     ),
                 }
             )
-        self._invalidate_provider_group_cache()
+            semantic_key = key[0], key[1], d["location"]
+            provider_semantics[semantic_key] = (
+                provider_semantics.get(semantic_key, 0) + 1
+            )
+        self._invalidate_provider_group_cache(preserve_semantic_index=True)
 
     def remove_from_index(self, ds):
+        provider_semantics = self._get_provider_semantic_index()
         key = (copy.deepcopy(ds["name"]), copy.deepcopy(ds["reference product"]))
         available_locations = [k["location"] for k in self.index[key]]
         if ds["location"] in available_locations:
@@ -694,9 +701,16 @@ class BaseTransformation:
                 d for d in self.index[key] if d["location"] == ds["location"]
             ][0]
             self.index[key].remove(ds_to_remove)
-            self._invalidate_provider_group_cache()
+            semantic_key = key[0], key[1], ds_to_remove["location"]
+            if provider_semantics[semantic_key] == 1:
+                del provider_semantics[semantic_key]
+            else:
+                provider_semantics[semantic_key] -= 1
+            self._invalidate_provider_group_cache(preserve_semantic_index=True)
 
-    def _invalidate_provider_group_cache(self) -> None:
+    def _invalidate_provider_group_cache(
+        self, *, preserve_semantic_index: bool = False
+    ) -> None:
         """Invalidate provider groupings after a mutation to ``self.index``."""
 
         self._provider_index_generation = (
@@ -704,6 +718,23 @@ class BaseTransformation:
         )
         self._provider_group_cache = {}
         self._provider_location_cache = {}
+        if not preserve_semantic_index:
+            self._provider_semantic_index = None
+
+    def _get_provider_semantic_index(self) -> dict[tuple[str, str, str], int]:
+        """Return reference-counted provider name, product, and location keys."""
+
+        cached = getattr(self, "_provider_semantic_index", None)
+        if cached is not None:
+            return cached
+
+        providers: dict[tuple[str, str, str], int] = {}
+        for key, datasets in self.index.items():
+            for dataset in datasets:
+                semantic_key = key[0], key[1], dataset["location"]
+                providers[semantic_key] = providers.get(semantic_key, 0) + 1
+        self._provider_semantic_index = providers
+        return providers
 
     def _get_provider_locations(
         self,
@@ -772,25 +803,22 @@ class BaseTransformation:
 
     def is_in_index(self, ds, location=None):
         if "reference product" in ds:
-            key = (ds["name"], ds["reference product"])
+            product = ds["reference product"]
         elif "product" in ds:
-            key = (ds["name"], ds["product"])
+            product = ds["product"]
         else:
             raise KeyError(
                 f"Dataset {ds['name']} does not have neither 'reference product' nor 'product' keys."
             )
 
         target_location = ds["location"] if location is None else location
-        generation = getattr(self, "_provider_index_generation", 0)
-        cache = getattr(self, "_provider_location_cache", None)
-        if cache is None:
-            cache = self._provider_location_cache = {}
-        cache_key = (generation, key)
-        locations = cache.get(cache_key)
-        if locations is None:
-            locations = {dataset["location"] for dataset in self.index[key]}
-            cache[cache_key] = locations
-        return target_location in locations
+        cached = getattr(self, "_provider_semantic_index", None)
+        providers = self._get_provider_semantic_index() if cached is None else cached
+        return (
+            ds["name"],
+            product,
+            target_location,
+        ) in providers
 
     def get_ecoinvent_locs(self) -> List[str]:
         """
@@ -1770,14 +1798,26 @@ class BaseTransformation:
         alt_names = alt_names or []
         excludes_datasets = excludes_datasets or []
 
+        provider_semantics = self._get_provider_semantic_index()
         for act in ws.get_many(
             self.database, ws.doesnt_contain_any("name", excludes_datasets)
         ):
             # Filter out exchanges to relink
             excs_to_relink = [
                 e
-                for e in ws.technosphere(act)
-                if (not self.is_in_index(e) and e["amount"] != 0)
+                for e in act["exchanges"]
+                if e["type"] == "technosphere"
+                and (
+                    e["name"],
+                    (
+                        e["reference product"]
+                        if "reference product" in e
+                        else e["product"]
+                    ),
+                    e["location"],
+                )
+                not in provider_semantics
+                and e["amount"] != 0
             ]
 
             if len(excs_to_relink) == 0:

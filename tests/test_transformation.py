@@ -135,12 +135,15 @@ def test_provider_groups_preserve_order_and_invalidate_after_index_mutation():
     transformation._provider_index_generation = 0
     transformation._provider_group_cache = {}
     transformation._provider_location_cache = {}
+    transformation._provider_semantic_index = None
     exchange = {"name": key[0], "product": key[1]}
 
     first = transformation._get_provider_groups(exchange)
     repeated = transformation._get_provider_groups(exchange)
+    first_semantics = transformation._get_provider_semantic_index()
 
     assert repeated is first
+    assert transformation._get_provider_semantic_index() is first_semantics
     assert first[2] == ["GLO", "RoW"]
     assert first[4]["GLO"] == [first_provider]
     assert transformation.is_in_index({**exchange, "location": "RoW"})
@@ -169,13 +172,30 @@ def test_provider_groups_preserve_order_and_invalidate_after_index_mutation():
     assert after_addition is not first
     assert after_addition[2] == ["GLO", "RoW", "CH"]
     assert transformation.is_in_index({**exchange, "location": "CH"})
+    assert transformation._get_provider_semantic_index() is first_semantics
+    assert first_semantics[(key[0], key[1], "CH")] == 1
     assert transformation._get_provider_locations(key) is not first_locations
+
+    transformation.add_to_index(added)
+    assert first_semantics[(key[0], key[1], "CH")] == 2
+
+    transformation._provider_semantic_index = None
+    transformation.remove_from_index(added)
+    added_semantics = transformation._get_provider_semantic_index()
+    after_duplicate_removal = transformation._get_provider_groups(exchange)
+
+    assert after_duplicate_removal[2] == ["GLO", "RoW", "CH"]
+    assert transformation._get_provider_semantic_index() is added_semantics
+    assert added_semantics[(key[0], key[1], "CH")] == 1
+    assert transformation.is_in_index({**exchange, "location": "CH"})
 
     transformation.remove_from_index(added)
     after_removal = transformation._get_provider_groups(exchange)
 
-    assert after_removal is not after_addition
+    assert after_removal is not after_duplicate_removal
     assert after_removal[2] == ["GLO", "RoW"]
+    assert transformation._get_provider_semantic_index() is added_semantics
+    assert (key[0], key[1], "CH") not in added_semantics
     assert not transformation.is_in_index({**exchange, "location": "CH"})
 
 

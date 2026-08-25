@@ -7,8 +7,8 @@
 > warm IMAGE SSP2-M 2050 all-sector differential run it produced the exact same
 > semantic hash as the legacy store (`39efcf273da6b52e6c6bdfce8a6546a9a0819a054340fee9062ac2a7fddf808c`),
 > with 50,938 datasets and 1,597,616 exchanges. A matched diagnostic run (not
-> the five-run acceptance median) reduced wall time from 82.67 to 47.58 seconds
-> (42.4%) and sampled peak RSS from 2.692 to 1.938 GB (28.0%). This is well
+> the five-run acceptance median) reduced wall time from 82.67 to 45.25 seconds
+> (45.3%) and sampled peak RSS from 2.692 to 2.030 GB (24.6%). This is well
 > short of the required 50%/50% activation gate.
 > The default therefore remains `legacy`; transformation hot paths still need
 > to move off their private mutable working materialization.
@@ -46,8 +46,8 @@ includes the full all-sector update and compact checkpoint write.
 
 | Metric | Legacy oracle | Compact | Change |
 | --- | ---: | ---: | ---: |
-| End-to-end wall time | 82.67 s | 47.58 s | -42.4% |
-| Sampled peak RSS | 2.692 GB | 1.938 GB | -28.0% |
+| End-to-end wall time | 82.67 s | 45.25 s | -45.3% |
+| Sampled peak RSS | 2.692 GB | 2.030 GB | -24.6% |
 | Datasets | 50,938 | 50,938 | exact |
 | Exchanges | 1,597,616 | 1,597,616 | exact |
 
@@ -176,6 +176,29 @@ unprofiled run put electricity at 2.73 seconds versus 2.79 seconds previously;
 the 47.62-second end-to-end result was within noise of the 47.58-second
 headline, which is therefore unchanged. Strict canonical output remained
 exact.
+
+Indexed Wurst candidate construction now returns cached immutable sets without
+copying them for every query, caches compound exclusions and unions, and starts
+multi-filter intersections with the smallest candidate group. The scoped query
+kernel fell from 0.73 to 0.56 seconds. Electricity market construction also
+reuses each region's supplier selection and production-volume shares across
+period-specific low- and high-voltage markets. This removed 4.47 million
+repeated location comparisons and reduced high-voltage regional-market
+construction from 0.73 to 0.38 seconds. Both changes retained the exact
+canonical output.
+
+Exact provider membership now uses a reference-counted semantic index keyed by
+name, product, and location. Provider additions and removals update it
+incrementally, including duplicate providers, while the existing ordered
+provider groupings retain generation-based invalidation. Common relinking binds
+one semantic snapshot and filters technosphere exchanges directly, avoiding a
+provider helper call for every exchange. In the scoped profile,
+`relink_datasets` fell from 1.51 to 1.10 seconds and `is_in_index` from 0.42 to
+0.12 seconds. The matched unprofiled run reduced electricity from 2.73 to 2.27
+seconds, the full update from 45.02 to 42.72 seconds, and end-to-end time from
+47.62 to 45.25 seconds. Its 2.030 GB sampled peak was 87 MB above the preceding
+single run, so this diagnostic is a runtime improvement but not evidence of an
+RSS improvement. Strict canonical output remained exact.
 
 The seed-zero canonical hash is
 `39efcf273da6b52e6c6bdfce8a6546a9a0819a054340fee9062ac2a7fddf808c`.
