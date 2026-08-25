@@ -398,6 +398,8 @@ def test_columnar_checkpoint_checkout_and_proxy_clone_are_copy_on_write(
     cloned = clone_inventory_dataset(working_copy[2])
     cloned_exchange = cloned["exchanges"][0]
 
+    assert type(cloned).__name__ == "_ColumnarActivityMapping"
+    assert cloned._storage is working_copy[2]._storage
     assert type(source_exchange).__name__ == "_ColumnarExchangeMapping"
     assert cloned_exchange is not source_exchange
     assert cloned_exchange._storage is source_exchange._storage
@@ -416,6 +418,28 @@ def test_columnar_checkpoint_checkout_and_proxy_clone_are_copy_on_write(
     )
     assert restored_store._state.exchanges[0] is cloned_exchange
     assert restored_store.materialize()[0] == expected
+
+
+def test_columnar_activity_deepcopy_keeps_sidecar_lazy_and_isolated(
+    inventory, tmp_path
+):
+    checkpoint = CompactInventoryStore(inventory).checkpoint(
+        tmp_path / "source.inventory-store"
+    )
+    source = InventoryStore.open(checkpoint)._checkout_materialized()[0]
+    storage = source._storage
+
+    cloned = copy.deepcopy(source)
+
+    assert type(cloned).__name__ == "_ColumnarActivityMapping"
+    assert cloned._storage is storage
+    assert type(cloned["exchanges"][0]).__name__ == "_ColumnarExchangeMapping"
+    assert len(storage._activity_cache) == 0
+
+    cloned["location"] = "DE"
+    cloned["custom"]["list"].append("changed")
+    assert source["location"] == "CH"
+    assert source["custom"]["list"] == [np.float64(3.5)]
 
 
 def test_columnar_activity_hot_fields_remain_mapping_compatible(inventory, tmp_path):

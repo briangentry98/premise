@@ -1344,18 +1344,42 @@ class _ColumnarExchangeMapping(MutableMapping[str, Any]):
     def __copy__(self) -> dict[str, Any]:
         return self.copy()
 
-    def __deepcopy__(self, memo: dict[int, Any]) -> dict[str, Any]:
-        copied = copy.deepcopy(self.copy(), memo)
-        memo[id(self)] = copied
-        return copied
+    def __deepcopy__(self, memo: dict[int, Any]) -> "_ColumnarExchangeMapping":
+        existing = memo.get(id(self))
+        if existing is not None:
+            return existing
+        return self._premise_clone(memo)
 
     def _premise_clone(self, memo: dict[int, Any]) -> "_ColumnarExchangeMapping":
         """Clone an overlay while retaining the immutable source row."""
 
         duplicate = type(self)(self._storage, self._row)
         memo[id(self)] = duplicate
-        if self._changes is not None:
-            duplicate._changes = copy.deepcopy(self._changes, memo)
+        if isinstance(self._changes, tuple):
+            key, value = self._changes
+            duplicate._changes = (
+                copy.deepcopy(key, memo),
+                (
+                    _COLUMNAR_DELETED
+                    if value is _COLUMNAR_DELETED
+                    else copy.deepcopy(value, memo)
+                ),
+            )
+        elif self._changes is not None:
+            duplicate._changes = []
+            for position in range(0, len(self._changes), 2):
+                key = self._changes[position]
+                value = self._changes[position + 1]
+                duplicate._changes.extend(
+                    (
+                        copy.deepcopy(key, memo),
+                        (
+                            _COLUMNAR_DELETED
+                            if value is _COLUMNAR_DELETED
+                            else copy.deepcopy(value, memo)
+                        ),
+                    )
+                )
         return duplicate
 
     def __repr__(self) -> str:
@@ -1553,13 +1577,43 @@ class _ColumnarActivityMapping(dict[str, Any]):
     def _premise_materialize(self) -> dict[str, Any]:
         return self.copy()
 
+    def _premise_clone(self, memo: dict[int, Any]) -> "_ColumnarActivityMapping":
+        """Clone resident overlays while sharing immutable columnar storage."""
+
+        duplicate = type(self)(self._storage, self._activity_id, {})
+        memo[id(self)] = duplicate
+        duplicate._deleted = self._deleted.copy()
+        duplicate._database = (
+            _COLUMNAR_ACTIVITY_MISSING
+            if self._database is _COLUMNAR_ACTIVITY_MISSING
+            else copy.deepcopy(self._database, memo)
+        )
+        duplicate._code = (
+            _COLUMNAR_ACTIVITY_MISSING
+            if self._code is _COLUMNAR_ACTIVITY_MISSING
+            else copy.deepcopy(self._code, memo)
+        )
+        duplicate._type = (
+            _COLUMNAR_ACTIVITY_MISSING
+            if self._type is _COLUMNAR_ACTIVITY_MISSING
+            else copy.deepcopy(self._type, memo)
+        )
+        for key, value in dict.items(self):
+            dict.__setitem__(
+                duplicate,
+                copy.deepcopy(key, memo),
+                copy.deepcopy(value, memo),
+            )
+        return duplicate
+
     def __copy__(self) -> dict[str, Any]:
         return self.copy()
 
-    def __deepcopy__(self, memo: dict[int, Any]) -> dict[str, Any]:
-        copied = copy.deepcopy(self.copy(), memo)
-        memo[id(self)] = copied
-        return copied
+    def __deepcopy__(self, memo: dict[int, Any]) -> "_ColumnarActivityMapping":
+        existing = memo.get(id(self))
+        if existing is not None:
+            return existing
+        return self._premise_clone(memo)
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, Mapping):
