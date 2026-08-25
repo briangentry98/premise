@@ -150,13 +150,24 @@ def clone_inventory_dataset(dataset: dict) -> dict:
                 duplicate_key = (
                     key if type(key) in _INVENTORY_ATOMIC_TYPES else clone(key)
                 )
-                duplicate[duplicate_key] = clone(item)
+                item_type = type(item)
+                duplicate[duplicate_key] = (
+                    item
+                    if item_type in _INVENTORY_ATOMIC_TYPES
+                    or isinstance(item, np.generic)
+                    else clone(item)
+                )
             return duplicate
 
         if value_type is list:
-            duplicate = []
+            duplicate = value.copy()
             memo[value_id] = duplicate
-            duplicate.extend(clone(item) for item in value)
+            for position, item in enumerate(value):
+                item_type = type(item)
+                if item_type not in _INVENTORY_ATOMIC_TYPES and not isinstance(
+                    item, np.generic
+                ):
+                    duplicate[position] = clone(item)
             return duplicate
 
         if value_type is np.ndarray:
