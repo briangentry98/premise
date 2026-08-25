@@ -91,13 +91,12 @@ class _ProviderRecord(Mapping[str, Any]):
 
 
 def _provider_record(dataset: Mapping[str, Any]) -> _ProviderRecord:
-    try:
-        production = next(
-            exchange
-            for exchange in dataset["exchanges"]
-            if exchange["type"] == "production"
-        )
-    except StopIteration:
+    production = None
+    for exchange in dataset["exchanges"]:
+        if exchange["type"] == "production":
+            production = exchange
+            break
+    if production is None:
         # Preserve the historical failure from ``list(ws.production(...))[0]``.
         raise IndexError("list index out of range") from None
     return _ProviderRecord(
@@ -710,7 +709,7 @@ class BaseTransformation:
     def create_index(self):
         idx = defaultdict(list)
         for ds in self.database:
-            key = (copy.deepcopy(ds["name"]), copy.deepcopy(ds["reference product"]))
+            key = (ds["name"], ds["reference product"])
             idx[key].append(_provider_record(ds))
         return idx
 

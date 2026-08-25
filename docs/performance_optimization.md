@@ -312,6 +312,15 @@ construction fell from 0.144 to 0.042 seconds and the sector from 1.011 to
 8 MB higher in that run, so no global runtime or memory claim is made. The
 exact canonical hash and inventory counts remained unchanged.
 
+Fresh provider indexes now reuse immutable activity name and product strings
+directly and locate the first production exchange with an early-exit loop.
+This removes 99,900 unnecessary deep-copy calls in the certified inventory
+while preserving first-production selection and the historical missing-
+production error. In the matched compact final-energy profile, index
+construction fell from 0.146 to 0.075 seconds and the sector from 0.928 to
+0.815 seconds. Overall wall time and sampled RSS remained within run noise. The
+exact canonical hash and inventory counts remained unchanged.
+
 The seed-zero canonical hash is
 `39efcf273da6b52e6c6bdfce8a6546a9a0819a054340fee9062ac2a7fddf808c`.
 Compact builds refuse an unfixed hash seed in the benchmark harness so an
