@@ -3,6 +3,10 @@ import pytest
 
 import premise.activity_maps as activity_maps_module
 from premise.activity_maps import InventorySet, act_fltr
+from premise.inventory_store import (
+    IndexedInventoryList,
+    get_wurst_query_diagnostics,
+)
 
 dummy_minimal_db = [
     {
@@ -112,6 +116,27 @@ def test_generate_sets_supports_filters_without_a_name_prefilter():
     )
 
     assert mapping == {"target": [database[0]]}
+
+
+def test_generate_sets_keeps_indexed_prefilter_for_inner_queries():
+    database = IndexedInventoryList(
+        [
+            {"name": "electricity production, coal", "location": "DE"},
+            {"name": "electricity production, gas", "location": "US"},
+            {"name": "heat production, coal", "location": "DE"},
+        ]
+    )
+    filters = {
+        "coal": {"fltr": {"name": "electricity", "location": "DE"}},
+        "gas": {"fltr": {"name": "electricity", "location": "US"}},
+    }
+    get_wurst_query_diagnostics(reset=True)
+
+    mapping = InventorySet(database).generate_sets_from_filters(filters)
+    diagnostics = get_wurst_query_diagnostics(reset=True)
+
+    assert mapping == {"coal": [database[0]], "gas": [database[1]]}
+    assert diagnostics == {"indexed": 3, "fallback": 0}
 
 
 def test_image_cdr_map_includes_cement_biogenic_ccs_variant():

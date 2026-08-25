@@ -200,6 +200,15 @@ seconds, the full update from 45.02 to 42.72 seconds, and end-to-end time from
 single run, so this diagnostic is a runtime improvement but not evidence of an
 RSS improvement. Strict canonical output remained exact.
 
+Activity-map name prefiltering now preserves `IndexedInventoryList` for compact
+working inventories instead of materializing the reduced candidates into a
+plain list. The 212 downstream contains/mask queries therefore continue through
+the indexed query engine; ordinary list callers retain the legacy scan. In the
+scoped electricity profile, activity-map construction fell from 0.79 to 0.62
+seconds, inner filtering from 0.60 to 0.44 seconds, and the sector from 5.36 to
+5.04 seconds. Indexed queries increased by the expected 634 without adding a
+fallback, and strict canonical output remained exact.
+
 The seed-zero canonical hash is
 `39efcf273da6b52e6c6bdfce8a6546a9a0819a054340fee9062ac2a7fddf808c`.
 Compact builds refuse an unfixed hash seed in the benchmark harness so an

@@ -12,8 +12,9 @@ import pandas as pd
 from wurst import searching as ws
 
 from .filesystem_constants import DATA_DIR, VARIABLES_DIR
-from .utils import load_database
+from .inventory_store import IndexedInventoryList
 from .logger import create_logger
+from .utils import load_database
 
 logger = create_logger("mapping")
 
@@ -564,11 +565,14 @@ class InventorySet:
 
         unique_names = tuple(dict.fromkeys(names))
         if unique_names and every_filter_has_name:
-            subset = list(
-                ws.get_many(
-                    database,
-                    ws.either(*[ws.contains("name", name) for name in unique_names]),
-                )
+            matches = ws.get_many(
+                database,
+                ws.either(*[ws.contains("name", name) for name in unique_names]),
+            )
+            subset = (
+                IndexedInventoryList(matches)
+                if isinstance(database, IndexedInventoryList)
+                else list(matches)
             )
         else:
             subset = database
