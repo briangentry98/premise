@@ -138,9 +138,9 @@ def test_columnar_exchange_get_preserves_sidecar_and_overlay_semantics(
     checkpoint = CompactInventoryStore(inventory).checkpoint(
         tmp_path / "source.inventory-store"
     )
-    exchange = InventoryStore.open(checkpoint)._checkout_materialized()[0][
-        "exchanges"
-    ][0]
+    exchange = InventoryStore.open(checkpoint)._checkout_materialized()[0]["exchanges"][
+        0
+    ]
     marker = object()
 
     assert exchange.get("location", marker) is None
@@ -187,13 +187,12 @@ def test_biosphere_category_filter_preserves_order_sidecars_and_overlays(
     ]
     copper, gold = source_exchanges[1:3]
 
-    assert filter_biosphere_category(
-        source_exchanges, categories, "kilogram"
-    ) == [copper, gold]
+    assert filter_biosphere_category(source_exchanges, categories, "kilogram") == [
+        copper,
+        gold,
+    ]
     copper["categories"] = ("air", "urban air close to ground")
-    assert filter_biosphere_category(
-        source_exchanges, categories, "kilogram"
-    ) == [gold]
+    assert filter_biosphere_category(source_exchanges, categories, "kilogram") == [gold]
     compact = compact_exchange_payload(exchanges[0])
     assert filter_biosphere_category([compact], categories, "kilogram") == [compact]
 
@@ -616,6 +615,128 @@ def test_columnar_exchange_fast_checkpoint_roundtrip_is_lossless(inventory, tmp_
     assert restored == expected
     assert type(restored["exchanges"][0]["amount"]) is np.float32
     assert "input" not in restored["exchanges"][0]
+
+
+def test_columnar_scenario_checkpoint_reuses_compatibility_scan(
+    inventory, tmp_path, monkeypatch
+):
+    inventory[2]["exchanges"][0].update(
+        {
+            "location": "None",
+            "amount": 0,
+            "production volume": np.nan,
+            "comment": 0,
+            "custom false": False,
+        }
+    )
+    source = CompactInventoryStore(inventory).checkpoint(
+        tmp_path / "source.inventory-store"
+    )
+    store = InventoryStore.open(source)
+    store._scenario_cache_compatibility = True
+
+    calls = 0
+    original = utils_module._scenario_cache_exchange_field_is_restored
+
+    def counted(field, value):
+        nonlocal calls
+        calls += 1
+        return original(field, value)
+
+    monkeypatch.setattr(
+        utils_module,
+        "_scenario_cache_exchange_field_is_restored",
+        counted,
+    )
+    first = store.checkpoint(tmp_path / "first.inventory-store")
+    calls_after_first = calls
+    second = store.checkpoint(tmp_path / "second.inventory-store")
+
+    assert calls_after_first > 0
+    assert calls == calls_after_first
+    assert (
+        InventoryStore.open(first).materialize()
+        == InventoryStore.open(second).materialize()
+    )
+    exchange = InventoryStore.open(second).materialize()[2]["exchanges"][0]
+    assert exchange["amount"] == 0
+    assert "location" not in exchange
+    assert "production volume" not in exchange
+    assert "comment" not in exchange
+    assert "custom false" not in exchange
+
+
+def test_scenario_delta_checkpoint_roundtrip_preserves_order_and_compatibility(
+    inventory, tmp_path
+):
+    source = CompactInventoryStore(inventory).checkpoint(
+        tmp_path / "source.inventory-store"
+    )
+    database = InventoryStore.open(source)._checkout_materialized()
+    database[0]["comment"] = None
+    database[0]["has_downstream_consumer"] = False
+    database[0]["exchanges"][0].update(
+        {
+            "location": "None",
+            "amount": 0,
+            "production volume": np.nan,
+            "comment": 0,
+        }
+    )
+    database[2]["exchanges"][0]["amount"] = np.float32(3.25)
+    database.append(
+        {
+            "name": "added activity",
+            "reference product": "service",
+            "location": "GLO",
+            "unit": "unit",
+            "code": "added",
+            "exchanges": [
+                {
+                    "name": "added activity",
+                    "product": "service",
+                    "location": "GLO",
+                    "unit": "unit",
+                    "type": "production",
+                    "amount": 1,
+                }
+            ],
+        }
+    )
+
+    expected = copy.deepcopy(database)
+    for dataset in expected:
+        utils_module._normalize_scenario_cache_activity(dataset)
+        for exchange in dataset["exchanges"]:
+            utils_module._normalize_scenario_cache_exchange(exchange)
+
+    scenario_store = CompactInventoryStore(database, take_ownership=True)
+    scenario_store._scenario_cache_compatibility = True
+    checkpoint = scenario_store.checkpoint(tmp_path / "scenario.inventory-store")
+    manifest = json.loads((checkpoint / "manifest.json").read_text())
+    restored_store = InventoryStore.open(checkpoint)
+    restored = restored_store.materialize()
+
+    assert manifest["columnar_format"] == "scenario-delta-v1"
+    assert set(path.name for path in checkpoint.iterdir()) == {
+        "manifest.json",
+        "scenario-delta.pkl",
+        "checksums.json",
+    }
+    with (checkpoint / "scenario-delta.pkl").open("rb") as stream:
+        assert pickle.load(stream) == ("scenario-delta-stream-v1", len(expected))
+    assert restored == expected
+    assert type(restored[2]["exchanges"][0]["amount"]) is np.float32
+    loaded = utils_module.load_database(
+        {"_inventory_checkpoint": checkpoint},
+        original_database=[],
+        consume_compact=True,
+    )
+    assert loaded["database"] == expected
+
+    source.rename(tmp_path / "moved-source.inventory-store")
+    with pytest.raises(InventoryStoreCorruptionError, match="base checkpoint"):
+        InventoryStore.open(checkpoint)
 
 
 def test_load_database_transfers_compact_store_without_exchange_materialization(

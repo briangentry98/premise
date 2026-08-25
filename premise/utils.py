@@ -1173,6 +1173,10 @@ def _has_cache_value(value: Any) -> bool:
         return False
     if isinstance(value, (list, tuple, dict, set)):
         return True
+    if isinstance(value, (bool, int, np.integer)):
+        return True
+    if isinstance(value, (float, np.floating)):
+        return not np.isnan(value)
     try:
         return bool(pd.notna(value))
     except Exception:

@@ -66,6 +66,10 @@ _EXCHANGE_STRING_FIELDS = (
 _EXCHANGE_STRING_FIELD_SET = frozenset(_EXCHANGE_STRING_FIELDS)
 _EXCHANGE_NUMERIC_FIELDS = ("amount",)
 _EXCHANGE_BOOLEAN_FIELDS = ()
+_SCENARIO_CACHE_COMMON_FIELDS = (
+    *_EXCHANGE_STRING_FIELDS,
+    *_EXCHANGE_NUMERIC_FIELDS,
+)
 _COMPACT_EXCHANGE_FIELDS = (
     "name",
     "product",
@@ -747,6 +751,7 @@ class _ColumnarExchangeStorage:
         activity_ids: np.ndarray,
         exchange_starts: np.ndarray,
         exchange_counts: np.ndarray,
+        activity_common_columns: Mapping[str, list[Any]],
         activity_offsets: Mapping[int, tuple[int, int]],
         exchange_metadata_offsets: Mapping[int, tuple[int, int]],
     ) -> None:
@@ -755,6 +760,17 @@ class _ColumnarExchangeStorage:
         self.checkpoint = checkpoint
         self.row_count = int(exchange_count)
         self.activity_ids = activity_ids
+        self._activity_common_columns = dict(activity_common_columns)
+        self._activity_position_by_id = (
+            None
+            if np.array_equal(
+                activity_ids, np.arange(len(activity_ids), dtype=np.int64)
+            )
+            else {
+                int(activity_id): position
+                for position, activity_id in enumerate(activity_ids)
+            }
+        )
         self.exchange_starts = exchange_starts
         self.exchange_ends = exchange_starts + exchange_counts
         self._activity_position_by_row = np.repeat(
@@ -770,6 +786,17 @@ class _ColumnarExchangeStorage:
         self._metadata_cache: OrderedDict[int, dict[int, dict[str, Any]]] = (
             OrderedDict()
         )
+        self._scenario_cache_scanned_metadata_activities: set[int] = set()
+        self._scenario_cache_filtered_metadata: dict[int, dict[int, dict[str, Any]]] = (
+            {}
+        )
+        self._scenario_cache_deleted_metadata: dict[
+            tuple[int, int], tuple[str, ...]
+        ] = {}
+        self._last_metadata_activity_id: int | None = None
+        self._last_metadata_group: dict[int, dict[str, Any]] = {}
+        self._last_scenario_metadata_activity_id: int | None = None
+        self._last_scenario_metadata_group: dict[int, dict[str, Any]] = {}
         self._metadata_lock = threading.RLock()
         self._sidecar_file = (checkpoint / "metadata.bin").open("rb")
         self._sidecar = mmap.mmap(
@@ -803,6 +830,45 @@ class _ColumnarExchangeStorage:
         }
         self.exchange_ids = np.empty(self.row_count, dtype=np.int64)
         self._load_exchange_columns(checkpoint / "exchanges.arrow")
+        self._scenario_cache_string_values = [
+            None if value in {"", "None", "nan"} else value
+            for value in self._string_values
+        ]
+        self._scenario_cache_numeric_kinds = {}
+        float_kinds = (
+            _NUMERIC_PYTHON_FLOAT,
+            _NUMERIC_FLOAT32,
+            _NUMERIC_FLOAT64,
+        )
+        for field_name in _EXCHANGE_NUMERIC_FIELDS:
+            compatible_kinds = self._numeric_kinds[field_name].copy()
+            invalid = np.isin(compatible_kinds, float_kinds) & np.isnan(
+                self._numeric_floats[field_name]
+            )
+            compatible_kinds[invalid] = _NUMERIC_MISSING
+            self._scenario_cache_numeric_kinds[field_name] = compatible_kinds
+        self._scenario_cache_invalid_common_masks = np.zeros(
+            self.row_count, dtype=np.uint16
+        )
+        invalid_string_ids = np.asarray(
+            [
+                string_id
+                for string_id, value in enumerate(self._scenario_cache_string_values)
+                if value is None
+            ],
+            dtype=np.int32,
+        )
+        if len(invalid_string_ids):
+            for position, field_name in enumerate(_EXCHANGE_STRING_FIELDS):
+                invalid = np.isin(self._string_columns[field_name], invalid_string_ids)
+                self._scenario_cache_invalid_common_masks[invalid] |= 1 << position
+        offset = len(_EXCHANGE_STRING_FIELDS)
+        for position, field_name in enumerate(_EXCHANGE_NUMERIC_FIELDS, offset):
+            invalid = (
+                self._numeric_kinds[field_name]
+                != self._scenario_cache_numeric_kinds[field_name]
+            )
+            self._scenario_cache_invalid_common_masks[invalid] |= 1 << position
         expected = np.arange(self.row_count, dtype=np.int64)
         self._dense_ids = bool(np.array_equal(self.exchange_ids, expected))
         self._row_by_id = (
@@ -963,6 +1029,25 @@ class _ColumnarExchangeStorage:
                 self._activity_cache.move_to_end(activity_id)
             return payload
 
+    def base_activity_payload(self, activity_id: ActivityId) -> dict[str, Any]:
+        """Materialize one immutable source activity without its exchanges."""
+
+        if self._activity_position_by_id is None:
+            position = activity_id
+            if not 0 <= position < len(self.activity_ids):
+                raise KeyError(activity_id)
+        else:
+            try:
+                position = self._activity_position_by_id[activity_id]
+            except KeyError as error:
+                raise KeyError(activity_id) from error
+        payload = copy.deepcopy(self.activity_payload(activity_id))
+        for field_name, values in self._activity_common_columns.items():
+            value = values[position]
+            if value is not None and field_name not in payload:
+                payload[field_name] = value
+        return payload
+
     def _activity_and_ordinal(self, row: int) -> tuple[ActivityId, int]:
         if not 0 <= row < self.row_count:
             raise KeyError(row)
@@ -972,8 +1057,9 @@ class _ColumnarExchangeStorage:
             row - int(self.exchange_starts[position]),
         )
 
-    def metadata(self, row: int) -> Mapping[str, Any]:
-        activity_id, ordinal = self._activity_and_ordinal(row)
+    def _metadata_for_activity(
+        self, activity_id: ActivityId
+    ) -> dict[int, dict[str, Any]]:
         with self._metadata_lock:
             metadata = self._metadata_cache.get(activity_id)
             if metadata is None:
@@ -991,6 +1077,78 @@ class _ColumnarExchangeStorage:
                     self._metadata_cache.popitem(last=False)
             else:
                 self._metadata_cache.move_to_end(activity_id)
+        return metadata
+
+    def metadata(self, row: int) -> Mapping[str, Any]:
+        activity_id, ordinal = self._activity_and_ordinal(row)
+        if activity_id == self._last_metadata_activity_id:
+            metadata = self._last_metadata_group
+        else:
+            metadata = self._metadata_for_activity(activity_id)
+            self._last_metadata_activity_id = activity_id
+            self._last_metadata_group = metadata
+        return metadata.get(ordinal, {})
+
+    def _scenario_cache_metadata_for_activity(
+        self, activity_id: ActivityId
+    ) -> dict[int, dict[str, Any]]:
+        """Return one activity's legacy-compatible exchange metadata."""
+
+        metadata = self._metadata_for_activity(activity_id)
+        with self._metadata_lock:
+            if activity_id not in self._scenario_cache_scanned_metadata_activities:
+                from .utils import (
+                    _normalize_scenario_cache_exchange,
+                    _scenario_cache_exchange_field_is_restored,
+                )
+
+                for metadata_ordinal, payload in metadata.items():
+                    if any(
+                        not _scenario_cache_exchange_field_is_restored(
+                            field_name, value
+                        )
+                        for field_name, value in payload.items()
+                    ):
+                        filtered = dict(payload)
+                        _normalize_scenario_cache_exchange(filtered)
+                        compatible_metadata = (
+                            self._scenario_cache_filtered_metadata.get(activity_id)
+                        )
+                        if compatible_metadata is None:
+                            compatible_metadata = metadata.copy()
+                            self._scenario_cache_filtered_metadata[activity_id] = (
+                                compatible_metadata
+                            )
+                        compatible_metadata[metadata_ordinal] = filtered
+                        self._scenario_cache_deleted_metadata[
+                            (activity_id, metadata_ordinal)
+                        ] = tuple(payload.keys() - filtered.keys())
+                self._scenario_cache_scanned_metadata_activities.add(activity_id)
+        return self._scenario_cache_filtered_metadata.get(activity_id, metadata)
+
+    def scenario_cache_deleted_fields(self, row: int) -> tuple[str, ...]:
+        """Return sidecar fields omitted by legacy scenario-cache loading."""
+
+        activity_id, ordinal = self._activity_and_ordinal(row)
+        if activity_id not in self._scenario_cache_scanned_metadata_activities:
+            self._scenario_cache_metadata_for_activity(activity_id)
+        return self._scenario_cache_deleted_metadata.get((activity_id, ordinal), ())
+
+    def scenario_cache_metadata(self, row: int) -> Mapping[str, Any]:
+        """Return metadata with legacy scenario-cache semantics.
+
+        Source-column metadata is immutable and shared by every scenario-year.
+        Check each activity block only once, retaining filtered copies solely
+        for the uncommon rows which contain values the legacy loader drops.
+        """
+
+        activity_id, ordinal = self._activity_and_ordinal(row)
+        if activity_id == self._last_scenario_metadata_activity_id:
+            metadata = self._last_scenario_metadata_group
+        else:
+            metadata = self._scenario_cache_metadata_for_activity(activity_id)
+            self._last_scenario_metadata_activity_id = activity_id
+            self._last_scenario_metadata_group = metadata
         return metadata.get(ordinal, {})
 
     def common_keys(self, row: int) -> Iterator[str]:
@@ -1298,15 +1456,14 @@ class _ColumnarExchangeMapping(MutableMapping[str, Any]):
         storage = self._storage
         row = self._row
         if self._changes is None:
+            string_values = (
+                storage._scenario_cache_string_values
+                if scenario_cache_compatibility
+                else storage._string_values
+            )
             for field_name in _EXCHANGE_STRING_FIELDS:
                 string_id = int(storage._string_columns[field_name][row])
-                value = storage._string_values[string_id] if string_id >= 0 else None
-                if (
-                    scenario_cache_compatibility
-                    and isinstance(value, str)
-                    and value in {"", "None", "nan"}
-                ):
-                    value = None
+                value = string_values[string_id] if string_id >= 0 else None
                 columns[field_name].append(value)
                 if collect_string is not None:
                     collect_string(value)
@@ -1324,7 +1481,12 @@ class _ColumnarExchangeMapping(MutableMapping[str, Any]):
                 collect_string(storage._string_values[second])
 
             for field_name in _EXCHANGE_NUMERIC_FIELDS:
-                kind = int(storage._numeric_kinds[field_name][row])
+                kinds = (
+                    storage._scenario_cache_numeric_kinds[field_name]
+                    if scenario_cache_compatibility
+                    else storage._numeric_kinds[field_name]
+                )
+                kind = int(kinds[row])
                 float_value = (
                     float(storage._numeric_floats[field_name][row])
                     if kind
@@ -1335,13 +1497,6 @@ class _ColumnarExchangeMapping(MutableMapping[str, Any]):
                     }
                     else None
                 )
-                if (
-                    scenario_cache_compatibility
-                    and float_value is not None
-                    and float_value != float_value
-                ):
-                    kind = _NUMERIC_MISSING
-                    float_value = None
                 columns[f"{field_name}__kind"].append(kind)
                 columns[f"{field_name}__float"].append(float_value)
                 columns[f"{field_name}__int"].append(
@@ -1354,6 +1509,8 @@ class _ColumnarExchangeMapping(MutableMapping[str, Any]):
                 value = int(storage._boolean_columns[field_name][row])
                 columns[field_name].append(bool(value) if value >= 0 else None)
 
+            if scenario_cache_compatibility:
+                return storage.scenario_cache_metadata(row)
             return storage.metadata(row)
 
         metadata = dict(storage.metadata(row))
@@ -1412,6 +1569,10 @@ class _ColumnarExchangeMapping(MutableMapping[str, Any]):
                 metadata[key] = value
             else:
                 metadata.pop(key, None)
+        if scenario_cache_compatibility:
+            from .utils import _normalize_scenario_cache_exchange
+
+            _normalize_scenario_cache_exchange(metadata)
         return metadata
 
     def __getitem__(self, key: str) -> Any:
@@ -1879,6 +2040,83 @@ class _ColumnarExchangeTable:
         duplicate = type(self)(self._storage)
         duplicate._overrides = self._overrides.copy()
         duplicate._tombstones = self._tombstones.copy()
+        duplicate._length = self._length
+        return duplicate
+
+
+class _DeltaExchangeTable:
+    """Lazy final exchange IDs mapped onto immutable source rows."""
+
+    _MISSING = -2
+    _OVERRIDE = -1
+
+    def __init__(self, storage: _ColumnarExchangeStorage, exchange_count: int) -> None:
+        self._storage = storage
+        self._rows = np.full(exchange_count, self._MISSING, dtype=np.int64)
+        self._overrides: dict[int, Mapping[str, Any]] = {}
+        self._length = 0
+
+    def __len__(self) -> int:
+        return self._length
+
+    def __iter__(self) -> Iterator[ExchangeId]:
+        for exchange_id, row in enumerate(self._rows):
+            if row != self._MISSING:
+                yield exchange_id
+
+    def __contains__(self, exchange_id: object) -> bool:
+        return (
+            isinstance(exchange_id, int)
+            and 0 <= exchange_id < len(self._rows)
+            and self._rows[exchange_id] != self._MISSING
+        )
+
+    def __getitem__(self, exchange_id: ExchangeId) -> Mapping[str, Any]:
+        if exchange_id not in self:
+            raise KeyError(exchange_id)
+        row = int(self._rows[exchange_id])
+        if row == self._OVERRIDE:
+            return self._overrides[exchange_id]
+        return _ColumnarExchangeMapping(self._storage, row)
+
+    def __setitem__(self, exchange_id: ExchangeId, payload: Mapping[str, Any]) -> None:
+        if exchange_id < 0:
+            raise IndexError(f"Negative exchange id: {exchange_id}")
+        if exchange_id >= len(self._rows):
+            expanded = np.full(exchange_id + 1, self._MISSING, dtype=np.int64)
+            expanded[: len(self._rows)] = self._rows
+            self._rows = expanded
+        if self._rows[exchange_id] == self._MISSING:
+            self._length += 1
+        self._rows[exchange_id] = self._OVERRIDE
+        self._overrides[exchange_id] = payload
+
+    def set_source_range(
+        self, exchange_id: ExchangeId, source_row: int, length: int
+    ) -> None:
+        stop = exchange_id + length
+        if exchange_id < 0 or stop > len(self._rows):
+            raise InventoryStoreCorruptionError(
+                "Invalid scenario delta exchange range."
+            )
+        if np.any(self._rows[exchange_id:stop] != self._MISSING):
+            raise InventoryStoreCorruptionError("Overlapping scenario delta ranges.")
+        self._rows[exchange_id:stop] = np.arange(
+            source_row, source_row + length, dtype=np.int64
+        )
+        self._length += length
+
+    def __delitem__(self, exchange_id: ExchangeId) -> None:
+        if exchange_id not in self:
+            raise KeyError(exchange_id)
+        self._rows[exchange_id] = self._MISSING
+        self._overrides.pop(exchange_id, None)
+        self._length -= 1
+
+    def shallow_copy(self) -> "_DeltaExchangeTable":
+        duplicate = type(self)(self._storage, len(self._rows))
+        duplicate._rows = self._rows.copy()
+        duplicate._overrides = self._overrides.copy()
         duplicate._length = self._length
         return duplicate
 
@@ -3318,6 +3556,8 @@ def _write_checkpoint_payloads(
                 collect_string if pa is None else None,
                 scenario_cache_compatibility,
             )
+            if scenario_cache_compatibility:
+                return metadata
         else:
             for field_name in _EXCHANGE_STRING_FIELDS:
                 value = payload.get(field_name)
@@ -3513,7 +3753,286 @@ def _write_checkpoint_payloads(
     return offsets, dict(activities), strings
 
 
+def _scenario_delta_base_storage(
+    store: _InMemoryInventoryStore,
+) -> _ColumnarExchangeStorage | None:
+    """Return the single immutable source storage eligible for a delta."""
+
+    exchange_table = store._state.exchanges
+    if isinstance(exchange_table, _DenseExchangeTable):
+        if len(exchange_table._rows) != len(exchange_table):
+            return None
+        payloads = exchange_table._rows
+    else:
+        payloads = (
+            exchange_table[exchange_id]
+            for exchange_id in range(store._state.next_exchange_id)
+            if exchange_id in exchange_table
+        )
+        if store._state.next_exchange_id != len(exchange_table):
+            return None
+    storage = None
+    for payload in payloads:
+        if payload is None:
+            return None
+        if not isinstance(payload, _ColumnarExchangeMapping):
+            continue
+        if storage is None:
+            storage = payload._storage
+        elif payload._storage is not storage:
+            return None
+    return storage
+
+
+def _scenario_delta_exchange_changes(
+    payload: _ColumnarExchangeMapping,
+) -> tuple[tuple[str, bool, Any], ...]:
+    """Return sparse changes including legacy compatibility deletions."""
+
+    from .utils import _scenario_cache_exchange_field_is_restored
+
+    storage = payload._storage
+    row = payload._row
+    changes: list[tuple[str, bool, Any]] = []
+    changed_fields = set()
+    for field_name, value in payload._iter_changes():
+        changed_fields.add(field_name)
+        deleted = value is _COLUMNAR_DELETED or not (
+            value is not _COLUMNAR_DELETED
+            and _scenario_cache_exchange_field_is_restored(field_name, value)
+        )
+        changes.append(
+            (
+                field_name,
+                deleted,
+                None if deleted else copy.deepcopy(value),
+            )
+        )
+
+    invalid_common_fields = int(storage._scenario_cache_invalid_common_masks[row])
+    if invalid_common_fields:
+        for position, field_name in enumerate(_SCENARIO_CACHE_COMMON_FIELDS):
+            if (
+                invalid_common_fields & (1 << position)
+                and field_name not in changed_fields
+            ):
+                changes.append((field_name, True, None))
+
+    for field_name in storage.scenario_cache_deleted_fields(row):
+        if field_name not in changed_fields:
+            changes.append((field_name, True, None))
+    return tuple(changes)
+
+
+def _scenario_delta_values_equal(left: Any, right: Any) -> bool:
+    """Compare metadata values without changing their represented types."""
+
+    try:
+        result = left == right
+    except Exception:
+        return False
+    if isinstance(result, (bool, np.bool_)):
+        return bool(result)
+    if isinstance(result, np.ndarray):
+        try:
+            return bool(np.all(result))
+        except (TypeError, ValueError):
+            return False
+    return False
+
+
+def _write_scenario_delta_checkpoint(
+    store: _InMemoryInventoryStore,
+    path: Path,
+    storage: _ColumnarExchangeStorage,
+) -> Path:
+    """Persist a scenario as ordered source-row ranges and sparse overlays."""
+
+    from .utils import (
+        _normalize_scenario_cache_activity,
+        _normalize_scenario_cache_exchange,
+    )
+
+    path = path.expanduser().resolve()
+    if path == Path(path.anchor):
+        raise ValueError("Refusing to use a filesystem root as a checkpoint path.")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = Path(tempfile.mkdtemp(prefix=f".{path.name}.tmp-", dir=path.parent))
+    backup: Path | None = None
+    delta_stream = None
+    try:
+        delta_path = temporary / "scenario-delta.pkl"
+        delta_stream = delta_path.open("wb")
+        pickle.dump(
+            ("scenario-delta-stream-v1", len(store)),
+            delta_stream,
+            protocol=pickle.HIGHEST_PROTOCOL,
+        )
+        for activity_id in store.iter_activity_ids():
+            payload = store._state.activities[activity_id]
+            materialize = getattr(payload, "_premise_materialize", None)
+            activity_payload = (
+                materialize() if materialize is not None else dict(payload)
+            )
+            _normalize_scenario_cache_activity(activity_payload)
+            if (
+                isinstance(payload, _ColumnarActivityMapping)
+                and payload._storage is storage
+            ):
+                source_activity_id = payload._activity_id
+                base_activity_payload = storage.base_activity_payload(
+                    source_activity_id
+                )
+                _normalize_scenario_cache_activity(base_activity_payload)
+                activity_updates = {
+                    field_name: copy.deepcopy(value)
+                    for field_name, value in activity_payload.items()
+                    if field_name not in base_activity_payload
+                    or not _scenario_delta_values_equal(
+                        value, base_activity_payload[field_name]
+                    )
+                }
+                activity_deletions = tuple(
+                    field_name
+                    for field_name in base_activity_payload
+                    if field_name not in activity_payload
+                )
+                activity_descriptor = (
+                    "p",
+                    activity_id,
+                    source_activity_id,
+                    activity_updates,
+                    activity_deletions,
+                )
+            else:
+                activity_descriptor = ("v", activity_id, activity_payload)
+
+            segments = []
+            run_exchange_id = None
+            run_row = None
+            run_length = 0
+
+            def flush_run() -> None:
+                nonlocal run_exchange_id, run_row, run_length
+                if run_length:
+                    segments.append(("r", run_exchange_id, run_row, run_length))
+                    run_exchange_id = None
+                    run_row = None
+                    run_length = 0
+
+            for exchange_id in store._state.activity_exchanges[activity_id]:
+                exchange = store._state.exchanges[exchange_id]
+                if (
+                    isinstance(exchange, _ColumnarExchangeMapping)
+                    and exchange._storage is storage
+                ):
+                    row = exchange._row
+                    changes = _scenario_delta_exchange_changes(exchange)
+                    if not changes:
+                        if (
+                            run_length
+                            and exchange_id == run_exchange_id + run_length
+                            and row == run_row + run_length
+                        ):
+                            run_length += 1
+                        else:
+                            flush_run()
+                            run_exchange_id = exchange_id
+                            run_row = row
+                            run_length = 1
+                        continue
+                    flush_run()
+                    segments.append(("p", exchange_id, row, changes))
+                    continue
+
+                flush_run()
+                materialize_exchange = getattr(exchange, "_premise_materialize", None)
+                exchange_payload = (
+                    materialize_exchange()
+                    if materialize_exchange is not None
+                    else dict(exchange)
+                )
+                _normalize_scenario_cache_exchange(exchange_payload)
+                segments.append(("v", exchange_id, exchange_payload))
+            flush_run()
+            pickle.dump(
+                (*activity_descriptor, segments),
+                delta_stream,
+                protocol=pickle.HIGHEST_PROTOCOL,
+            )
+        delta_stream.close()
+        delta_stream = None
+
+        try:
+            from . import __version__ as premise_version
+
+            premise_version_text = ".".join(map(str, premise_version))
+        except (ImportError, TypeError):  # pragma: no cover - defensive fallback
+            premise_version_text = "unknown"
+
+        base_checkpoint = storage.checkpoint.resolve()
+        manifest = {
+            "schema_version": STORE_SCHEMA_VERSION,
+            "premise_version": premise_version_text,
+            "backend": store.backend_name,
+            "scenario_identity": store.scenario_identity,
+            "generation": store.generation,
+            "activity_count": len(store),
+            "exchange_count": len(store._state.exchanges),
+            "row_counts": {
+                "activities": len(store),
+                "exchanges": len(store._state.exchanges),
+            },
+            "columnar_format": "scenario-delta-v1",
+            "metadata_layout": "scenario-delta-v1",
+            "base_checkpoint": os.path.relpath(base_checkpoint, path.parent),
+            "base_checksum_fingerprint": _sha256(base_checkpoint / "checksums.json"),
+        }
+        try:
+            manifest_text = json.dumps(manifest, sort_keys=True, indent=2)
+        except TypeError:
+            manifest["scenario_identity"] = repr(store.scenario_identity)
+            manifest_text = json.dumps(manifest, sort_keys=True, indent=2)
+        (temporary / "manifest.json").write_text(manifest_text, encoding="utf-8")
+        checksums = {
+            name: _sha256(temporary / name)
+            for name in ("manifest.json", "scenario-delta.pkl")
+        }
+        (temporary / "checksums.json").write_text(
+            json.dumps(checksums, sort_keys=True, indent=2), encoding="utf-8"
+        )
+
+        if path.exists():
+            backup = path.with_name(f".{path.name}.old-{os.getpid()}")
+            if backup.exists():
+                if backup.is_dir():
+                    shutil.rmtree(backup)
+                else:
+                    backup.unlink()
+            os.replace(path, backup)
+        os.replace(temporary, path)
+        if backup is not None:
+            if backup.is_dir():
+                shutil.rmtree(backup)
+            else:
+                backup.unlink()
+        return path
+    except Exception:
+        if delta_stream is not None:
+            delta_stream.close()
+        if temporary.exists():
+            shutil.rmtree(temporary)
+        if backup is not None and backup.exists() and not path.exists():
+            os.replace(backup, path)
+        raise
+
+
 def _write_checkpoint(store: _InMemoryInventoryStore, path: Path) -> Path:
+    if getattr(store, "_scenario_cache_compatibility", False):
+        storage = _scenario_delta_base_storage(store)
+        if storage is not None:
+            return _write_scenario_delta_checkpoint(store, path, storage)
+
     path = path.expanduser().resolve()
     if path == Path(path.anchor):
         raise ValueError("Refusing to use a filesystem root as a checkpoint path.")
@@ -3595,6 +4114,205 @@ def _write_checkpoint(store: _InMemoryInventoryStore, path: Path) -> Path:
         raise
 
 
+def _iter_scenario_delta_activity_records(
+    path: Path, expected_count: int
+) -> Iterator[tuple[Any, ...]]:
+    """Yield scenario records without loading the full delta into memory."""
+
+    try:
+        with (path / "scenario-delta.pkl").open("rb") as stream:
+            header = pickle.load(stream)
+            if isinstance(header, dict):
+                records = header.get("activities")
+                if not isinstance(records, list) or len(records) != expected_count:
+                    raise InventoryStoreCorruptionError(
+                        "Invalid scenario delta activities."
+                    )
+                yield from records
+                return
+            if (
+                not isinstance(header, tuple)
+                or len(header) != 2
+                or header[0] != "scenario-delta-stream-v1"
+                or header[1] != expected_count
+            ):
+                raise InventoryStoreCorruptionError(
+                    "Invalid scenario delta stream header."
+                )
+            for _ in range(expected_count):
+                record = pickle.load(stream)
+                if not isinstance(record, tuple):
+                    raise InventoryStoreCorruptionError(
+                        "Invalid scenario delta activity record."
+                    )
+                yield record
+            try:
+                pickle.load(stream)
+            except EOFError:
+                return
+            raise InventoryStoreCorruptionError(
+                "Scenario delta stream contains trailing records."
+            )
+    except InventoryStoreCorruptionError:
+        raise
+    except Exception as error:
+        raise InventoryStoreCorruptionError(
+            "Invalid scenario delta payload."
+        ) from error
+
+
+def _open_scenario_delta_checkpoint(
+    path: Path, manifest: Mapping[str, Any]
+) -> InventoryStore:
+    """Open a sparse scenario overlay on its immutable source checkpoint."""
+
+    from .utils import _normalize_scenario_cache_activity
+
+    base_reference = manifest.get("base_checkpoint")
+    if not isinstance(base_reference, str):
+        raise InventoryStoreCorruptionError(
+            "Scenario delta checkpoint has no valid base reference."
+        )
+    base_checkpoint = (path.parent / base_reference).resolve()
+    base_checksums = base_checkpoint / "checksums.json"
+    if not base_checksums.is_file() or _sha256(base_checksums) != manifest.get(
+        "base_checksum_fingerprint"
+    ):
+        raise InventoryStoreCorruptionError(
+            "Scenario delta base checkpoint is missing or has changed."
+        )
+    base_store = InventoryStore.open(base_checkpoint)
+    base_table = base_store._state.exchanges
+    if not isinstance(base_table, _ColumnarExchangeTable):
+        raise InventoryStoreCorruptionError(
+            "Scenario delta base is not a compact columnar checkpoint."
+        )
+    storage = base_table._storage
+
+    activity_count = int(manifest.get("activity_count", 0))
+    activity_records = _iter_scenario_delta_activity_records(path, activity_count)
+
+    store = object.__new__(CompactInventoryStore)
+    store._state = store._new_state()
+    exchange_count = int(manifest.get("exchange_count", 0))
+    exchange_table = _DeltaExchangeTable(storage, exchange_count)
+    store._state.exchanges = exchange_table
+
+    for record in activity_records:
+        try:
+            kind = record[0]
+            if kind == "p":
+                (
+                    _,
+                    activity_id,
+                    source_activity_id,
+                    updates,
+                    deletions,
+                    segments,
+                ) = record
+                activity_payload = storage.base_activity_payload(
+                    int(source_activity_id)
+                )
+                _normalize_scenario_cache_activity(activity_payload)
+                for field_name in deletions:
+                    activity_payload.pop(field_name, None)
+                activity_payload.update(updates)
+            elif kind == "v":
+                _, activity_id, payload, segments = record
+                activity_payload = dict(payload)
+            else:
+                raise ValueError(f"unknown activity record kind: {kind!r}")
+            activity_id = int(activity_id)
+        except Exception as error:
+            raise InventoryStoreCorruptionError(
+                "Invalid scenario delta activity record."
+            ) from error
+        activity_payload.pop("exchanges", None)
+        if activity_id in store._state.activities:
+            raise InventoryStoreCorruptionError(
+                f"Duplicate scenario delta activity id: {activity_id}."
+            )
+        store._state.activities[activity_id] = activity_payload
+        store._state.activity_order.append(activity_id)
+        activity_exchange_ids: list[int] = []
+
+        for segment in segments:
+            try:
+                kind = segment[0]
+                if kind == "r":
+                    _, exchange_id, source_row, length = segment
+                    exchange_id = int(exchange_id)
+                    source_row = int(source_row)
+                    length = int(length)
+                    if length <= 0 or not 0 <= source_row < storage.row_count:
+                        raise ValueError("invalid source range")
+                    if source_row + length > storage.row_count:
+                        raise ValueError("source range exceeds base")
+                    exchange_table.set_source_range(exchange_id, source_row, length)
+                    activity_exchange_ids.extend(
+                        range(exchange_id, exchange_id + length)
+                    )
+                elif kind == "p":
+                    _, exchange_id, source_row, changes = segment
+                    exchange_id = int(exchange_id)
+                    source_row = int(source_row)
+                    exchange = _ColumnarExchangeMapping(storage, source_row)
+                    for field_name, deleted, value in changes:
+                        exchange._set_change(
+                            field_name,
+                            _COLUMNAR_DELETED if deleted else value,
+                        )
+                    exchange_table[exchange_id] = exchange
+                    activity_exchange_ids.append(exchange_id)
+                elif kind == "v":
+                    _, exchange_id, exchange_payload = segment
+                    exchange_id = int(exchange_id)
+                    exchange_table[exchange_id] = compact_exchange_payload(
+                        exchange_payload
+                    )
+                    activity_exchange_ids.append(exchange_id)
+                else:
+                    raise ValueError(f"unknown segment kind: {kind!r}")
+            except Exception as error:
+                if isinstance(error, InventoryStoreCorruptionError):
+                    raise
+                raise InventoryStoreCorruptionError(
+                    f"Invalid scenario delta exchange segment: {segment!r}."
+                ) from error
+
+        if activity_exchange_ids and activity_exchange_ids == list(
+            range(
+                activity_exchange_ids[0],
+                activity_exchange_ids[0] + len(activity_exchange_ids),
+            )
+        ):
+            store._state.activity_exchanges[activity_id] = range(
+                activity_exchange_ids[0],
+                activity_exchange_ids[0] + len(activity_exchange_ids),
+            )
+        else:
+            store._state.activity_exchanges[activity_id] = activity_exchange_ids
+
+    if len(store._state.activities) != manifest.get("activity_count"):
+        raise InventoryStoreCorruptionError(
+            "Scenario delta activity count does not match its manifest."
+        )
+    if len(exchange_table) != exchange_count:
+        raise InventoryStoreCorruptionError(
+            "Scenario delta exchange count does not match its manifest."
+        )
+    store._state.next_activity_id = max(store._state.activity_order, default=-1) + 1
+    store._state.next_exchange_id = len(exchange_table._rows)
+    store._state.generation = int(manifest.get("generation", 0))
+    store._scenario_identity = manifest.get("scenario_identity")
+    store._lock = threading.RLock()
+    store._active_transaction = False
+    store._shared_state = False
+    store._scenario_cache_compatibility = False
+    store._shares_source_storage = True
+    return store
+
+
 def _open_checkpoint(path: Path) -> InventoryStore:
     path = path.expanduser().resolve()
     manifest_path = path / "manifest.json"
@@ -3621,6 +4339,9 @@ def _open_checkpoint(path: Path) -> InventoryStore:
             raise InventoryStoreCorruptionError(
                 f"Checksum validation failed for checkpoint file {name!r}."
             )
+
+    if manifest.get("columnar_format") == "scenario-delta-v1":
+        return _open_scenario_delta_checkpoint(path, manifest)
 
     offsets = _read_table(path / "metadata_offsets.arrow")
     activity_offsets: dict[int, tuple[int, int]] = {}
@@ -3663,6 +4384,10 @@ def _open_checkpoint(path: Path) -> InventoryStore:
             activity_ids=activity_ids,
             exchange_starts=exchange_starts,
             exchange_counts=exchange_counts,
+            activity_common_columns={
+                field_name: activities[field_name]
+                for field_name in _ACTIVITY_COMMON_FIELDS
+            },
             activity_offsets=activity_offsets,
             exchange_metadata_offsets=exchange_metadata_offsets,
         )
