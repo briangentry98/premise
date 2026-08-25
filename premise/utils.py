@@ -789,6 +789,7 @@ def load_database(
     delete: bool = True,
     load_metadata: bool = True,
     warning: bool = True,
+    consume_compact: bool = False,
 ) -> Dict[str, Any]:
     """Load a cached database back into memory.
 
@@ -802,6 +803,10 @@ def load_database(
     :type load_metadata: bool
     :param warning: Display a warning when reusing the unmodified original database.
     :type warning: bool
+    :param consume_compact: Transfer ownership of compact columnar mappings to a
+        short-lived exporter instead of building a complete list of dictionaries.
+        The source store is emptied when this is enabled.
+    :type consume_compact: bool
     :return: Scenario dictionary with the ``"database"`` entry populated in memory.
     :rtype: dict
     """
@@ -820,7 +825,19 @@ def load_database(
 
             store = InventoryStore.open(checkpoint)
         materialized = scenario.copy()
-        materialized["database"] = store.materialize(restore_metadata=load_metadata)
+        from .inventory_store import CompactInventoryStore
+
+        if isinstance(store, CompactInventoryStore) and consume_compact:
+            materialized["database"] = store._checkout_materialized(
+                discard_shared_state=True
+            )
+        else:
+            materialized["database"] = store.materialize(restore_metadata=load_metadata)
+        # Match the legacy cache-loading path: source activities can omit
+        # storage identifiers, but every exporter requires one.
+        for dataset in materialized["database"]:
+            if not dataset.get("code"):
+                dataset["code"] = uuid.uuid4().hex
         return materialized
 
     if "database filepath" not in scenario:

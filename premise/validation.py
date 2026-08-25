@@ -711,7 +711,10 @@ class BaseDatasetValidator:
 
         # we also want to remove any numpy generics
         # that would prevent json serialization
-        self.database = convert_numpy_generics_to_float(self.database)
+        self.database = convert_numpy_generics_to_float(
+            self.database,
+            in_place=getattr(self, "_correct_fields_in_place", False),
+        )
 
     def check_amount_format(self):
         """
@@ -872,7 +875,11 @@ class BaseDatasetValidator:
         self.check_for_circular_references()
         self.check_database_name()
         self.remove_unused_fields()
-        self.correct_fields_format()
+        self._correct_fields_in_place = True
+        try:
+            self.correct_fields_format()
+        finally:
+            self._correct_fields_in_place = False
         self.check_amount_format()
         self.reformat_parameters()
         self.add_missing_classifications()

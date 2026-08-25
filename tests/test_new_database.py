@@ -217,12 +217,19 @@ def test_write_db_to_brightway_fast_path_runs_internal_check(monkeypatch):
         "pickles_deleted": 0,
     }
 
-    def fake_load_database(scenario, original_database, load_metadata, warning=True):
+    def fake_load_database(
+        scenario,
+        original_database,
+        load_metadata,
+        warning=True,
+        consume_compact=False,
+    ):
         captured["loaded"] = {
             "scenario": scenario.copy(),
             "original_database": original_database,
             "load_metadata": load_metadata,
             "warning": warning,
+            "consume_compact": consume_compact,
         }
         loaded = scenario.copy()
         loaded["database"] = [{"name": "loaded dataset", "exchanges": []}]
@@ -305,6 +312,7 @@ def test_write_db_to_brightway_fast_path_runs_internal_check(monkeypatch):
         "original_database": [],
         "load_metadata": True,
         "warning": False,
+        "consume_compact": True,
     }
     assert captured["prepared"] == {
         "scenario": {
@@ -351,7 +359,7 @@ def test_write_db_to_brightway_fast_path_reports_major_validation_errors(monkeyp
     monkeypatch.setattr(
         new_database_module,
         "load_database",
-        lambda scenario, original_database, load_metadata, warning=True: scenario.copy(),
+        lambda scenario, original_database, load_metadata, warning=True, consume_compact=False: scenario.copy(),
     )
     monkeypatch.setattr(
         new_database_module,

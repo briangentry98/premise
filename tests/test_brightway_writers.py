@@ -2,6 +2,7 @@ from copy import deepcopy
 
 import premise.brightway2 as brightway2_module
 import premise.brightway25 as brightway25_module
+from premise.inventory_store import CompactInventoryStore, InventoryStore
 
 
 def test_collect_fast_export_geography_discards_unknown_geocollections():
@@ -576,3 +577,44 @@ def test_brightway25_fast_compaction_keeps_required_descriptive_fields(
     assert dataset["location"] == ""
     assert dataset["unit"] == ""
     assert dataset["type"] == "process"
+
+
+def test_brightway25_fast_compaction_streams_columnar_exchange_views(
+    monkeypatch, tmp_path
+):
+    data = [
+        {
+            "database": "source-db",
+            "code": "act-1",
+            "name": "activity",
+            "reference product": "product",
+            "location": "CH",
+            "unit": "kilogram",
+            "type": "process",
+            "exchanges": [
+                {
+                    "name": "activity",
+                    "product": "product",
+                    "unit": "kilogram",
+                    "location": "CH",
+                    "amount": 1.0,
+                    "type": "production",
+                    "output": ("source-db", "act-1"),
+                }
+            ],
+        }
+    ]
+    checkpoint = CompactInventoryStore(data).checkpoint(
+        tmp_path / "scenario.inventory-store"
+    )
+    columnar = InventoryStore.open(checkpoint)._checkout_materialized()
+    exchange = columnar[0]["exchanges"][0]
+    monkeypatch.setattr("bw2data.utils.set_correct_process_type", lambda dataset: None)
+
+    brightway25_module._compact_payload_for_fast_write(columnar, "fast-db")
+
+    assert columnar[0]["exchanges"][0] is exchange
+    assert type(exchange).__name__ == "_ColumnarExchangeMapping"
+    assert brightway25_module._prepare_fast_exchange_payload(
+        exchange
+    ) == brightway25_module._prepare_fast_exchange_payload(data[0]["exchanges"][0])

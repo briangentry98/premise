@@ -1967,6 +1967,7 @@ class NewDatabase:
                     original_database=[],
                     load_metadata=True,
                     warning=False,
+                    consume_compact=True,
                 )
                 try:
                     scenario["database"] = prepare_db_for_fast_export(

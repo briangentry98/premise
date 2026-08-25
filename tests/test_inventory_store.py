@@ -388,6 +388,59 @@ def test_columnar_checkpoint_checkout_and_proxy_clone_are_copy_on_write(
     assert restored_store.materialize()[0] == expected
 
 
+def test_load_database_transfers_compact_store_without_exchange_materialization(
+    inventory, tmp_path
+):
+    checkpoint = CompactInventoryStore(inventory).checkpoint(
+        tmp_path / "scenario.inventory-store"
+    )
+    store = InventoryStore.open(checkpoint)
+    scenario = {"_inventory_store": store}
+
+    loaded = utils_module.load_database(
+        scenario,
+        original_database=[],
+        consume_compact=True,
+    )
+
+    assert len(store) == 0
+    assert len(loaded["database"]) == len(inventory)
+    assert type(loaded["database"][2]).__name__ == "_ColumnarActivityMapping"
+    assert (
+        type(loaded["database"][2]["exchanges"][0]).__name__
+        == "_ColumnarExchangeMapping"
+    )
+
+
+def test_load_database_keeps_compact_store_for_non_consuming_callers(inventory):
+    store = CompactInventoryStore(inventory)
+    scenario = {"_inventory_store": store}
+
+    loaded = utils_module.load_database(scenario, original_database=[])
+
+    assert len(store) == len(inventory)
+    assert loaded["database"] == inventory
+    assert type(loaded["database"][0]) is dict
+
+
+@pytest.mark.parametrize("consume_compact", [False, True])
+def test_load_database_assigns_missing_codes_for_compact_store(
+    inventory, consume_compact
+):
+    inventory_without_code = copy.deepcopy(inventory)
+    inventory_without_code[0].pop("code")
+    store = CompactInventoryStore(inventory_without_code)
+
+    loaded = utils_module.load_database(
+        {"_inventory_store": store},
+        original_database=[],
+        consume_compact=consume_compact,
+    )
+
+    assert isinstance(loaded["database"][0]["code"], str)
+    assert loaded["database"][0]["code"]
+
+
 def test_compact_scenario_mapping_keeps_metadata_lazy_and_lossless(inventory, tmp_path):
     mapped_activity = inventory[0]
     detached_activity = {"name": "detached", "reference product": "service"}

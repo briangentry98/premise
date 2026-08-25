@@ -401,9 +401,29 @@ def _prepare_fast_exchange_payload(exchange: dict) -> dict:
     return compact_exchange
 
 
+def _prepare_fast_dataset_payload(dataset: dict) -> dict:
+    """Return the exact bounded payload stored for one activity."""
+
+    compact_dataset = {
+        field: value
+        for field, value in dataset.items()
+        if field != "exchanges" and _keep_fast_export_value(value)
+    }
+    for field in FAST_DATASET_REQUIRED_FIELDS:
+        if field not in compact_dataset and field in dataset:
+            if field in FAST_STRING_FIELDS and dataset[field] is None:
+                compact_dataset[field] = ""
+            else:
+                compact_dataset[field] = dataset[field]
+    return compact_dataset
+
+
 def _compact_payload_for_fast_write(data: list, name: str) -> list:
     from bw2data.utils import set_correct_process_type
 
+    streaming = any(
+        getattr(dataset, "_premise_materialize", None) is not None for dataset in data
+    )
     progress = _progress(
         total=len(data),
         desc=f"Compacting export payload [{name}]",
@@ -413,19 +433,11 @@ def _compact_payload_for_fast_write(data: list, name: str) -> list:
     try:
         for dataset in data:
             set_correct_process_type(dataset)
+            if streaming:
+                progress.update(1)
+                continue
             exchanges = dataset.get("exchanges", [])
-            compact_dataset = {
-                field: value
-                for field, value in dataset.items()
-                if field != "exchanges" and _keep_fast_export_value(value)
-            }
-
-            for field in FAST_DATASET_REQUIRED_FIELDS:
-                if field not in compact_dataset and field in dataset:
-                    if field in FAST_STRING_FIELDS and dataset[field] is None:
-                        compact_dataset[field] = ""
-                    else:
-                        compact_dataset[field] = dataset[field]
+            compact_dataset = _prepare_fast_dataset_payload(dataset)
 
             compact_dataset["exchanges"] = [
                 _prepare_fast_exchange_payload(exchange) for exchange in exchanges
@@ -554,11 +566,7 @@ def _write_processed_database_fast(data: list, name: str) -> None:
             activity_rows.append(
                 (
                     pickle.dumps(
-                        {
-                            key: value
-                            for key, value in dataset.items()
-                            if key != "exchanges"
-                        },
+                        _prepare_fast_dataset_payload(dataset),
                         protocol=4,
                     ),
                     dataset["code"],
@@ -685,7 +693,8 @@ def _write_processed_database_fast(data: list, name: str) -> None:
                 for exchange in dataset.get("exchanges", []):
                     if exchange["type"] not in labels.biosphere_edge_types:
                         continue
-                    input_key = exchange.get("input")
+                    prepared_exchange = _prepare_fast_exchange_payload(exchange)
+                    input_key = prepared_exchange.get("input")
                     if input_key is None:
                         raise KeyError(
                             f"Missing biosphere input for exchange in dataset {dataset['name']!r}."
@@ -693,7 +702,7 @@ def _write_processed_database_fast(data: list, name: str) -> None:
                     if input_key[0] != name:
                         dependents.add(input_key[0])
                     yield {
-                        **as_uncertainty_dict(exchange),
+                        **as_uncertainty_dict(prepared_exchange),
                         "row": resolve_input_id(input_key),
                         "col": col,
                     }
@@ -722,7 +731,8 @@ def _write_processed_database_fast(data: list, name: str) -> None:
                         and edge_type not in positive_edge_types
                     ):
                         continue
-                    input_key = exchange.get("input")
+                    prepared_exchange = _prepare_fast_exchange_payload(exchange)
+                    input_key = prepared_exchange.get("input")
                     if input_key is None:
                         raise KeyError(
                             f"Missing technosphere input for exchange in dataset {dataset['name']!r}."
@@ -730,7 +740,7 @@ def _write_processed_database_fast(data: list, name: str) -> None:
                     if input_key[0] != name:
                         dependents.add(input_key[0])
                     payload = {
-                        **as_uncertainty_dict(exchange),
+                        **as_uncertainty_dict(prepared_exchange),
                         "row": resolve_input_id(input_key),
                         "col": col,
                     }
