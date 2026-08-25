@@ -587,8 +587,7 @@ def test_gis_resolution_cache_is_shared_between_sector_instances(monkeypatch):
     assert first == repeated == another_location == ("DE",)
     assert instances[0]._gis_match_cache is instances[1]._gis_match_cache
     assert (
-        instances[0]._resolved_row_faces_cache
-        is not instances[1]._resolved_row_faces_cache
+        instances[0]._resolved_row_faces_cache is instances[1]._resolved_row_faces_cache
     )
     assert len(match_calls) == 2
     assert len(row_calls) == 1

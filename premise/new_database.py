@@ -75,6 +75,7 @@ from .scenario_array import (
     _write_scenario_array_datapackage,
 )
 from .steel import _update_steel
+from .transformation import _SCENARIO_GIS_CACHE_KEY, _SCENARIO_ROW_CACHE_KEY
 from .transport import _update_vehicles
 from .utils import (
     CACHE_SCHEMA_VERSION,
@@ -654,6 +655,7 @@ class NewDatabase:
         self.inventories_cache_filepath = None
         self._database_is_complete = False
         self._reload_original_database_from_cache_for_update = False
+        self._shared_geography_caches = {}
 
         # if version is anything other than 3.8 or 3.9
         # and system_model is "consequential"
@@ -1353,6 +1355,51 @@ class NewDatabase:
             restore_metadata=restore_metadata
         )
 
+    def _attach_shared_geography_cache(self, runtime_scenario: dict) -> None:
+        """Share immutable geographic topology across compact scenario-years."""
+
+        if self.inventory_backend != "compact":
+            return
+        topology_key = self._geography_topology_key(runtime_scenario)
+        shared_geography_caches = getattr(self, "_shared_geography_caches", None)
+        if shared_geography_caches is None:
+            shared_geography_caches = self._shared_geography_caches = {}
+        shared_cache = shared_geography_caches.setdefault(
+            topology_key,
+            {
+                _SCENARIO_GIS_CACHE_KEY: {},
+                _SCENARIO_ROW_CACHE_KEY: {},
+            },
+        )
+        scenario_cache = runtime_scenario.get("cache")
+        if not isinstance(scenario_cache, dict):
+            scenario_cache = {}
+            runtime_scenario["cache"] = scenario_cache
+        scenario_cache[_SCENARIO_GIS_CACHE_KEY] = shared_cache[_SCENARIO_GIS_CACHE_KEY]
+        scenario_cache[_SCENARIO_ROW_CACHE_KEY] = shared_cache[_SCENARIO_ROW_CACHE_KEY]
+
+    @staticmethod
+    def _geography_topology_key(scenario: dict) -> tuple[str, tuple]:
+        regions = tuple(getattr(scenario.get("iam data"), "regions", ()))
+        return scenario["model"], regions
+
+    def _release_shared_geography_cache(
+        self, scenario: dict, scenario_position: int
+    ) -> None:
+        """Release a topology cache after its final matching scenario."""
+
+        if self.inventory_backend != "compact":
+            return
+        topology_key = self._geography_topology_key(scenario)
+        if any(
+            self._geography_topology_key(future) == topology_key
+            for future in self.scenarios[scenario_position + 1 :]
+        ):
+            return
+        shared_geography_caches = getattr(self, "_shared_geography_caches", None)
+        if shared_geography_caches is not None:
+            shared_geography_caches.pop(topology_key, None)
+
     def _load_scenario_database_for_update(
         self, scenario: dict, scenario_position: int
     ) -> dict:
@@ -1381,6 +1428,7 @@ class NewDatabase:
         runtime_scenario = scenario.copy()
         runtime_scenario.pop("_inventory_store", None)
         runtime_scenario.pop("_inventory_checkpoint", None)
+        self._attach_shared_geography_cache(runtime_scenario)
         store = self._ensure_scenario_store(scenario)
         can_transfer_source = self._can_reload_original_database()
         has_mapping = bool(runtime_scenario.get("mapping"))
@@ -1661,6 +1709,7 @@ class NewDatabase:
                     scenario,
                     persist=persist,
                 )
+                self._release_shared_geography_cache(scenario_definition, position)
                 # Manually update the outer progress bar after each sector is completed
                 pbar_outer.update()
 

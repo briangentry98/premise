@@ -65,6 +65,56 @@ def _write_cache_manifest(cache_ref, *shard_files):
     return manifest_path
 
 
+def test_compact_geography_topology_is_shared_by_model_and_regions():
+    obj = object.__new__(NewDatabase)
+    obj.inventory_backend = "compact"
+    obj._shared_geography_caches = {}
+    image_2030 = {
+        "model": "image",
+        "year": 2030,
+        "iam data": types.SimpleNamespace(regions=["R1", "World"]),
+        "cache": {"scenario-only": {}},
+    }
+    image_2050 = {
+        "model": "image",
+        "year": 2050,
+        "iam data": types.SimpleNamespace(regions=["R1", "World"]),
+    }
+    remind_2050 = {
+        "model": "remind",
+        "year": 2050,
+        "iam data": types.SimpleNamespace(regions=["R1", "World"]),
+    }
+
+    for scenario in (image_2030, image_2050, remind_2050):
+        obj._attach_shared_geography_cache(scenario)
+
+    gis_key = new_database_module._SCENARIO_GIS_CACHE_KEY
+    row_key = new_database_module._SCENARIO_ROW_CACHE_KEY
+    assert image_2030["cache"]["scenario-only"] == {}
+    assert image_2030["cache"][gis_key] is image_2050["cache"][gis_key]
+    assert image_2030["cache"][row_key] is image_2050["cache"][row_key]
+    assert image_2030["cache"][gis_key] is not remind_2050["cache"][gis_key]
+    assert image_2030["cache"][row_key] is not remind_2050["cache"][row_key]
+
+    obj.scenarios = [image_2030, image_2050, remind_2050]
+    image_key = obj._geography_topology_key(image_2030)
+    remind_key = obj._geography_topology_key(remind_2050)
+    obj._release_shared_geography_cache(image_2030, 0)
+    assert image_key in obj._shared_geography_caches
+    obj._release_shared_geography_cache(image_2050, 1)
+    assert image_key not in obj._shared_geography_caches
+    assert remind_key in obj._shared_geography_caches
+    obj._release_shared_geography_cache(remind_2050, 2)
+    assert obj._shared_geography_caches == {}
+
+    legacy = object.__new__(NewDatabase)
+    legacy.inventory_backend = "legacy"
+    legacy_scenario = {"model": "image"}
+    legacy._attach_shared_geography_cache(legacy_scenario)
+    assert "cache" not in legacy_scenario
+
+
 def test_ecospold_constructor_does_not_check_biosphere_database(monkeypatch):
     def fail_if_called(_):
         raise AssertionError("constructor should not validate biosphere presence")

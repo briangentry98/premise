@@ -51,6 +51,7 @@ with open(LOG_CONFIG, encoding="utf-8") as f:
 logger = logging.getLogger("module")
 
 _SCENARIO_GIS_CACHE_KEY = "__premise_gis_match_v1__"
+_SCENARIO_ROW_CACHE_KEY = "__premise_resolved_row_v1__"
 
 
 def _exclude_exchange_objects(exchanges, excluded):
@@ -723,7 +724,9 @@ class BaseTransformation:
         self._gis_match_cache: dict[tuple, tuple] = self.cache.setdefault(
             _SCENARIO_GIS_CACHE_KEY, {}
         )
-        self._resolved_row_faces_cache: dict[tuple, set] = {}
+        self._resolved_row_faces_cache: dict[tuple, set] = self.cache.setdefault(
+            _SCENARIO_ROW_CACHE_KEY, {}
+        )
         self.ecoinvent_to_iam_loc: Dict[str, str] = {
             loc: self.geo.ecoinvent_to_iam_location(loc)
             for loc in self.get_ecoinvent_locs()
