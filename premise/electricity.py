@@ -560,6 +560,8 @@ class Electricity(BaseTransformation):
             f"using the pathway {self.scenario} for the year {self.year}.",
         )
 
+        tech_suppliers_by_region = {}
+
         def generate_regional_markets(region: str, period: int) -> dict:
             new_dataset = copy.deepcopy(generic_dataset)
             new_dataset["location"] = region
@@ -568,59 +570,65 @@ class Electricity(BaseTransformation):
             transf_loss = self.network_loss[region]["low"]["transf_loss"]
             distr_loss = self.network_loss[region]["low"]["distr_loss"]
 
-            # Fetch ecoinvent regions contained in the IAM region
-            ecoinvent_regions = self.geo.iam_to_ecoinvent_location(region)
+            tech_suppliers = tech_suppliers_by_region.get(region)
+            if tech_suppliers is None:
+                # Supplier selection depends on the region, not the averaging
+                # period. Reuse it for the other period-specific markets.
+                ecoinvent_regions = self.geo.iam_to_ecoinvent_location(region)
+                possible_locations = [
+                    [region],
+                    ecoinvent_regions,
+                    ["RER"],
+                    ["RoW"],
+                    ["CH"],
+                ]
+                tech_suppliers = defaultdict(list)
 
-            possible_locations = [
-                [region],
-                ecoinvent_regions,
-                ["RER"],
-                ["RoW"],
-                ["CH"],
-            ]
+                for technology, datasets in ecoinvent_technologies.items():
+                    suppliers, counter = [], 0
 
-            tech_suppliers = defaultdict(list)
+                    try:
+                        while len(suppliers) == 0:
+                            suppliers = [
+                                ds
+                                for ds in datasets
+                                if any(
+                                    ds["location"] == x
+                                    for x in possible_locations[counter]
+                                )
+                            ]
 
-            for technology, datasets in ecoinvent_technologies.items():
-                suppliers, counter = [], 0
+                            counter += 1
 
-                try:
-                    while len(suppliers) == 0:
-                        suppliers = [
-                            ds
-                            for ds in datasets
-                            if any(
-                                ds["location"] == x for x in possible_locations[counter]
+                        for supplier in suppliers:
+                            share = self.get_production_weighted_share(
+                                supplier, suppliers
                             )
+                            tech_suppliers[technology].append((supplier, share))
+
+                        # remove suppliers that have a supply share inferior to 0.1%
+                        tech_suppliers[technology] = [
+                            supplier
+                            for supplier in tech_suppliers[technology]
+                            if supplier[1] > 0.001
+                        ]
+                        # rescale the shares so that they sum to 1
+                        total_share = sum(
+                            supplier[1] for supplier in tech_suppliers[technology]
+                        )
+                        tech_suppliers[technology] = [
+                            (supplier[0], supplier[1] / total_share)
+                            for supplier in tech_suppliers[technology]
                         ]
 
-                        counter += 1
+                    except IndexError as exc:
+                        if self.system_model == "consequential":
+                            continue
+                        raise IndexError(
+                            f"Couldn't find suppliers for {technology} when looking for {ecoinvent_technologies[technology]}."
+                        ) from exc
 
-                    for supplier in suppliers:
-                        share = self.get_production_weighted_share(supplier, suppliers)
-                        tech_suppliers[technology].append((supplier, share))
-
-                    # remove suppliers that have a supply share inferior to 0.1%
-                    tech_suppliers[technology] = [
-                        supplier
-                        for supplier in tech_suppliers[technology]
-                        if supplier[1] > 0.001
-                    ]
-                    # rescale the shares so that they sum to 1
-                    total_share = sum(
-                        supplier[1] for supplier in tech_suppliers[technology]
-                    )
-                    tech_suppliers[technology] = [
-                        (supplier[0], supplier[1] / total_share)
-                        for supplier in tech_suppliers[technology]
-                    ]
-
-                except IndexError as exc:
-                    if self.system_model == "consequential":
-                        continue
-                    raise IndexError(
-                        f"Couldn't find suppliers for {technology} when looking for {ecoinvent_technologies[technology]}."
-                    ) from exc
+                tech_suppliers_by_region[region] = tech_suppliers
 
             # Create a time-weighted average mix
             if self.system_model == "consequential":
@@ -1062,63 +1070,68 @@ class Electricity(BaseTransformation):
             f"using the pathway {self.scenario} for the year {self.year}.",
         )
 
+        tech_suppliers_by_region = {}
+
         def generate_regional_markets(region: str, period: int) -> dict:
 
             new_dataset = copy.deepcopy(generic_dataset)
             new_dataset["location"] = region
             new_dataset["code"] = str(uuid.uuid4().hex)
 
-            # Fetch ecoinvent regions contained in the IAM region
-            ecoinvent_regions = self.geo.iam_to_ecoinvent_location(region)
             # Second, add transformation loss
             transf_loss = self.network_loss[region]["high"]["transf_loss"]
 
-            # Fetch electricity-producing technologies contained in the IAM region
-            # if they cannot be found for the ecoinvent locations concerned
-            # we widen the scope to EU-based datasets, and RoW, and finally Switzerland
+            tech_suppliers = tech_suppliers_by_region.get(region)
+            if tech_suppliers is None:
+                # Fetch electricity-producing technologies contained in the IAM region.
+                # If they cannot be found for the ecoinvent locations concerned,
+                # widen the scope to EU-based datasets, RoW, and finally Switzerland.
+                ecoinvent_regions = self.geo.iam_to_ecoinvent_location(region)
+                possible_locations = [
+                    [region],
+                    ecoinvent_regions,
+                    ["RER"],
+                    ["RoW"],
+                    ["CH"],
+                    list(self.ecoinvent_to_iam_loc.keys()),
+                ]
+                tech_suppliers = defaultdict(list)
 
-            possible_locations = [
-                [region],
-                ecoinvent_regions,
-                ["RER"],
-                ["RoW"],
-                ["CH"],
-                list(self.ecoinvent_to_iam_loc.keys()),
-            ]
+                for technology, datasets in ecoinvent_technologies.items():
+                    suppliers = []
 
-            tech_suppliers = defaultdict(list)
+                    for counter in range(len(possible_locations)):
+                        suppliers = [
+                            ds
+                            for ds in datasets
+                            if any(
+                                ds["location"] == x for x in possible_locations[counter]
+                            )
+                        ]
 
-            for technology, datasets in ecoinvent_technologies.items():
-                suppliers = []
+                        if len(suppliers) > 0:
+                            break
 
-                for counter in range(len(possible_locations)):
-                    suppliers = [
-                        ds
-                        for ds in datasets
-                        if any(ds["location"] == x for x in possible_locations[counter])
+                    for supplier in suppliers:
+                        share = self.get_production_weighted_share(supplier, suppliers)
+                        tech_suppliers[technology].append((supplier, share))
+
+                    # remove suppliers that have a supply share inferior to 0.1%
+                    tech_suppliers[technology] = [
+                        supplier
+                        for supplier in tech_suppliers[technology]
+                        if supplier[1] > 0.001
+                    ]
+                    # rescale the shares so that they sum to 1
+                    total_share = sum(
+                        supplier[1] for supplier in tech_suppliers[technology]
+                    )
+                    tech_suppliers[technology] = [
+                        (supplier[0], supplier[1] / total_share)
+                        for supplier in tech_suppliers[technology]
                     ]
 
-                    if len(suppliers) > 0:
-                        break
-
-                for supplier in suppliers:
-                    share = self.get_production_weighted_share(supplier, suppliers)
-                    tech_suppliers[technology].append((supplier, share))
-
-                # remove suppliers that have a supply share inferior to 0.1%
-                tech_suppliers[technology] = [
-                    supplier
-                    for supplier in tech_suppliers[technology]
-                    if supplier[1] > 0.001
-                ]
-                # rescale the shares so that they sum to 1
-                total_share = sum(
-                    supplier[1] for supplier in tech_suppliers[technology]
-                )
-                tech_suppliers[technology] = [
-                    (supplier[0], supplier[1] / total_share)
-                    for supplier in tech_suppliers[technology]
-                ]
+                tech_suppliers_by_region[region] = tech_suppliers
 
             if self.system_model == "consequential":
                 electricity_mix = dict(
