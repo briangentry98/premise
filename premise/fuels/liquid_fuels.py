@@ -441,20 +441,22 @@ class SyntheticFuelsMixin:
             fuel: round(value / total_weight, 2) for fuel, value in world_mix.items()
         }
 
-        # Find and process datasets
-        datasets = ws.get_many(
-            self.database,
-            ws.exclude(ws.either(*[ws.equals("name", name) for name in market_names])),
-        )
-
-        for ds in datasets:
+        # Find and process datasets. This ordered scan is equivalent to the
+        # historical Wurst predicates but avoids dispatching a callable for
+        # every market name against every exchange.
+        market_names = frozenset(market_names)
+        for ds in self.database:
+            if ds["name"] in market_names:
+                continue
             # Sum relevant technosphere exchanges and remap locations
             sum_fuel = 0
-            for exc in ws.technosphere(
-                ds,
-                ws.either(*[ws.equals("name", name) for name in market_names]),
-                ws.equals("unit", "kilogram"),
-            ):
+            for exc in ds["exchanges"]:
+                if (
+                    exc.get("type") != "technosphere"
+                    or exc.get("name") not in market_names
+                    or exc.get("unit") != "kilogram"
+                ):
+                    continue
 
                 if ds["location"] in self.regions:
                     new_loc = ds["location"]
@@ -470,11 +472,10 @@ class SyntheticFuelsMixin:
 
             fossil_co2 = sum(
                 exc["amount"]
-                for exc in ws.biosphere(
-                    ds,
-                    ws.contains("name", "Carbon dioxide, fossil"),
-                    ws.equals("unit", "kilogram"),
-                )
+                for exc in ds["exchanges"]
+                if exc.get("type") == "biosphere"
+                and "Carbon dioxide, fossil" in exc.get("name", "")
+                and exc.get("unit") == "kilogram"
             )
             if fossil_co2 == 0:
                 continue
@@ -491,9 +492,13 @@ class SyntheticFuelsMixin:
             if share_non_fossil > 0:
                 non_fossil_CO2 = sum_fuel * share_non_fossil * co2_intensity
 
-                for e in ws.biosphere(ds, ws.equals("name", "Carbon dioxide, fossil")):
-                    e["amount"] = max(0, e["amount"] - non_fossil_CO2)
-                    break  # only adjust one exchange
+                for e in ds["exchanges"]:
+                    if (
+                        e.get("type") == "biosphere"
+                        and e.get("name") == "Carbon dioxide, fossil"
+                    ):
+                        e["amount"] = max(0, e["amount"] - non_fossil_CO2)
+                        break  # only adjust one exchange
 
                 # Add the non-fossil CO2 exchange
                 ds["exchanges"].append(
