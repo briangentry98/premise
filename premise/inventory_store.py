@@ -1269,7 +1269,7 @@ class _ColumnarExchangeMapping(MutableMapping[str, Any]):
         self,
         columns: Mapping[str, list[Any]],
         collect_string: Callable[[Any], None] | None,
-    ) -> dict[str, Any]:
+    ) -> Mapping[str, Any]:
         """Append this row directly to checkpoint columns.
 
         The generic mapping path repeatedly reconstructs all keys and consults
@@ -1277,7 +1277,55 @@ class _ColumnarExchangeMapping(MutableMapping[str, Any]):
         are resident, so one metadata lookup is sufficient.
         """
 
-        metadata = dict(self._storage.metadata(self._row))
+        storage = self._storage
+        row = self._row
+        if self._changes is None:
+            for field_name in _EXCHANGE_STRING_FIELDS:
+                string_id = int(storage._string_columns[field_name][row])
+                value = storage._string_values[string_id] if string_id >= 0 else None
+                columns[field_name].append(value)
+                if collect_string is not None:
+                    collect_string(value)
+
+            first = int(storage._string_columns["categories__0"][row])
+            second = int(storage._string_columns["categories__1"][row])
+            columns["categories__0"].append(
+                storage._string_values[first] if first >= 0 else None
+            )
+            columns["categories__1"].append(
+                storage._string_values[second] if second >= 0 else None
+            )
+            if collect_string is not None and first >= 0 and second >= 0:
+                collect_string(storage._string_values[first])
+                collect_string(storage._string_values[second])
+
+            for field_name in _EXCHANGE_NUMERIC_FIELDS:
+                kind = int(storage._numeric_kinds[field_name][row])
+                columns[f"{field_name}__kind"].append(kind)
+                columns[f"{field_name}__float"].append(
+                    (
+                        float(storage._numeric_floats[field_name][row])
+                        if kind in {
+                            _NUMERIC_PYTHON_FLOAT,
+                            _NUMERIC_FLOAT32,
+                            _NUMERIC_FLOAT64,
+                        }
+                        else None
+                    )
+                )
+                columns[f"{field_name}__int"].append(
+                    int(storage._numeric_ints[field_name][row])
+                    if kind == _NUMERIC_PYTHON_INT
+                    else None
+                )
+
+            for field_name in _EXCHANGE_BOOLEAN_FIELDS:
+                value = int(storage._boolean_columns[field_name][row])
+                columns[field_name].append(bool(value) if value >= 0 else None)
+
+            return storage.metadata(row)
+
+        metadata = dict(storage.metadata(row))
         for field_name in _EXCHANGE_STRING_FIELDS:
             value = self._checkpoint_value(field_name, metadata)
             columns[field_name].append(value if isinstance(value, str) else None)
