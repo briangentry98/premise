@@ -119,3 +119,49 @@ def test_transport_does_not_retain_provider_index_as_relinking_cache(monkeypatch
     )
 
     assert captured["kwargs"] == {"cache": None, "index": provider_index}
+
+
+def test_transport_relink_scans_legacy_market_names_by_membership():
+    matching = {
+        "name": "old freight market",
+        "product": "freight",
+        "location": "GLO",
+        "unit": "ton kilometer",
+        "type": "technosphere",
+        "amount": 2.0,
+    }
+    skipped_by_dataset_unit = matching.copy()
+    transport = object.__new__(Transport)
+    transport.vehicle_type = "truck"
+    transport.model = "image"
+    transport.mapping = {
+        "truck": {
+            "name": "transport, freight, lorry",
+            "old": {"old freight market": {"image": "new freight market"}},
+        }
+    }
+    transport.database = [
+        {
+            "name": "consumer",
+            "location": "CH",
+            "unit": "kilogram",
+            "exchanges": [matching, {**matching, "unit": "kilogram"}],
+        },
+        {
+            "name": "transport service",
+            "location": "CH",
+            "unit": "ton kilometer",
+            "exchanges": [skipped_by_dataset_unit],
+        },
+    ]
+    transport._find_available_transport_market = lambda **kwargs: (
+        "new freight market",
+        "EUR",
+    )
+
+    transport.relink_transport_datasets()
+
+    assert matching["name"] == "new freight market"
+    assert matching["product"] == "transport, freight, lorry"
+    assert matching["location"] == "EUR"
+    assert skipped_by_dataset_unit["name"] == "old freight market"

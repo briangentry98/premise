@@ -318,24 +318,19 @@ class Transport(BaseTransformation):
         # loop through datasets that use truck transport
 
         if "old" in self.mapping[self.vehicle_type]:
-            for dataset in ws.get_many(
-                self.database,
-                ws.exclude(ws.contains("unit", "kilometer")),
-            ):
-                for exc in ws.technosphere(
-                    dataset,
-                    ws.either(
-                        *[
-                            ws.equals("name", v)
-                            for v in self.mapping[self.vehicle_type]["old"]
-                        ]
-                    ),
-                    ws.equals("unit", "ton kilometer"),
-                ):
+            legacy_markets = self.mapping[self.vehicle_type]["old"]
+            for dataset in self.database:
+                if "kilometer" in dataset["unit"]:
+                    continue
+                for exc in dataset["exchanges"]:
+                    if (
+                        exc.get("type") != "technosphere"
+                        or exc.get("name") not in legacy_markets
+                        or exc.get("unit") != "ton kilometer"
+                    ):
+                        continue
 
-                    new_name = self.mapping[self.vehicle_type]["old"][exc["name"]][
-                        self.model
-                    ]
+                    new_name = legacy_markets[exc["name"]][self.model]
                     resolved_name, resolved_location = (
                         self._find_available_transport_market(
                             dataset=dataset,
