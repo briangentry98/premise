@@ -903,8 +903,25 @@ class _InMemoryInventoryStore(InventoryStore):
 
     def _ensure_owned_state(self) -> None:
         if self._shared_state:
-            self._state = copy.deepcopy(self._state)
+            self._state = (
+                self._copy_compact_state()
+                if self.backend_name == "compact"
+                else copy.deepcopy(self._state)
+            )
             self._shared_state = False
+
+    def _copy_compact_state(self) -> _StoreState:
+        """Copy graph structure while retaining immutable payload snapshots."""
+
+        state = self._state
+        duplicate = copy.copy(state)
+        duplicate.activities = state.activities.copy()
+        duplicate.activity_order = state.activity_order.copy()
+        duplicate.exchanges = state.exchanges.shallow_copy()
+        duplicate.exchange_owner = state.exchange_owner.copy()
+        duplicate.activity_exchanges = state.activity_exchanges.copy()
+        duplicate.transaction_log = state.transaction_log.copy()
+        return duplicate
 
     def _transaction_snapshot(self) -> _StoreState:
         """Return a rollback snapshot without copying every compact payload.
@@ -919,15 +936,7 @@ class _InMemoryInventoryStore(InventoryStore):
         if self.backend_name != "compact":
             return copy.deepcopy(self._state)
 
-        state = self._state
-        snapshot = copy.copy(state)
-        snapshot.activities = state.activities.copy()
-        snapshot.activity_order = state.activity_order.copy()
-        snapshot.exchanges = state.exchanges.shallow_copy()
-        snapshot.exchange_owner = state.exchange_owner.copy()
-        snapshot.activity_exchanges = state.activity_exchanges.copy()
-        snapshot.transaction_log = state.transaction_log.copy()
-        return snapshot
+        return self._copy_compact_state()
 
     def _invalidate_indexes(self) -> None:
         self._state.field_index = {}

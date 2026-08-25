@@ -264,9 +264,15 @@ def test_nested_and_out_of_context_transactions_are_rejected(inventory):
 def test_compact_forks_are_copy_on_write_and_isolated(inventory):
     source = CompactInventoryStore(inventory)
     forks = [source.fork(identity) for identity in ("a", "b", "c")]
+    source_activity = source._state.activities[0]
+    untouched_activity = source._state.activities[1]
+    untouched_exchange = source._state.exchanges[1]
 
     with forks[0].transaction("scenario:a") as tx:
         tx.patch_activity(0, {"location": "DE"})
+    assert forks[0]._state.activities[0] is not source_activity
+    assert forks[0]._state.activities[1] is untouched_activity
+    assert forks[0]._state.exchanges[1] is untouched_exchange
     with forks[1].transaction("scenario:b") as tx:
         tx.remove_activity(0)
     with forks[2].transaction("scenario:c") as tx:
