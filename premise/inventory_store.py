@@ -2379,6 +2379,67 @@ class CompactInventoryStore(_InMemoryInventoryStore):
     eager_exchange_owners = False
     dense_exchange_table = True
 
+    def fresh_columnar_view(
+        self, scenario_identity: Any = None
+    ) -> "CompactInventoryStore":
+        """Create an isolated source view while sharing immutable columns.
+
+        A multi-scenario build previously reopened and decoded the same source
+        checkpoint for every scenario. A pristine columnar store can instead
+        recreate only its lightweight activity overlays and graph indexes. The
+        returned payload mappings are independent, while their Arrow/NumPy
+        storage remains read-only and shared with this source template.
+        """
+
+        with self._lock:
+            if self._active_transaction:
+                raise InventoryStoreError(
+                    "Cannot create a source view during an active transaction."
+                )
+            exchange_table = self._state.exchanges
+            if not isinstance(exchange_table, _ColumnarExchangeTable):
+                raise InventoryStoreError(
+                    "Fresh source views require a columnar checkpoint store."
+                )
+            if exchange_table._overrides or exchange_table._tombstones:
+                raise InventoryStoreError(
+                    "Fresh source views require an unmodified exchange table."
+                )
+
+            storage = exchange_table._storage
+            child = object.__new__(type(self))
+            state = child._new_state()
+            state.exchanges = _ColumnarExchangeTable(storage)
+            for activity_id in self._state.activity_order:
+                payload = self._state.activities.get(activity_id)
+                if not isinstance(payload, _ColumnarActivityMapping):
+                    raise InventoryStoreError(
+                        "Fresh source views require columnar activity mappings."
+                    )
+                if payload._storage is not storage:
+                    raise InventoryStoreError(
+                        "Source activities do not share one columnar storage."
+                    )
+                state.activities[activity_id] = payload._premise_clone({})
+                state.activity_order.append(activity_id)
+                exchange_ids = self._state.activity_exchanges[activity_id]
+                state.activity_exchanges[activity_id] = (
+                    exchange_ids
+                    if isinstance(exchange_ids, range)
+                    else exchange_ids.copy()
+                )
+
+            state.next_activity_id = self._state.next_activity_id
+            state.next_exchange_id = self._state.next_exchange_id
+            state.generation = self._state.generation
+            child._state = state
+            child._scenario_identity = scenario_identity
+            child._lock = threading.RLock()
+            child._active_transaction = False
+            child._shared_state = False
+            child._shares_source_storage = True
+            return child
+
     def _checkout_materialized(
         self, *, discard_shared_state: bool = False
     ) -> IndexedInventoryList:

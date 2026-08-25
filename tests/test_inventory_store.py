@@ -442,6 +442,28 @@ def test_columnar_activity_deepcopy_keeps_sidecar_lazy_and_isolated(
     assert source["custom"]["list"] == [np.float64(3.5)]
 
 
+def test_fresh_columnar_views_share_storage_but_isolate_mutations(inventory, tmp_path):
+    checkpoint = CompactInventoryStore(inventory).checkpoint(
+        tmp_path / "source.inventory-store"
+    )
+    source = InventoryStore.open(checkpoint)
+
+    first = source.fresh_columnar_view(("image", 2030))
+    second = source.fresh_columnar_view(("image", 2050))
+    first_database = first._checkout_materialized()
+    second_database = second._checkout_materialized()
+
+    assert first_database[0]._storage is second_database[0]._storage
+    assert first_database[0]._storage is source._state.exchanges._storage
+
+    first_database[0]["location"] = "DE"
+    first_database[0]["exchanges"][0]["amount"] = 7.0
+
+    assert second_database[0]["location"] == "CH"
+    assert second_database[0]["exchanges"][0]["amount"] == 1.0
+    assert source.materialize() == inventory
+
+
 def test_columnar_activity_hot_fields_remain_mapping_compatible(inventory, tmp_path):
     checkpoint = CompactInventoryStore(inventory).checkpoint(
         tmp_path / "source.inventory-store"
@@ -770,6 +792,38 @@ def test_compact_scenarios_reload_source_instead_of_deep_copying_it(inventory):
     assert first["_inventory_working_copy"][0]["location"] == "DE"
     assert second["_inventory_working_copy"][0]["location"] == "CH"
     assert obj._source_inventory_store is None
+
+
+def test_compact_scenarios_reuse_pristine_columnar_source_storage(inventory, tmp_path):
+    checkpoint = CompactInventoryStore(inventory).checkpoint(
+        tmp_path / "source.inventory-store"
+    )
+    obj = object.__new__(NewDatabase)
+    obj._inventory_api_active = True
+    obj.inventory_backend = "compact"
+    obj._source_inventory_store = InventoryStore.open(checkpoint)
+    obj._compact_source_checkpoint = checkpoint
+    obj.scenarios = [
+        {"model": "image", "pathway": "SSP2-Base", "year": year}
+        for year in (2030, 2050)
+    ]
+    obj.database_cache_filepath = "source-cache"
+    obj.inventories_cache_filepath = "inventory-cache"
+    obj.additional_inventories = None
+
+    first = obj._load_scenario_database_for_update(obj.scenarios[0], 0)
+    first_database = first["_inventory_working_copy"]
+    first_database[0]["location"] = "DE"
+    second = obj._load_scenario_database_for_update(obj.scenarios[1], 1)
+    second_database = second["_inventory_working_copy"]
+
+    assert obj._source_inventory_store is not None
+    assert first_database[0]._storage is second_database[0]._storage
+    assert (
+        first_database[0]._storage
+        is obj._source_inventory_store._state.exchanges._storage
+    )
+    assert second_database[0]["location"] == "CH"
 
 
 @pytest.mark.parametrize("persist", [False, True])

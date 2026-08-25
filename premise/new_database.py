@@ -59,6 +59,7 @@ from .inventory_store import (
     IndexedInventoryList,
     InventoryStore,
     InventoryStoreCorruptionError,
+    InventoryStoreError,
     InventoryStoreVersionError,
     ReadOnlyInventoryStore,
     STORE_SCHEMA_VERSION,
@@ -1302,7 +1303,14 @@ class NewDatabase:
                     take_ownership=True,
                 )
                 self._source_inventory_store = source_store
-            store = source_store.fork(self._scenario_identity(scenario))
+            scenario_identity = self._scenario_identity(scenario)
+            if isinstance(source_store, CompactInventoryStore):
+                try:
+                    store = source_store.fresh_columnar_view(scenario_identity)
+                except InventoryStoreError:
+                    store = source_store.fork(scenario_identity)
+            else:
+                store = source_store.fork(scenario_identity)
         scenario["_inventory_store"] = store
         return store
 
@@ -1395,7 +1403,7 @@ class NewDatabase:
         # graph has been transferred to a scenario. The next scenario can take
         # ownership of a fresh graph from the versioned source/inventory caches.
         scenario.pop("_inventory_store", None)
-        if can_transfer_source:
+        if can_transfer_source and not getattr(store, "_shares_source_storage", False):
             self._source_inventory_store = None
             del store
             clear_runtime_caches()
