@@ -91,7 +91,15 @@ class _ProviderRecord(Mapping[str, Any]):
 
 
 def _provider_record(dataset: Mapping[str, Any]) -> _ProviderRecord:
-    production = list(ws.production(dataset))[0]
+    try:
+        production = next(
+            exchange
+            for exchange in dataset["exchanges"]
+            if exchange["type"] == "production"
+        )
+    except StopIteration:
+        # Preserve the historical failure from ``list(ws.production(...))[0]``.
+        raise IndexError("list index out of range") from None
     return _ProviderRecord(
         name=dataset["name"],
         reference_product=dataset["reference product"],

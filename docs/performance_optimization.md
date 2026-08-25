@@ -273,6 +273,16 @@ seconds and the profiled sector fell from 1.757 to 1.549 seconds. The all-sector
 run was slower outside final energy, so no wider runtime claim is made. The
 exact canonical hash and inventory counts remained unchanged.
 
+Provider-record construction now stops at the first production exchange rather
+than materializing the complete Wurst production-exchange generator. This
+preserves the provider index's historical first-production value and missing-
+production error while avoiding scans of all remaining exchanges. In the
+matched compact final-energy profile, provider-record extraction fell from
+0.261 to 0.076 seconds, fresh index construction from 0.344 to 0.161 seconds,
+and the sector from 1.549 to 1.362 seconds. The complete profiled update reached
+39.96 seconds, but the wider run also contained unrelated sector timing
+variation. The exact canonical hash and inventory counts remained unchanged.
+
 The seed-zero canonical hash is
 `39efcf273da6b52e6c6bdfce8a6546a9a0819a054340fee9062ac2a7fddf808c`.
 Compact builds refuse an unfixed hash seed in the benchmark harness so an

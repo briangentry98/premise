@@ -282,6 +282,43 @@ def test_provider_index_records_are_compact_immutable_mappings():
         record.location = "CH"
 
 
+def test_provider_record_stops_after_first_production_exchange():
+    class UnreachableExchange:
+        def __getitem__(self, key):
+            raise AssertionError("provider lookup scanned past first production")
+
+    dataset = {
+        "name": "market for fuel",
+        "reference product": "fuel",
+        "location": "GLO",
+        "unit": "kilogram",
+        "exchanges": [
+            {
+                "type": "production",
+                "production volume": 2.0,
+            },
+            UnreachableExchange(),
+        ],
+    }
+
+    record = transformation_module._provider_record(dataset)
+
+    assert record["production volume"] == 2.0
+
+
+def test_provider_record_preserves_missing_production_error():
+    dataset = {
+        "name": "market for fuel",
+        "reference product": "fuel",
+        "location": "GLO",
+        "unit": "kilogram",
+        "exchanges": [{"type": "technosphere"}],
+    }
+
+    with pytest.raises(IndexError, match="list index out of range"):
+        transformation_module._provider_record(dataset)
+
+
 def test_find_new_exchange_entries_accepts_preaggregated_amount(monkeypatch):
     transformation = object.__new__(BaseTransformation)
     transformation.cache = {}
