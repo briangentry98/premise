@@ -36,7 +36,7 @@ except ImportError:  # pragma: no cover - exercised only in minimal environments
 
 ActivityId: TypeAlias = int
 ExchangeId: TypeAlias = int
-STORE_SCHEMA_VERSION = 3
+STORE_SCHEMA_VERSION = 4
 _UNHASHABLE = object()
 
 _ACTIVITY_COMMON_FIELDS = (
@@ -52,17 +52,11 @@ _ACTIVITY_COMMON_FIELDS = (
 _EXCHANGE_STRING_FIELDS = (
     "name",
     "product",
-    "reference product",
     "location",
     "unit",
     "type",
 )
-_EXCHANGE_NUMERIC_FIELDS = (
-    "amount",
-    "uncertainty type",
-    "loc",
-    "production volume",
-)
+_EXCHANGE_NUMERIC_FIELDS = ("amount",)
 _EXCHANGE_BOOLEAN_FIELDS = ()
 _NUMERIC_MISSING = 0
 _NUMERIC_PYTHON_FLOAT = 1
@@ -96,7 +90,11 @@ def _decode_numeric_column(kind: int, float_value: Any, int_value: Any) -> Any:
     raise ValueError(f"Unknown numeric exchange value kind: {kind}")
 
 
-def _exchange_sidecar_metadata(payload: Mapping[str, Any]) -> dict[str, Any]:
+def _exchange_sidecar_metadata(
+    payload: Mapping[str, Any],
+    *,
+    numeric_kinds: Mapping[str, int] | None = None,
+) -> dict[str, Any]:
     """Return only fields which cannot be restored losslessly from Arrow."""
 
     metadata = {}
@@ -104,7 +102,11 @@ def _exchange_sidecar_metadata(payload: Mapping[str, Any]) -> dict[str, Any]:
         if key in _EXCHANGE_STRING_FIELDS and isinstance(value, str):
             continue
         if key in _EXCHANGE_NUMERIC_FIELDS:
-            kind, _, _ = _numeric_column_parts(value)
+            kind = (
+                numeric_kinds[key]
+                if numeric_kinds is not None and key in numeric_kinds
+                else _numeric_column_parts(value)[0]
+            )
             if kind != _NUMERIC_MISSING:
                 continue
         if (
@@ -1840,15 +1842,17 @@ def _read_table(path: Path) -> dict[str, list[Any]]:
     if pa is None:
         with path.open("rb") as stream:
             return pickle.load(stream)
-    try:
-        with pa.memory_map(str(path), "r") as source:
-            table = pa_ipc.open_file(source).read_all()
-        return {name: table[name].to_pylist() for name in table.column_names}
-    except (pa.ArrowInvalid, pa.ArrowIOError):
-        # A checkpoint produced in a source-only environment uses the pickle
-        # fallback despite retaining the stable bundle filenames.
-        with path.open("rb") as stream:
-            return pickle.load(stream)
+    for open_reader in (pa_ipc.open_file, pa_ipc.open_stream):
+        try:
+            with pa.memory_map(str(path), "r") as source:
+                table = open_reader(source).read_all()
+            return {name: table[name].to_pylist() for name in table.column_names}
+        except (pa.ArrowInvalid, pa.ArrowIOError):
+            continue
+    # A checkpoint produced in a source-only environment uses the pickle
+    # fallback despite retaining the stable bundle filenames.
+    with path.open("rb") as stream:
+        return pickle.load(stream)
 
 
 def _iter_table_rows(path: Path) -> Iterator[dict[str, Any]]:
@@ -1860,6 +1864,19 @@ def _iter_table_rows(path: Path) -> Iterator[dict[str, Any]]:
                 reader = pa_ipc.open_file(source)
                 for batch_index in range(reader.num_record_batches):
                     batch = reader.get_batch(batch_index)
+                    names = batch.schema.names
+                    columns = [
+                        batch.column(index).to_pylist() for index in range(len(names))
+                    ]
+                    for values in zip(*columns):
+                        yield dict(zip(names, values))
+            return
+        except (pa.ArrowInvalid, pa.ArrowIOError):
+            pass
+        try:
+            with pa.memory_map(str(path), "r") as source:
+                reader = pa_ipc.open_stream(source)
+                for batch in reader:
                     names = batch.schema.names
                     columns = [
                         batch.column(index).to_pylist() for index in range(len(names))
@@ -1900,14 +1917,13 @@ def _exchange_from_arrow_row(row: Mapping[str, Any]) -> dict[str, Any]:
     return payload
 
 
-def _write_exchanges_table_batched(
+def _write_checkpoint_payloads(
     store: _InMemoryInventoryStore,
-    path: Path,
-    strings: list[str],
+    temporary: Path,
     *,
     batch_size: int = 65_536,
-) -> None:
-    """Write exchanges without retaining graph-sized Python column lists."""
+) -> tuple[dict[str, list[Any]], dict[str, list[Any]], list[str]]:
+    """Serialize metadata and Arrow rows in one ordered graph traversal."""
 
     id_columns = ("exchange_id", "activity_id", "exchange_ordinal")
     category_columns = ("categories__0", "categories__1")
@@ -1928,10 +1944,20 @@ def _write_exchanges_table_batched(
         *_EXCHANGE_BOOLEAN_FIELDS,
     )
 
-    def append_payload(columns, payload) -> None:
+    strings: list[str] = []
+    seen_strings: set[str] = set()
+
+    def collect_string(value: Any) -> None:
+        if isinstance(value, str) and value not in seen_strings:
+            strings.append(value)
+            seen_strings.add(value)
+
+    def append_payload(columns, payload) -> dict[str, Any]:
         for field_name in _EXCHANGE_STRING_FIELDS:
             value = payload.get(field_name)
             columns[field_name].append(value if isinstance(value, str) else None)
+            if pa is None:
+                collect_string(value)
         categories = payload.get("categories")
         valid_categories = (
             isinstance(categories, tuple)
@@ -1940,95 +1966,129 @@ def _write_exchanges_table_batched(
         )
         columns["categories__0"].append(categories[0] if valid_categories else None)
         columns["categories__1"].append(categories[1] if valid_categories else None)
+        if pa is None and valid_categories:
+            collect_string(categories[0])
+            collect_string(categories[1])
+        numeric_kinds = {}
         for field_name in _EXCHANGE_NUMERIC_FIELDS:
             kind, float_value, int_value = _numeric_column_parts(
                 payload.get(field_name, _UNHASHABLE)
             )
+            numeric_kinds[field_name] = kind
             columns[f"{field_name}__kind"].append(kind)
             columns[f"{field_name}__float"].append(float_value)
             columns[f"{field_name}__int"].append(int_value)
         for field_name in _EXCHANGE_BOOLEAN_FIELDS:
             value = payload.get(field_name)
             columns[field_name].append(value if type(value) is bool else None)
+        return _exchange_sidecar_metadata(payload, numeric_kinds=numeric_kinds)
 
-    if pa is None:
-        columns = {name: [] for name in column_names}
-        for activity_id in store.iter_activity_ids():
-            for exchange_ordinal, exchange_id in enumerate(
-                store._state.activity_exchanges[activity_id]
-            ):
-                payload = store._state.exchanges[exchange_id]
-                columns["exchange_id"].append(exchange_id)
-                columns["activity_id"].append(activity_id)
-                columns["exchange_ordinal"].append(exchange_ordinal)
-                append_payload(columns, payload)
-        _write_table(path, columns)
-        return
-
-    dictionary_type = pa.dictionary(pa.int32(), pa.string())
-    fields = [
-        pa.field("exchange_id", pa.int64()),
-        pa.field("activity_id", pa.int64()),
-        pa.field("exchange_ordinal", pa.int64()),
-    ]
-    fields.extend(
-        pa.field(field_name, dictionary_type)
-        for field_name in (*_EXCHANGE_STRING_FIELDS, *category_columns)
-    )
-    fields.extend(
-        pa.field(
-            column,
-            (
-                pa.int8()
-                if column.endswith("__kind")
-                else pa.int64() if column.endswith("__int") else pa.float64()
-            ),
+    schema = None
+    if pa is not None:
+        dictionary_type = pa.dictionary(pa.int32(), pa.string())
+        fields = [
+            pa.field("exchange_id", pa.int64()),
+            pa.field("activity_id", pa.int64()),
+            pa.field("exchange_ordinal", pa.int64()),
+        ]
+        fields.extend(
+            pa.field(field_name, dictionary_type)
+            for field_name in (*_EXCHANGE_STRING_FIELDS, *category_columns)
         )
-        for column in numeric_columns
-    )
-    fields.extend(
-        pa.field(field_name, pa.bool_()) for field_name in _EXCHANGE_BOOLEAN_FIELDS
-    )
-    schema = pa.schema(fields)
-    dictionary = pa.array(strings, type=pa.string())
-    string_ids = {value: position for position, value in enumerate(strings)}
+        fields.extend(
+            pa.field(
+                column,
+                (
+                    pa.int8()
+                    if column.endswith("__kind")
+                    else pa.int64() if column.endswith("__int") else pa.float64()
+                ),
+            )
+            for column in numeric_columns
+        )
+        fields.extend(
+            pa.field(field_name, pa.bool_()) for field_name in _EXCHANGE_BOOLEAN_FIELDS
+        )
+        schema = pa.schema(fields)
     columns = {name: [] for name in column_names}
 
     def flush(writer) -> None:
         if not columns["exchange_id"]:
             return
+        assert schema is not None
         arrays = []
         for field in schema:
             values = columns[field.name]
             if pa.types.is_dictionary(field.type):
-                indices = pa.array(
-                    [
-                        string_ids.get(value) if value is not None else None
-                        for value in values
-                    ],
-                    type=pa.int32(),
-                )
-                arrays.append(pa.DictionaryArray.from_arrays(indices, dictionary))
+                array = pa.array(values, type=pa.string()).dictionary_encode()
+                for value in array.dictionary.to_pylist():
+                    collect_string(value)
+                arrays.append(array)
             else:
                 arrays.append(pa.array(values, type=field.type))
         writer.write_batch(pa.RecordBatch.from_arrays(arrays, schema=schema))
         for values in columns.values():
             values.clear()
 
-    with pa.OSFile(str(path), "wb") as sink:
-        with pa_ipc.new_file(sink, schema) as writer:
-            for activity_id in store.iter_activity_ids():
-                for exchange_ordinal, exchange_id in enumerate(
-                    store._state.activity_exchanges[activity_id]
-                ):
-                    payload = store._state.exchanges[exchange_id]
-                    columns["exchange_id"].append(exchange_id)
-                    columns["activity_id"].append(activity_id)
-                    columns["exchange_ordinal"].append(exchange_ordinal)
-                    append_payload(columns, payload)
-                    if len(columns["exchange_id"]) >= batch_size:
-                        flush(writer)
+    offsets = {"kind": [], "id": [], "offset": [], "length": []}
+    activities: dict[str, list[Any]] = defaultdict(list)
+
+    def serialize(sidecar, writer=None) -> None:
+        exchange_cursor = 0
+        for ordinal, activity_id in enumerate(store.iter_activity_ids()):
+            payload = store._state.activities[activity_id]
+            exchange_ids = store._state.activity_exchanges[activity_id]
+            exchange_metadata = []
+            for exchange_ordinal, exchange_id in enumerate(exchange_ids):
+                exchange_payload = store._state.exchanges[exchange_id]
+                columns["exchange_id"].append(exchange_id)
+                columns["activity_id"].append(activity_id)
+                columns["exchange_ordinal"].append(exchange_ordinal)
+                metadata = append_payload(columns, exchange_payload)
+                if metadata:
+                    exchange_metadata.append((exchange_ordinal, metadata))
+                if writer is not None and len(columns["exchange_id"]) >= batch_size:
+                    flush(writer)
+
+            bundle = {
+                "activity": payload,
+                "exchange_metadata": exchange_metadata,
+            }
+            encoded = pickle.dumps(bundle, protocol=pickle.HIGHEST_PROTOCOL)
+            offset = sidecar.tell()
+            sidecar.write(encoded)
+            offsets["kind"].append("activity-bundle")
+            offsets["id"].append(activity_id)
+            offsets["offset"].append(offset)
+            offsets["length"].append(len(encoded))
+            activities["activity_id"].append(activity_id)
+            activities["source_ordinal"].append(ordinal)
+            exchange_count = len(exchange_ids)
+            activities["exchange_start"].append(exchange_cursor)
+            activities["exchange_count"].append(exchange_count)
+            exchange_cursor += exchange_count
+            for field_name in _ACTIVITY_COMMON_FIELDS:
+                value = payload.get(field_name)
+                activities[field_name].append(value if isinstance(value, str) else None)
+                collect_string(value)
+
+        if writer is not None:
             flush(writer)
+
+    with (temporary / "metadata.bin").open("wb") as sidecar:
+        if pa is None:
+            serialize(sidecar)
+        else:
+            with pa.OSFile(str(temporary / "exchanges.arrow"), "wb") as sink:
+                # IPC streams permit independent dictionaries per bounded batch,
+                # avoiding a second graph traversal to build a global dictionary.
+                with pa_ipc.new_stream(sink, schema) as writer:
+                    serialize(sidecar, writer)
+
+    if pa is None:
+        _write_table(temporary / "exchanges.arrow", columns)
+
+    return offsets, dict(activities), strings
 
 
 def _write_checkpoint(store: _InMemoryInventoryStore, path: Path) -> Path:
@@ -2039,75 +2099,10 @@ def _write_checkpoint(store: _InMemoryInventoryStore, path: Path) -> Path:
     temporary = Path(tempfile.mkdtemp(prefix=f".{path.name}.tmp-", dir=path.parent))
     backup: Path | None = None
     try:
-        offsets = {"kind": [], "id": [], "offset": [], "length": []}
-        activities = defaultdict(list)
-        strings: list[str] = []
-        seen_strings: set[str] = set()
-
-        with (temporary / "metadata.bin").open("wb") as sidecar:
-            exchange_cursor = 0
-            for ordinal, activity_id in enumerate(store.iter_activity_ids()):
-                payload = store._state.activities[activity_id]
-                exchange_ids = store._state.activity_exchanges[activity_id]
-                # One bounded payload per activity avoids millions of tiny
-                # pickle operations and the corresponding per-exchange offset
-                # rows while retaining every Python value exactly.  The Arrow
-                # exchange table remains independently addressable by ID and
-                # ordinal for the compact query path.
-                exchange_metadata = []
-                for exchange_ordinal, exchange_id in enumerate(exchange_ids):
-                    exchange_payload = store._state.exchanges[exchange_id]
-                    metadata = _exchange_sidecar_metadata(exchange_payload)
-                    if metadata:
-                        exchange_metadata.append((exchange_ordinal, metadata))
-                    for field_name in _EXCHANGE_STRING_FIELDS:
-                        value = exchange_payload.get(field_name)
-                        if isinstance(value, str) and value not in seen_strings:
-                            strings.append(value)
-                            seen_strings.add(value)
-                    categories = exchange_payload.get("categories")
-                    if (
-                        isinstance(categories, tuple)
-                        and len(categories) == 2
-                        and all(isinstance(item, str) for item in categories)
-                    ):
-                        for value in categories:
-                            if value not in seen_strings:
-                                strings.append(value)
-                                seen_strings.add(value)
-                bundle = {
-                    "activity": payload,
-                    "exchange_metadata": exchange_metadata,
-                }
-                encoded = pickle.dumps(bundle, protocol=pickle.HIGHEST_PROTOCOL)
-                offset = sidecar.tell()
-                sidecar.write(encoded)
-                offsets["kind"].append("activity-bundle")
-                offsets["id"].append(activity_id)
-                offsets["offset"].append(offset)
-                offsets["length"].append(len(encoded))
-                activities["activity_id"].append(activity_id)
-                activities["source_ordinal"].append(ordinal)
-                exchange_count = len(exchange_ids)
-                activities["exchange_start"].append(exchange_cursor)
-                activities["exchange_count"].append(exchange_count)
-                exchange_cursor += exchange_count
-                for field_name in _ACTIVITY_COMMON_FIELDS:
-                    value = payload.get(field_name)
-                    activities[field_name].append(
-                        value if isinstance(value, str) else None
-                    )
-                    if isinstance(value, str) and value not in seen_strings:
-                        strings.append(value)
-                        seen_strings.add(value)
+        offsets, activities, strings = _write_checkpoint_payloads(store, temporary)
 
         _write_table(temporary / "strings.arrow", {"value": strings})
         _write_table(temporary / "activities.arrow", dict(activities))
-        _write_exchanges_table_batched(
-            store,
-            temporary / "exchanges.arrow",
-            strings,
-        )
         _write_table(temporary / "metadata_offsets.arrow", offsets)
 
         try:
@@ -2133,7 +2128,7 @@ def _write_checkpoint(store: _InMemoryInventoryStore, path: Path) -> Path:
             "inventory_fingerprints": [],
             "uncertainty_settings": {},
             "columnar_format": "arrow-ipc" if pa is not None else "pickle-fallback",
-            "metadata_layout": "activity-extras-v3",
+            "metadata_layout": "activity-extras-v4",
         }
         try:
             manifest_text = json.dumps(manifest, sort_keys=True, indent=2)
