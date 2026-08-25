@@ -412,6 +412,43 @@ def test_columnar_activity_hot_fields_remain_mapping_compatible(inventory, tmp_p
     assert "type" not in activity
 
 
+def test_columnar_exchange_fast_checkpoint_roundtrip_is_lossless(inventory, tmp_path):
+    inventory[2]["exchanges"][0].update(
+        {
+            "uncertainty type": 3,
+            "loc": 2.0,
+            "scale": 0.4,
+            "minimum": 1.0,
+            "maximum": 3.0,
+            "categories": ("technosphere", "test"),
+            "comment": "source metadata",
+            "custom": {"values": [1, 2]},
+        }
+    )
+    source = CompactInventoryStore(inventory).checkpoint(
+        tmp_path / "source.inventory-store"
+    )
+    activity = InventoryStore.open(source)._checkout_materialized()[2]
+    exchange = activity["exchanges"][0]
+
+    exchange["name"] = "updated input"
+    exchange["amount"] = np.float32(3.25)
+    exchange["categories"] = ("water", "ocean")
+    exchange["comment"] = "updated metadata"
+    exchange["custom"]["values"].append(3)
+    del exchange["input"]
+    exchange["new metadata"] = ("kept", None)
+    expected = copy.deepcopy(activity)
+
+    updated_store = CompactInventoryStore([activity], take_ownership=True)
+    updated = updated_store.checkpoint(tmp_path / "updated.inventory-store")
+    restored = InventoryStore.open(updated).materialize()[0]
+
+    assert restored == expected
+    assert type(restored["exchanges"][0]["amount"]) is np.float32
+    assert "input" not in restored["exchanges"][0]
+
+
 def test_load_database_transfers_compact_store_without_exchange_materialization(
     inventory, tmp_path
 ):

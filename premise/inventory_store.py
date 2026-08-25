@@ -1086,6 +1086,77 @@ class _ColumnarExchangeMapping(MutableMapping[str, Any]):
                 self._set_change(key, value)
             return value
 
+    def _checkpoint_value(self, key: str, metadata: Mapping[str, Any]) -> Any:
+        """Return one effective value without generic mapping iteration."""
+
+        value = self._changed_value(key)
+        if value is _COLUMNAR_DELETED:
+            return _UNHASHABLE
+        if value is not _COLUMNAR_MISSING:
+            return value
+        try:
+            return self._storage.common_value(self._row, key)
+        except KeyError:
+            return metadata.get(key, _UNHASHABLE)
+
+    def _premise_append_checkpoint_payload(
+        self,
+        columns: Mapping[str, list[Any]],
+        collect_string: Callable[[Any], None] | None,
+    ) -> dict[str, Any]:
+        """Append this row directly to checkpoint columns.
+
+        The generic mapping path repeatedly reconstructs all keys and consults
+        the sidecar for every field. A columnar row already knows which fields
+        are resident, so one metadata lookup is sufficient.
+        """
+
+        metadata = dict(self._storage.metadata(self._row))
+        for field_name in _EXCHANGE_STRING_FIELDS:
+            value = self._checkpoint_value(field_name, metadata)
+            columns[field_name].append(value if isinstance(value, str) else None)
+            if collect_string is not None:
+                collect_string(value)
+
+        categories = self._checkpoint_value("categories", metadata)
+        valid_categories = (
+            isinstance(categories, tuple)
+            and len(categories) == 2
+            and all(isinstance(item, str) for item in categories)
+        )
+        columns["categories__0"].append(categories[0] if valid_categories else None)
+        columns["categories__1"].append(categories[1] if valid_categories else None)
+        if collect_string is not None and valid_categories:
+            collect_string(categories[0])
+            collect_string(categories[1])
+
+        numeric_kinds = {}
+        for field_name in _EXCHANGE_NUMERIC_FIELDS:
+            value = self._checkpoint_value(field_name, metadata)
+            kind, float_value, int_value = _numeric_column_parts(value)
+            numeric_kinds[field_name] = kind
+            columns[f"{field_name}__kind"].append(kind)
+            columns[f"{field_name}__float"].append(float_value)
+            columns[f"{field_name}__int"].append(int_value)
+
+        for field_name in _EXCHANGE_BOOLEAN_FIELDS:
+            value = self._checkpoint_value(field_name, metadata)
+            columns[field_name].append(value if type(value) is bool else None)
+
+        for key, value in self._iter_changes():
+            if value is _COLUMNAR_DELETED:
+                metadata.pop(key, None)
+                continue
+            field_metadata = _exchange_sidecar_metadata(
+                {key: value},
+                numeric_kinds=(numeric_kinds if key in numeric_kinds else None),
+            )
+            if field_metadata:
+                metadata[key] = value
+            else:
+                metadata.pop(key, None)
+        return metadata
+
     def __getitem__(self, key: str) -> Any:
         value = self._changed_value(key)
         if value is not _COLUMNAR_MISSING:
@@ -2698,6 +2769,12 @@ def _write_checkpoint_payloads(
             seen_strings.add(value)
 
     def append_payload(columns, payload) -> dict[str, Any]:
+        append_columnar = getattr(payload, "_premise_append_checkpoint_payload", None)
+        if append_columnar is not None:
+            return append_columnar(
+                columns,
+                collect_string if pa is None else None,
+            )
         for field_name in _EXCHANGE_STRING_FIELDS:
             value = payload.get(field_name)
             columns[field_name].append(value if isinstance(value, str) else None)
