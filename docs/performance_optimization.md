@@ -219,6 +219,19 @@ Unrelated sectors were slower in that single run, putting end-to-end time at
 46.62 rather than 45.25 seconds, so the documented headline remains unchanged.
 Strict canonical output remained exact.
 
+Transport initialization no longer binds the incoming provider index to the
+relinking-cache argument. That positional mismatch retained the previous full
+provider-index generation while building a second one for every transport
+mode. The first consecutive transport now deliberately rebuilds its index,
+because earlier sectors may have changed indexed fields directly; subsequent
+transport modes reuse that freshly maintained index until a non-transport
+sector runs. The six transport phases fell from 9.72 to 9.26 seconds in the
+matched compact diagnostics, and the duplicate provider-index generation is no
+longer retained as scenario cache. Absolute RSS was affected by an unrelated
+macOS allocator purge during the verification run, so it is not used as a new
+memory headline. The exact canonical hash and inventory counts remained
+unchanged.
+
 The seed-zero canonical hash is
 `39efcf273da6b52e6c6bdfce8a6546a9a0819a054340fee9062ac2a7fddf808c`.
 Compact builds refuse an unfixed hash seed in the benchmark harness so an

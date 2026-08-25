@@ -1268,6 +1268,8 @@ class NewDatabase:
 
     @staticmethod
     def _clear_scenario_runtime_state(scenario: dict) -> None:
+        scenario.pop("_transport_index_ready", None)
+
         if "cache" in scenario:
             scenario["cache"] = {}
 
@@ -1439,6 +1441,16 @@ class NewDatabase:
                             f"Function to update {sector} already applied to scenario."
                         )
                         continue
+
+                    if sector not in {
+                        "cars",
+                        "two_wheelers",
+                        "trucks",
+                        "ships",
+                        "buses",
+                        "trains",
+                    }:
+                        scenario.pop("_transport_index_ready", None)
 
                     # Prepare the function and arguments
                     update_func = self.sector_update_methods[sector]["func"]

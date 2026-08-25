@@ -58,6 +58,7 @@ def _update_vehicles(scenario, vehicle_type, version, system_model):
         relink=False,
         has_fleet=has_fleet,
         index=scenario.get("index"),
+        reuse_index=scenario.get("_transport_index_ready", False),
     )
 
     trspt.regionalize_transport_datasets()
@@ -69,6 +70,7 @@ def _update_vehicles(scenario, vehicle_type, version, system_model):
     replace_scenario_inventory(scenario, trspt.database)
     scenario["cache"] = trspt.cache
     scenario["index"] = trspt.index
+    scenario["_transport_index_ready"] = True
 
     if "mapping" not in scenario:
         scenario["mapping"] = {}
@@ -158,6 +160,7 @@ class Transport(BaseTransformation):
         vehicle_type: str,
         has_fleet: bool,
         index: dict = None,
+        reuse_index: bool = False,
     ):
         super().__init__(
             database,
@@ -167,7 +170,11 @@ class Transport(BaseTransformation):
             year,
             version,
             system_model,
-            index,
+            cache=None,
+            # The first transport rebuilds because previous sectors can mutate
+            # indexed fields directly. Consecutive transport transformations
+            # maintain this index incrementally and can share it safely.
+            index=index if reuse_index else None,
         )
         self.version = version
         self.relink = relink
