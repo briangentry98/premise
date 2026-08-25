@@ -39,13 +39,14 @@ SHIPS = VARIABLES_DIR / "transport_sea_freight.yaml"
 FINAL_ENERGY = VARIABLES_DIR / "final_energy.yaml"
 MINING_WASTE = DATA_DIR / "mining" / "tailings_activities.yaml"
 CARBON_STORAGE_TECHS = VARIABLES_DIR / "carbon_dioxide_removal.yaml"
+_YAML_FULL_LOADER = getattr(yaml, "CFullLoader", yaml.FullLoader)
 
 
 @lru_cache(maxsize=1)
 def _load_mapping_file(filepath: Path) -> Dict[str, dict]:
     """Parse a mapping file once for all variable-specific lookups."""
     with open(filepath, "r", encoding="utf-8") as stream:
-        return yaml.full_load(stream)
+        return yaml.load(stream, Loader=_YAML_FULL_LOADER)
 
 
 @lru_cache(maxsize=64)

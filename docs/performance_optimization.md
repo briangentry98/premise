@@ -265,6 +265,14 @@ extraction fell from 0.779 to 0.005 seconds, and the profiled sector fell from
 seconds, although that wider difference includes ordinary sector-to-sector
 noise. The exact canonical hash and inventory counts remained unchanged.
 
+Activity mapping files now use PyYAML's LibYAML-backed `CFullLoader` when it is
+available, with `FullLoader` retained as the portable fallback. Parsed mapping
+semantics and the existing lookup cache are unchanged. For the large
+final-energy mapping, profiled first-load parsing fell from 0.323 to 0.028
+seconds and the profiled sector fell from 1.757 to 1.549 seconds. The all-sector
+run was slower outside final energy, so no wider runtime claim is made. The
+exact canonical hash and inventory counts remained unchanged.
+
 The seed-zero canonical hash is
 `39efcf273da6b52e6c6bdfce8a6546a9a0819a054340fee9062ac2a7fddf808c`.
 Compact builds refuse an unfixed hash seed in the benchmark harness so an

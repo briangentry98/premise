@@ -64,22 +64,24 @@ def test_mapping_file_is_parsed_once_across_variable_lookups(tmp_path, monkeypat
         encoding="utf-8",
     )
     parse_calls = []
-    original_full_load = activity_maps_module.yaml.full_load
+    original_load = activity_maps_module.yaml.load
 
-    def counted_full_load(stream):
-        parse_calls.append(stream.name)
-        return original_full_load(stream)
+    def counted_load(stream, *, Loader):
+        parse_calls.append((stream.name, Loader))
+        return original_load(stream, Loader=Loader)
 
     activity_maps_module.get_mapping.cache_clear()
     activity_maps_module._load_mapping_file.cache_clear()
-    monkeypatch.setattr(activity_maps_module.yaml, "full_load", counted_full_load)
+    monkeypatch.setattr(activity_maps_module.yaml, "load", counted_load)
 
     first = activity_maps_module.get_mapping(mapping_file, "first")
     second = activity_maps_module.get_mapping(mapping_file, "second")
 
     assert first == {"technology": "one"}
     assert second == {"technology": "two"}
-    assert parse_calls == [str(mapping_file)]
+    assert parse_calls == [
+        (str(mapping_file), activity_maps_module._YAML_FULL_LOADER),
+    ]
 
 
 def test_length_dict():
