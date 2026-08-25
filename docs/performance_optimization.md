@@ -283,6 +283,16 @@ and the sector from 1.549 to 1.362 seconds. The complete profiled update reached
 39.96 seconds, but the wider run also contained unrelated sector timing
 variation. The exact canonical hash and inventory counts remained unchanged.
 
+The list-compatible compact query bridge now builds exact and string indexes
+one activity field at a time on first use. Appends update only fields already
+indexed; activating another field later includes every existing activity, and
+structural mutations still invalidate the complete query state. In the matched
+compact profile, final-energy activity mapping fell from 0.334 to 0.141 seconds
+and indexed candidate preparation from 0.274 to 0.108 seconds. Sampled peak RSS
+fell by 55.5 MB despite a 13.3 MB higher constructor baseline, reducing
+constructor-to-peak growth by 68.9 MB. Total wall time was effectively
+unchanged. The exact canonical hash and inventory counts remained unchanged.
+
 The seed-zero canonical hash is
 `39efcf273da6b52e6c6bdfce8a6546a9a0819a054340fee9062ac2a7fddf808c`.
 Compact builds refuse an unfixed hash seed in the benchmark harness so an

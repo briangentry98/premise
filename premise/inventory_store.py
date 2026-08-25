@@ -184,16 +184,18 @@ class IndexedInventoryList(list):
     def __init__(self, iterable=()):
         super().__init__(iterable)
         self._query_indexes = None
+        self._indexed_query_fields: set[str] = set()
 
     def _invalidate(self) -> None:
         self._query_indexes = None
+        self._indexed_query_fields = set()
 
     def _index_item(self, position: int, dataset: Mapping[str, Any]) -> None:
         if self._query_indexes is None:
             return
         exact, strings, predicate_cache = self._query_indexes
         predicate_cache.clear()
-        for field_name in self._INDEXED_FIELDS:
+        for field_name in self._indexed_query_fields:
             value = dataset.get(field_name)
             hashable = _hashable(value)
             if hashable is not _UNHASHABLE:
@@ -201,23 +203,30 @@ class IndexedInventoryList(list):
             if isinstance(value, str):
                 strings[field_name][value].add(position)
 
-    def _indexes(self):
+    def _indexes(self, field_names: Iterable[str] = ()):
         if self._query_indexes is None:
-            exact = {
-                field_name: defaultdict(set) for field_name in self._INDEXED_FIELDS
-            }
-            strings = {
-                field_name: defaultdict(set) for field_name in self._INDEXED_FIELDS
-            }
+            self._query_indexes = {}, {}, {}
+
+        exact, strings, predicate_cache = self._query_indexes
+        missing_fields = [
+            field_name
+            for field_name in field_names
+            if field_name in self._INDEXED_FIELDS
+            and field_name not in self._indexed_query_fields
+        ]
+        for field_name in missing_fields:
+            field_exact: dict[Any, set[int]] = defaultdict(set)
+            field_strings: dict[str, set[int]] = defaultdict(set)
             for position, dataset in enumerate(self):
-                for field_name in self._INDEXED_FIELDS:
-                    value = dataset.get(field_name)
-                    hashable = _hashable(value)
-                    if hashable is not _UNHASHABLE:
-                        exact[field_name][hashable].add(position)
-                    if isinstance(value, str):
-                        strings[field_name][value].add(position)
-            self._query_indexes = exact, strings, {}
+                value = dataset.get(field_name)
+                hashable = _hashable(value)
+                if hashable is not _UNHASHABLE:
+                    field_exact[hashable].add(position)
+                if isinstance(value, str):
+                    field_strings[value].add(position)
+            exact[field_name] = field_exact
+            strings[field_name] = field_strings
+            self._indexed_query_fields.add(field_name)
         return self._query_indexes
 
     def _all_positions(self) -> frozenset[int]:
@@ -232,22 +241,27 @@ class IndexedInventoryList(list):
     def _candidate_positions(
         self, expression: _CompiledWurstFilter
     ) -> _CandidatePositions | None:
-        exact, strings, predicate_cache = self._indexes()
         operation = expression.operation
-        if operation == "equals" and expression.field_name in exact:
+        field_name = expression.field_name
+        if operation == "equals" and field_name in self._INDEXED_FIELDS:
+            exact, _, _ = self._indexes((field_name,))
             value = _hashable(expression.value)
             if value is _UNHASHABLE:
                 return None
             # Query callers treat candidates as read-only. Returning the index
             # set avoids copying it for every exact predicate.
-            return exact[expression.field_name].get(value, frozenset())
-        if operation in {"contains", "startswith"} and expression.field_name in strings:
-            cache_key = (operation, expression.field_name, expression.value)
+            return exact[field_name].get(value, frozenset())
+        if (
+            operation in {"contains", "startswith"}
+            and field_name in self._INDEXED_FIELDS
+        ):
+            _, strings, predicate_cache = self._indexes((field_name,))
+            cache_key = (operation, field_name, expression.value)
             cached = predicate_cache.get(cache_key)
             if cached is not None:
                 return cached
             result: set[int] = set()
-            for value, positions in strings[expression.field_name].items():
+            for value, positions in strings[field_name].items():
                 matches = (
                     expression.value in value
                     if operation == "contains"
@@ -259,6 +273,7 @@ class IndexedInventoryList(list):
             predicate_cache[cache_key] = candidates
             return candidates
         if operation == "either":
+            _, _, predicate_cache = self._indexes()
             cache_key = ("compiled", expression)
             try:
                 cached = predicate_cache.get(cache_key)
@@ -280,6 +295,7 @@ class IndexedInventoryList(list):
                 predicate_cache[cache_key] = immutable_result
             return immutable_result
         if operation == "exclude":
+            _, _, predicate_cache = self._indexes()
             cache_key = ("compiled", expression)
             try:
                 cached = predicate_cache.get(cache_key)
@@ -295,13 +311,14 @@ class IndexedInventoryList(list):
             if cache_key is not None:
                 predicate_cache[cache_key] = result
             return result
-        if operation == "doesnt-contain-any" and expression.field_name in strings:
-            cache_key = (operation, expression.field_name, expression.value)
+        if operation == "doesnt-contain-any" and field_name in self._INDEXED_FIELDS:
+            _, strings, predicate_cache = self._indexes((field_name,))
+            cache_key = (operation, field_name, expression.value)
             cached = predicate_cache.get(cache_key)
             if cached is not None:
                 return cached
             excluded: set[int] = set()
-            for value, positions in strings[expression.field_name].items():
+            for value, positions in strings[field_name].items():
                 if any(item in value for item in expression.value):
                     excluded.update(positions)
             result = self._all_positions().difference(excluded)

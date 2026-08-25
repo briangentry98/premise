@@ -697,6 +697,35 @@ def test_indexed_wurst_bridge_intersection_does_not_mutate_exact_indexes(invento
     ]
 
 
+def test_indexed_wurst_bridge_builds_fields_lazily_and_updates_them(inventory):
+    database = IndexedInventoryList(inventory)
+
+    assert list(ws.get_many(database, ws.contains("name", "market for")))
+    assert set(database._query_indexes[0]) == {"name"}
+    assert set(database._query_indexes[1]) == {"name"}
+
+    database.append(
+        {
+            "name": "market for added product",
+            "reference product": "added product",
+            "location": "CH",
+            "unit": "kilogram",
+            "code": "added",
+            "exchanges": [],
+        }
+    )
+    assert (
+        len(inventory) in database._query_indexes[0]["name"]["market for added product"]
+    )
+    assert "unit" not in database._query_indexes[0]
+
+    assert [
+        dataset["code"]
+        for dataset in ws.get_many(database, ws.equals("unit", "kilogram"))
+    ] == ["added"]
+    assert set(database._query_indexes[0]) == {"name", "unit"}
+
+
 def test_indexed_wurst_bridge_uses_ordered_fallback_for_dynamic_predicates(inventory):
     database = IndexedInventoryList(inventory)
     dynamic = lambda dataset: dataset.get("code", "").endswith("grid")
