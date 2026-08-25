@@ -232,6 +232,16 @@ macOS allocator purge during the verification run, so it is not used as a new
 memory headline. The exact canonical hash and inventory counts remained
 unchanged.
 
+Provider indexes now store immutable slotted mapping records instead of a
+five-entry dictionary for every activity. String-key lookup, `.get()`, ordered
+iteration, production-volume scalar types, and legacy allocation order are
+unchanged. On the benchmark interpreter each record fell from 184 to 72 shallow
+bytes, saving 112 bytes per provider-index entry. The current full compact
+diagnostic reached 45.39 seconds and a 2.006 GB sampled peak; relative to the
+stable 2.030 GB reference, constructor-to-peak growth was 18.8 MB lower while
+wall time remained within noise. The checkpoint retained the exact canonical
+hash, 50,938 datasets, and 1,597,616 exchanges.
+
 The seed-zero canonical hash is
 `39efcf273da6b52e6c6bdfce8a6546a9a0819a054340fee9062ac2a7fddf808c`.
 Compact builds refuse an unfixed hash seed in the benchmark harness so an

@@ -11,8 +11,9 @@ import math
 import uuid
 from bisect import bisect_left
 from collections import defaultdict
-from collections.abc import ValuesView
+from collections.abc import Mapping, ValuesView
 from copy import deepcopy
+from dataclasses import dataclass
 from functools import lru_cache
 from itertools import groupby, product
 from pathlib import Path
@@ -49,6 +50,56 @@ with open(LOG_CONFIG, encoding="utf-8") as f:
 logger = logging.getLogger("module")
 
 _SCENARIO_GIS_CACHE_KEY = "__premise_gis_match_v1__"
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class _ProviderRecord(Mapping[str, Any]):
+    """Compact mapping-compatible provider snapshot used by activity indexes."""
+
+    name: str
+    reference_product: str
+    location: str
+    unit: str
+    production_volume: Any
+
+    _FIELDS = (
+        "name",
+        "reference product",
+        "location",
+        "unit",
+        "production volume",
+    )
+
+    def __getitem__(self, key: str) -> Any:
+        if key == "name":
+            return self.name
+        if key == "reference product":
+            return self.reference_product
+        if key == "location":
+            return self.location
+        if key == "unit":
+            return self.unit
+        if key == "production volume":
+            return self.production_volume
+        raise KeyError(key)
+
+    def __iter__(self):
+        return iter(self._FIELDS)
+
+    def __len__(self) -> int:
+        return len(self._FIELDS)
+
+
+def _provider_record(dataset: Mapping[str, Any]) -> _ProviderRecord:
+    production = list(ws.production(dataset))[0]
+    return _ProviderRecord(
+        name=dataset["name"],
+        reference_product=dataset["reference product"],
+        location=dataset["location"],
+        unit=dataset["unit"],
+        production_volume=production.get("production volume", 0),
+    )
+
 
 _INVENTORY_ATOMIC_TYPES = frozenset(
     (
@@ -652,17 +703,7 @@ class BaseTransformation:
         idx = defaultdict(list)
         for ds in self.database:
             key = (copy.deepcopy(ds["name"]), copy.deepcopy(ds["reference product"]))
-            idx[key].append(
-                {
-                    "name": ds["name"],
-                    "reference product": ds["reference product"],
-                    "location": ds["location"],
-                    "unit": ds["unit"],
-                    "production volume": list(ws.production(ds))[0].get(
-                        "production volume", 0
-                    ),
-                }
-            )
+            idx[key].append(_provider_record(ds))
         return idx
 
     def add_to_index(self, ds: [dict, list, ValuesView]):
@@ -675,17 +716,7 @@ class BaseTransformation:
         provider_semantics = self._get_provider_semantic_index()
         for d in ds:
             key = (copy.deepcopy(d["name"]), copy.deepcopy(d["reference product"]))
-            self.index[key].append(
-                {
-                    "name": d["name"],
-                    "reference product": d["reference product"],
-                    "location": d["location"],
-                    "unit": d["unit"],
-                    "production volume": list(ws.production(d))[0].get(
-                        "production volume", 0
-                    ),
-                }
-            )
+            self.index[key].append(_provider_record(d))
             semantic_key = key[0], key[1], d["location"]
             provider_semantics[semantic_key] = (
                 provider_semantics.get(semantic_key, 0) + 1

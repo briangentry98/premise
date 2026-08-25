@@ -1,4 +1,5 @@
 from collections import defaultdict
+from collections.abc import Mapping
 from contextlib import contextmanager
 from types import SimpleNamespace
 
@@ -197,6 +198,46 @@ def test_provider_groups_preserve_order_and_invalidate_after_index_mutation():
     assert transformation._get_provider_semantic_index() is added_semantics
     assert (key[0], key[1], "CH") not in added_semantics
     assert not transformation.is_in_index({**exchange, "location": "CH"})
+
+
+def test_provider_index_records_are_compact_immutable_mappings():
+    production_volume = np.float64(2.5)
+    dataset = {
+        "name": "market for fuel",
+        "reference product": "fuel",
+        "location": "GLO",
+        "unit": "kilogram",
+        "exchanges": [
+            {
+                "name": "market for fuel",
+                "product": "fuel",
+                "location": "GLO",
+                "unit": "kilogram",
+                "type": "production",
+                "amount": 1.0,
+                "production volume": production_volume,
+            }
+        ],
+    }
+    transformation = object.__new__(BaseTransformation)
+    transformation.database = [dataset]
+
+    record = transformation.create_index()[("market for fuel", "fuel")][0]
+
+    assert isinstance(record, Mapping)
+    assert not isinstance(record, dict)
+    assert dict(record) == {
+        "name": "market for fuel",
+        "reference product": "fuel",
+        "location": "GLO",
+        "unit": "kilogram",
+        "production volume": production_volume,
+    }
+    assert record.get("location") == "GLO"
+    assert record.get("missing") is None
+    assert record["production volume"] is production_volume
+    with pytest.raises((AttributeError, TypeError)):
+        record.location = "CH"
 
 
 def test_find_new_exchange_entries_accepts_preaggregated_amount(monkeypatch):
