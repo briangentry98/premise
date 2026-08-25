@@ -4,10 +4,12 @@ Various utils functions.
 
 import json
 import hashlib
+import math
 import os
 import pickle
 import sys
 import uuid
+from collections.abc import MutableMapping
 from datetime import datetime
 from functools import lru_cache
 from numbers import Number
@@ -19,7 +21,6 @@ import xarray as xr
 import yaml
 from country_converter import CountryConverter
 from prettytable import PrettyTable
-from wurst import rescale_exchange
 from wurst.searching import biosphere, equals, get_many, technosphere
 import numpy as np
 
@@ -37,6 +38,46 @@ FUELS_PROPERTIES = VARIABLES_DIR / "fuels.yaml"
 EFFICIENCY_RATIO_SOLAR_PV = DATA_DIR / "renewables" / "efficiency_solar_PV.csv"
 CACHE_MANIFEST_SUFFIX = ".manifest.json"
 CACHE_SCHEMA_VERSION = 3
+
+
+def rescale_exchange(
+    exchange: MutableMapping[str, Any],
+    value: Number,
+    remove_uncertainty: bool = True,
+) -> MutableMapping[str, Any]:
+    """Rescale a dictionary-compatible exchange and its uncertainty fields.
+
+    This preserves Wurst's numerical behavior while accepting compact
+    copy-on-write exchange mappings in addition to concrete dictionaries.
+    """
+
+    assert isinstance(exchange, MutableMapping), "Must pass exchange mapping"
+    assert isinstance(value, Number), "Constant factor ``value`` must be a number"
+
+    exchange["amount"] *= value
+
+    if not remove_uncertainty and "uncertainty type" in exchange:
+        uncertainty_type = exchange["uncertainty type"]
+        if uncertainty_type in {1, 2, 3, 4, 5}:
+            if "loc" in exchange and uncertainty_type == 2:
+                exchange["loc"] += math.log(value)
+            elif "loc" in exchange:
+                exchange["loc"] *= value
+
+            if "scale" in exchange and uncertainty_type != 2:
+                exchange["scale"] *= abs(value)
+
+            for bound in ("minimum", "maximum"):
+                if bound in exchange:
+                    exchange[bound] *= value
+    elif remove_uncertainty:
+        exchange["uncertainty type"] = 0
+        exchange["loc"] = exchange["amount"]
+        for field in ("scale", "minimum", "maximum"):
+            if field in exchange:
+                del exchange[field]
+
+    return exchange
 
 
 def rescale_exchanges(

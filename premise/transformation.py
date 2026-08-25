@@ -24,7 +24,7 @@ import xarray as xr
 import yaml
 from _operator import itemgetter
 from constructive_geometries import resolved_row
-from wurst import reference_product, rescale_exchange
+from wurst import reference_product
 from wurst import searching as ws
 from wurst import transformations as wt
 from xarray import DataArray
@@ -33,7 +33,7 @@ from .activity_maps import InventorySet
 from .data_collection import IAMDataCollection
 from .filesystem_constants import DATA_DIR
 from .geomap import Geomap
-from .utils import get_fuel_properties
+from .utils import get_fuel_properties, rescale_exchange
 
 LOG_CONFIG = DATA_DIR / "utils" / "logging" / "logconfig.yaml"
 # directory for log files

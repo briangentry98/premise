@@ -13,7 +13,6 @@ from collections import defaultdict
 from functools import lru_cache
 
 import yaml
-from wurst import rescale_exchange
 
 from .export import biosphere_flows_dictionary
 from .filesystem_constants import VARIABLES_DIR
@@ -36,6 +35,7 @@ from .transformation import (
 from .utils import (
     get_efficiency_solar_photovoltaics,
     get_water_consumption_factors,
+    rescale_exchange,
     rescale_exchanges,
 )
 from .validation import ElectricityValidation

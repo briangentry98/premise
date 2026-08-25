@@ -10,7 +10,6 @@ from functools import lru_cache
 from typing import Union
 
 import numpy as np
-import wurst
 import xarray as xr
 import yaml
 from numpy import ndarray
@@ -24,6 +23,7 @@ from .inventory_store import (
     get_scenario_inventory,
     replace_scenario_inventory,
 )
+from .utils import rescale_exchange
 from .transformation import (
     BaseTransformation,
     IAMDataCollection,
@@ -432,9 +432,7 @@ class Emissions(BaseTransformation):
 
             if 1 > scaling_factor > 0:
                 if gains_pollutant not in dataset.get("log parameters", {}):
-                    wurst.rescale_exchange(
-                        exc, scaling_factor, remove_uncertainty=False
-                    )
+                    rescale_exchange(exc, scaling_factor, remove_uncertainty=False)
 
                     logp = dataset.setdefault("log parameters", {})
                     if "GAINS sector" not in logp:

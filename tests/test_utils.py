@@ -1,14 +1,58 @@
 import json
 import pickle
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import call, patch
+
+import pytest
+from wurst import rescale_exchange as wurst_rescale_exchange
 
 from premise import __version__
 from premise.export import exc_codes, fetch_exchange_code
 from premise.geomap import Geomap
+from premise.inventory_store import CompactInventoryStore, InventoryStore
 from premise.utils import *
 from premise.fuels.utils import get_crops_properties
 import premise.utils as utils_module
+
+
+@pytest.mark.parametrize("remove_uncertainty", [False, True])
+def test_rescale_exchanges_accepts_compact_exchange_mappings(
+    tmp_path, remove_uncertainty
+):
+    exchange = {
+        "name": "input",
+        "product": "product",
+        "location": "GLO",
+        "unit": "kilogram",
+        "type": "technosphere",
+        "amount": 2.0,
+        "uncertainty type": 3,
+        "loc": 2.0,
+        "scale": 0.4,
+        "minimum": 1.0,
+        "maximum": 3.0,
+    }
+    data = [
+        {
+            "name": "consumer",
+            "reference product": "service",
+            "location": "GLO",
+            "unit": "unit",
+            "exchanges": [deepcopy(exchange)],
+        }
+    ]
+    checkpoint = CompactInventoryStore(data).checkpoint(
+        tmp_path / "rescale.inventory-store"
+    )
+    activity = InventoryStore.open(checkpoint)._checkout_materialized()[0]
+    compact_exchange = activity["exchanges"][0]
+    expected = deepcopy(exchange)
+    wurst_rescale_exchange(expected, 2.5, remove_uncertainty)
+
+    rescale_exchanges(activity, 2.5, remove_uncertainty=remove_uncertainty)
+
+    assert compact_exchange.copy() == expected
 
 
 def _write_cache_manifest(cache_ref, *shard_files):

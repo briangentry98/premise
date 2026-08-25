@@ -35,7 +35,12 @@ from .transformation import (
     find_fuel_efficiency,
     get_shares_from_production_volume,
 )
-from .utils import HiddenPrints, get_fuel_properties, rescale_exchanges
+from .utils import (
+    HiddenPrints,
+    get_fuel_properties,
+    rescale_exchange,
+    rescale_exchanges,
+)
 
 LOG_CONFIG = DATA_DIR / "utils" / "logging" / "logconfig.yaml"
 
@@ -344,14 +349,14 @@ def adjust_efficiency(dataset: dict, fuels_specs: dict, fuel_map_reverse: dict) 
                                 dataset,
                                 *filters,
                             ):
-                                wurst.rescale_exchange(
+                                rescale_exchange(
                                     exc, scaling_factor, remove_uncertainty=False
                                 )
                         else:
                             for exc in ws.technosphere(
                                 dataset,
                             ):
-                                wurst.rescale_exchange(
+                                rescale_exchange(
                                     exc, scaling_factor, remove_uncertainty=False
                                 )
                     else:
@@ -366,14 +371,14 @@ def adjust_efficiency(dataset: dict, fuels_specs: dict, fuel_map_reverse: dict) 
                                 dataset,
                                 *filters,
                             ):
-                                wurst.rescale_exchange(
+                                rescale_exchange(
                                     exc, scaling_factor, remove_uncertainty=False
                                 )
                         else:
                             for exc in ws.biosphere(
                                 dataset,
                             ):
-                                wurst.rescale_exchange(
+                                rescale_exchange(
                                     exc, scaling_factor, remove_uncertainty=False
                                 )
     return dataset
@@ -1112,9 +1117,7 @@ class ExternalScenario(BaseTransformation):
                             fltr.append(wurst.contains(k, v))
 
                     for exc in ws.technosphere(datatset, *(fltr or [])):
-                        wurst.rescale_exchange(
-                            exc, scaling_factor, remove_uncertainty=False
-                        )
+                        rescale_exchange(exc, scaling_factor, remove_uncertainty=False)
 
                 if "biosphere" in ineff["includes"]:
                     fltr = []
@@ -1123,9 +1126,7 @@ class ExternalScenario(BaseTransformation):
                             fltr.append(wurst.contains(k, v))
 
                     for exc in ws.biosphere(datatset, *(fltr or [])):
-                        wurst.rescale_exchange(
-                            exc, scaling_factor, remove_uncertainty=False
-                        )
+                        rescale_exchange(exc, scaling_factor, remove_uncertainty=False)
         return datatset
 
     def get_region_for_non_null_production_volume(self, i, variables):
