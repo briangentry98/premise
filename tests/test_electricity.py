@@ -2,12 +2,14 @@
 import math
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import xarray as xr
 
 from premise.data_collection import IAMDataCollection
+import premise.electricity as electricity_module
 from premise.electricity import Electricity, _CoalPowerPlantData
 from premise.filesystem_constants import DATA_DIR
 
@@ -46,6 +48,62 @@ def test_coal_power_plant_data_caches_selections_and_emission_factors():
     assert coal_data.emission_factor("CH", "Anthracite coal", False, "SO2") == 2e-5
     assert coal_data.emission_factor("CH", "Anthracite coal", False, "SO2") == 2e-5
     assert counting_data.selections == 3
+
+
+def test_electricity_efficiency_reuses_technology_region_change(monkeypatch):
+    efficiencies = xr.DataArray(
+        [[[1.1]]],
+        dims=("region", "variables", "year"),
+        coords={"region": ["World"], "variables": ["Coal PC"], "year": [2050]},
+    )
+    datasets = [
+        {
+            "name": f"coal power plant {index}",
+            "reference product": "electricity",
+            "location": "GLO",
+            "unit": "kilowatt hour",
+            "exchanges": [],
+        }
+        for index in range(2)
+    ]
+    electricity = Electricity.__new__(Electricity)
+    electricity.iam_data = SimpleNamespace(
+        electricity_technology_efficiencies=efficiencies,
+        electricity_mix=efficiencies,
+    )
+    electricity.powerplant_map = {"Coal PC": datasets}
+    electricity.powerplant_fuels_map = {"Coal PC": []}
+    electricity.get_iam_mapping = lambda **kwargs: {"Coal PC": {"fuel filters": []}}
+    electricity.is_in_index = lambda dataset: True
+    electricity.geo = SimpleNamespace(
+        ecoinvent_to_iam_location=lambda location: "World"
+    )
+    electricity.use_absolute_efficiency = False
+    electricity.fuels_specs = {}
+    electricity.fuel_map_reverse = {}
+    electricity.powerplant_min_efficiency = {}
+    electricity.powerplant_max_efficiency = {}
+    electricity.update_ecoinvent_efficiency_parameter = lambda *args: None
+    electricity.write_log = lambda **kwargs: None
+    calls = []
+
+    def efficiency_change(**kwargs):
+        calls.append((kwargs["variable"], kwargs["location"]))
+        return 1.1
+
+    electricity.find_iam_efficiency_change = efficiency_change
+    monkeypatch.setattr(
+        electricity_module, "find_fuel_efficiency", lambda **kwargs: 0.5
+    )
+    monkeypatch.setattr(electricity_module, "rescale_exchanges", lambda *args: None)
+
+    electricity.update_electricity_efficiency()
+
+    assert calls == [("Coal PC", "World")]
+    assert all(
+        dataset["log parameters"]["new efficiency"] == pytest.approx(0.55)
+        for dataset in datasets
+    )
 
 
 def get_db():

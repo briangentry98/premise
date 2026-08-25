@@ -209,6 +209,16 @@ seconds, inner filtering from 0.60 to 0.44 seconds, and the sector from 5.36 to
 5.04 seconds. Indexed queries increased by the expected 634 without adding a
 fallback, and strict canonical output remained exact.
 
+Electricity efficiency updating now caches each IAM scalar by technology and
+IAM region for the duration of one update. Datasets sharing that pair reuse the
+same value while the general DataArray helper remains uncached for callers that
+may mutate their input. IAM efficiency selections fell from 1,280 to 407, their
+cost from 0.26 to 0.08 seconds, and the profiled efficiency update from 0.77 to
+0.57 seconds. The unprofiled electricity phase fell from 2.27 to 2.14 seconds.
+Unrelated sectors were slower in that single run, putting end-to-end time at
+46.62 rather than 45.25 seconds, so the documented headline remains unchanged.
+Strict canonical output remained exact.
+
 The seed-zero canonical hash is
 `39efcf273da6b52e6c6bdfce8a6546a9a0819a054340fee9062ac2a7fddf808c`.
 Compact builds refuse an unfixed hash seed in the benchmark harness so an

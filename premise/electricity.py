@@ -1759,6 +1759,17 @@ class Electricity(BaseTransformation):
             fuels_map=self.powerplant_fuels_map,
             technologies=list(set(eff_labels).intersection(all_techs)),
         )
+        efficiency_change_cache = {}
+
+        def get_efficiency_change(technology, iam_location):
+            key = technology, iam_location
+            if key not in efficiency_change_cache:
+                efficiency_change_cache[key] = self.find_iam_efficiency_change(
+                    data=self.iam_data.electricity_technology_efficiencies,
+                    variable=technology,
+                    location=iam_location,
+                )
+            return efficiency_change_cache[key]
 
         for technology in technologies_map:
             dict_technology = technologies_map[technology]
@@ -1777,11 +1788,9 @@ class Electricity(BaseTransformation):
                     fuel_map_reverse=self.fuel_map_reverse,
                 )
                 new_efficiency = 0
+                iam_location = self.geo.ecoinvent_to_iam_location(dataset["location"])
 
                 if not self.use_absolute_efficiency:
-                    iam_location = self.geo.ecoinvent_to_iam_location(
-                        dataset["location"]
-                    )
                     if (
                         iam_location
                         in self.iam_data.electricity_technology_efficiencies.coords[
@@ -1789,10 +1798,8 @@ class Electricity(BaseTransformation):
                         ].values
                     ):
                         # Find relative efficiency change indicated by the IAM
-                        scaling_factor = 1 / self.find_iam_efficiency_change(
-                            data=self.iam_data.electricity_technology_efficiencies,
-                            variable=technology,
-                            location=iam_location,
+                        scaling_factor = 1 / get_efficiency_change(
+                            technology, iam_location
                         )
 
                         new_efficiency = float(
@@ -1807,13 +1814,7 @@ class Electricity(BaseTransformation):
                     else:
                         scaling_factor = 1
                 else:
-                    new_efficiency = self.find_iam_efficiency_change(
-                        data=self.iam_data.electricity_technology_efficiencies,
-                        variable=technology,
-                        location=self.geo.ecoinvent_to_iam_location(
-                            dataset["location"]
-                        ),
-                    )
+                    new_efficiency = get_efficiency_change(technology, iam_location)
 
                     # if ei_eff is different from 1 and if the new efficiency
                     # is not NaN or zero, we can rescale the exchanges
