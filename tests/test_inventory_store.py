@@ -508,7 +508,7 @@ def test_new_database_runtime_materialization_is_not_attached_to_scenario(invent
     assert obj.materialize_inventory()[0]["location"] == "DE"
 
 
-def test_new_database_compact_final_scenario_checks_out_reloadable_source(inventory):
+def test_new_database_compact_scenario_checks_out_reloadable_source(inventory):
     obj = object.__new__(NewDatabase)
     obj._inventory_api_active = True
     obj.inventory_backend = "compact"
@@ -523,6 +523,29 @@ def test_new_database_compact_final_scenario_checks_out_reloadable_source(invent
     assert runtime["_inventory_working_copy"] == inventory
     assert obj._source_inventory_store is None
     assert "_inventory_store" not in obj.scenarios[0]
+
+
+def test_compact_scenarios_reload_source_instead_of_deep_copying_it(inventory):
+    obj = object.__new__(NewDatabase)
+    obj._inventory_api_active = True
+    obj.inventory_backend = "compact"
+    obj._source_inventory_store = CompactInventoryStore(inventory)
+    obj.scenarios = [
+        {"model": "image", "pathway": "SSP2-Base", "year": year}
+        for year in (2030, 2050)
+    ]
+    obj.database_cache_filepath = "source-cache"
+    obj.inventories_cache_filepath = "inventory-cache"
+    obj.additional_inventories = None
+    obj._load_original_database = lambda: copy.deepcopy(inventory)
+
+    first = obj._load_scenario_database_for_update(obj.scenarios[0], 0)
+    first["_inventory_working_copy"][0]["location"] = "DE"
+    second = obj._load_scenario_database_for_update(obj.scenarios[1], 1)
+
+    assert first["_inventory_working_copy"][0]["location"] == "DE"
+    assert second["_inventory_working_copy"][0]["location"] == "CH"
+    assert obj._source_inventory_store is None
 
 
 @pytest.mark.parametrize("persist", [False, True])

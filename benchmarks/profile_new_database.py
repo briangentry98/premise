@@ -256,6 +256,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pathway", default="SSP2-M")
     parser.add_argument("--year", type=int, default=2050)
     parser.add_argument(
+        "--scenario",
+        action="append",
+        nargs=3,
+        metavar=("MODEL", "PATHWAY", "YEAR"),
+        help="Repeat to benchmark multiple scenarios sharing one source build.",
+    )
+    parser.add_argument(
         "--inventory-backend", choices=("compact", "legacy"), default="compact"
     )
     parser.add_argument(
@@ -327,6 +334,12 @@ def main() -> None:
     sampler.start()
     get_wurst_query_diagnostics(reset=True)
     started = time.perf_counter()
+    scenario_specs = args.scenario or [(args.model, args.pathway, args.year)]
+    scenario_configuration = [
+        {"model": model, "pathway": pathway, "year": int(year)}
+        for model, pathway, year in scenario_specs
+    ]
+    scenarios = [scenario.copy() for scenario in scenario_configuration]
 
     if profiler is not None and args.profile_sector is None:
         profiler.enable()
@@ -335,13 +348,7 @@ def main() -> None:
         _trace_inventory_store_boundaries(recorder)
         with recorder.phase("new-database-constructor"):
             ndb = NewDatabase(
-                scenarios=[
-                    {
-                        "model": args.model,
-                        "pathway": args.pathway,
-                        "year": args.year,
-                    }
-                ],
+                scenarios=scenarios,
                 source_db=args.source_db,
                 source_version=args.source_version,
                 source_type="brightway",
@@ -381,6 +388,7 @@ def main() -> None:
             "model": args.model,
             "pathway": args.pathway,
             "year": args.year,
+            "scenarios": scenario_configuration,
             "inventory_backend": args.inventory_backend,
             "sectors": args.sectors or "all",
             "keep_imports_uncertainty": args.keep_imports_uncertainty,

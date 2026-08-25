@@ -1144,6 +1144,7 @@ class NewDatabase:
                     self._load_original_database(),
                     backend=getattr(self, "inventory_backend", "legacy"),
                     scenario_identity="source",
+                    take_ownership=True,
                 )
                 self._source_inventory_store = source_store
             store = source_store.fork(self._scenario_identity(scenario))
@@ -1218,13 +1219,10 @@ class NewDatabase:
         runtime_scenario.pop("_inventory_store", None)
         runtime_scenario.pop("_inventory_checkpoint", None)
         store = self._ensure_scenario_store(scenario)
-        can_release_source = (
-            scenario_position == len(self.scenarios) - 1
-            and self._can_reload_original_database()
-        )
+        can_transfer_source = self._can_reload_original_database()
         has_mapping = bool(runtime_scenario.get("mapping"))
         activity_ids = tuple(store.iter_activity_ids()) if has_mapping else ()
-        if isinstance(store, CompactInventoryStore) and can_release_source:
+        if isinstance(store, CompactInventoryStore) and can_transfer_source:
             working_copy = store._checkout_materialized(discard_shared_state=True)
         else:
             working_copy = IndexedInventoryList(
@@ -1236,11 +1234,11 @@ class NewDatabase:
                 runtime_scenario["mapping"],
                 dict(zip(activity_ids, working_copy)),
             )
-        # Once the final scenario has its private working graph, a reloadable
-        # source store only inflates the high-water mark. Exporters can restore
-        # the source from the versioned source/inventory caches when needed.
+        # A reloadable source store only inflates the high-water mark after its
+        # graph has been transferred to a scenario. The next scenario can take
+        # ownership of a fresh graph from the versioned source/inventory caches.
         scenario.pop("_inventory_store", None)
-        if can_release_source:
+        if can_transfer_source:
             self._source_inventory_store = None
             del store
             clear_runtime_caches()
