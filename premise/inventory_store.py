@@ -63,6 +63,7 @@ _EXCHANGE_STRING_FIELDS = (
     "unit",
     "type",
 )
+_EXCHANGE_STRING_FIELD_SET = frozenset(_EXCHANGE_STRING_FIELDS)
 _EXCHANGE_NUMERIC_FIELDS = ("amount",)
 _EXCHANGE_BOOLEAN_FIELDS = ()
 _COMPACT_EXCHANGE_FIELDS = (
@@ -1218,17 +1219,38 @@ class _ColumnarExchangeMapping(MutableMapping[str, Any]):
                 yield self._changes[position], self._changes[position + 1]
 
     def _base_value(self, key: str) -> Any:
-        try:
-            return self._storage.common_value(self._row, key)
-        except KeyError:
-            metadata = self._storage.metadata(self._row)
-            if key not in metadata:
-                raise KeyError(key)
-            value = metadata[key]
-            if isinstance(value, (dict, list, set)):
-                value = copy.deepcopy(value)
-                self._set_change(key, value)
-            return value
+        storage = self._storage
+        row = self._row
+        if key in _EXCHANGE_STRING_FIELD_SET:
+            string_id = int(storage._string_columns[key][row])
+            if string_id >= 0:
+                return storage._string_values[string_id]
+        elif key == "amount":
+            kind = int(storage._numeric_kinds["amount"][row])
+            if kind != _NUMERIC_MISSING:
+                return _decode_numeric_column(
+                    kind,
+                    storage._numeric_floats["amount"][row],
+                    storage._numeric_ints["amount"][row],
+                )
+        elif key == "categories":
+            first = int(storage._string_columns["categories__0"][row])
+            second = int(storage._string_columns["categories__1"][row])
+            if first >= 0 and second >= 0:
+                return storage._string_values[first], storage._string_values[second]
+        elif key in _EXCHANGE_BOOLEAN_FIELDS:
+            boolean = int(storage._boolean_columns[key][row])
+            if boolean >= 0:
+                return bool(boolean)
+
+        metadata = storage.metadata(row)
+        if key not in metadata:
+            raise KeyError(key)
+        value = metadata[key]
+        if isinstance(value, (dict, list, set)):
+            value = copy.deepcopy(value)
+            self._set_change(key, value)
+        return value
 
     def _checkpoint_value(self, key: str, metadata: Mapping[str, Any]) -> Any:
         """Return one effective value without generic mapping iteration."""
@@ -1302,6 +1324,8 @@ class _ColumnarExchangeMapping(MutableMapping[str, Any]):
         return metadata
 
     def __getitem__(self, key: str) -> Any:
+        if self._changes is None:
+            return self._base_value(key)
         value = self._changed_value(key)
         if value is not _COLUMNAR_MISSING:
             if value is _COLUMNAR_DELETED:
@@ -1339,7 +1363,27 @@ class _ColumnarExchangeMapping(MutableMapping[str, Any]):
         return sum(1 for _ in self)
 
     def copy(self) -> dict[str, Any]:
-        return dict(self.items())
+        payload = {
+            key: self._storage.common_value(self._row, key)
+            for key in self._storage.common_keys(self._row)
+        }
+        for key, value in self._storage.metadata(self._row).items():
+            changed = self._changed_value(key)
+            if changed is _COLUMNAR_DELETED:
+                continue
+            if changed is not _COLUMNAR_MISSING:
+                payload[key] = changed
+                continue
+            if isinstance(value, (dict, list, set)):
+                value = copy.deepcopy(value)
+                self._set_change(key, value)
+            payload[key] = value
+        for key, value in self._iter_changes():
+            if value is _COLUMNAR_DELETED:
+                payload.pop(key, None)
+            else:
+                payload[key] = value
+        return payload
 
     def __copy__(self) -> dict[str, Any]:
         return self.copy()
