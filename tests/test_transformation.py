@@ -319,6 +319,48 @@ def test_provider_record_preserves_missing_production_error():
         transformation_module._provider_record(dataset)
 
 
+def test_fetch_proxies_extracts_regional_production_volumes_once():
+    transformation = object.__new__(BaseTransformation)
+    transformation.database = []
+    transformation.is_in_index = lambda dataset, location: False
+    transformation.relink_technosphere_exchanges = lambda dataset: dataset
+    dataset = {
+        "name": "fuel production",
+        "reference product": "fuel",
+        "location": "GLO",
+        "unit": "kilogram",
+        "exchanges": [
+            {
+                "name": "fuel production",
+                "product": "fuel",
+                "location": "GLO",
+                "unit": "kilogram",
+                "type": "production",
+                "amount": 1.0,
+            }
+        ],
+    }
+    production_volumes = xr.DataArray(
+        [[2.0, 3.0]],
+        dims=("year", "region"),
+        coords={"year": [2050], "region": ["R1", "R2"]},
+    )
+
+    proxies = transformation.fetch_proxies(
+        datasets=[dataset],
+        production_volumes=production_volumes,
+        geo_mapping={"R2": dataset, "World": dataset},
+        unlist=False,
+    )
+
+    regional_production = next(transformation_module.ws.production(proxies["R2"]))
+    world_production = next(transformation_module.ws.production(proxies["World"]))
+    assert regional_production["location"] == "R2"
+    assert regional_production["production volume"] == 3.0
+    assert world_production["location"] == "World"
+    assert world_production["production volume"] == 5.0
+
+
 def test_find_new_exchange_entries_accepts_preaggregated_amount(monkeypatch):
     transformation = object.__new__(BaseTransformation)
     transformation.cache = {}

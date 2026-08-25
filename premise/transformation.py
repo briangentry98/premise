@@ -1690,6 +1690,22 @@ class BaseTransformation:
             datasets=datasets, regions=regions
         )
 
+        production_volume_by_region = {}
+        world_production_volume = None
+        if production_volumes is not None:
+            production_regions = production_volumes.region.values
+            region_axis = production_volumes.get_axis_num("region")
+            production_values = np.moveaxis(
+                production_volumes.values, region_axis, 0
+            ).reshape(len(production_regions), -1)
+            production_volume_by_region = {
+                region: production_values[position].item(0)
+                for position, region in enumerate(production_regions)
+            }
+            world_production_volume = production_volumes.sum(dim="region").values.item(
+                0
+            )
+
         d_act = {}
         for region, dataset in d_iam_to_eco.items():
 
@@ -1720,18 +1736,14 @@ class BaseTransformation:
                 prod["location"] = region
                 if production_volumes is not None:
                     # Add `production volume` field
-                    if region in production_volumes.region.values:
+                    if region in production_volume_by_region:
                         prod["production volume"] = float(
-                            production_volumes.sel(region=prod["location"]).values.item(
-                                0
-                            )
+                            production_volume_by_region[region]
                         )
                     else:
                         if region == "World":
                             # If the region is "World", use the total production volume
-                            prod["production volume"] = float(
-                                production_volumes.sum(dim="region").values.item(0)
-                            )
+                            prod["production volume"] = float(world_production_volume)
                         else:
                             raise KeyError(
                                 f"Region {region} not found in production volumes data."

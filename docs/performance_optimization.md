@@ -293,6 +293,16 @@ fell by 55.5 MB despite a 13.3 MB higher constructor baseline, reducing
 constructor-to-peak growth by 68.9 MB. Total wall time was effectively
 unchanged. The exact canonical hash and inventory counts remained unchanged.
 
+Proxy creation now extracts an already-selected production-volume slice into a
+region-keyed mapping once per proxy group. It preserves xarray's existing world
+sum and `.item(0)` scalar semantics, including arrays whose `region` dimension
+is not leading. In the matched compact final-energy profile, scalar xarray
+selections fell from 1,028 to 40, proxy creation from 0.386 to 0.221 seconds,
+and the sector from 1.306 to 1.011 seconds. Peak RSS was effectively unchanged;
+the faster all-sector result included unrelated timing variation and is not
+used as a headline. The exact canonical hash and inventory counts remained
+unchanged.
+
 The seed-zero canonical hash is
 `39efcf273da6b52e6c6bdfce8a6546a9a0819a054340fee9062ac2a7fddf808c`.
 Compact builds refuse an unfixed hash seed in the benchmark harness so an
