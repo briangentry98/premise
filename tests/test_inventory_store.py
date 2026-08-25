@@ -420,6 +420,29 @@ def test_columnar_checkpoint_checkout_and_proxy_clone_are_copy_on_write(
     assert restored_store.materialize()[0] == expected
 
 
+def test_columnar_metadata_row_index_preserves_activity_ordinals(inventory, tmp_path):
+    inventory[0]["exchanges"].append(
+        {
+            "name": "Carbon dioxide, fossil",
+            "unit": "kilogram",
+            "type": "biosphere",
+            "amount": 0.5,
+        }
+    )
+    checkpoint = CompactInventoryStore(inventory).checkpoint(
+        tmp_path / "source.inventory-store"
+    )
+    storage = InventoryStore.open(checkpoint)._state.exchanges._storage
+
+    assert storage._activity_and_ordinal(0) == (0, 0)
+    assert storage._activity_and_ordinal(1) == (0, 1)
+    assert storage._activity_and_ordinal(2) == (2, 0)
+    with pytest.raises(KeyError):
+        storage._activity_and_ordinal(-1)
+    with pytest.raises(KeyError):
+        storage._activity_and_ordinal(storage.row_count)
+
+
 def test_columnar_activity_deepcopy_keeps_sidecar_lazy_and_isolated(
     inventory, tmp_path
 ):

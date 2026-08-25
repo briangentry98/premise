@@ -757,6 +757,13 @@ class _ColumnarExchangeStorage:
         self.activity_ids = activity_ids
         self.exchange_starts = exchange_starts
         self.exchange_ends = exchange_starts + exchange_counts
+        self._activity_position_by_row = np.repeat(
+            np.arange(len(activity_ids), dtype=np.int32), exchange_counts
+        )
+        if len(self._activity_position_by_row) != self.row_count:
+            raise InventoryStoreCorruptionError(
+                "Activity exchange counts do not match the checkpoint manifest."
+            )
         self.activity_offsets = dict(activity_offsets)
         self.exchange_metadata_offsets = dict(exchange_metadata_offsets)
         self._activity_cache: OrderedDict[int, dict[str, Any]] = OrderedDict()
@@ -957,9 +964,9 @@ class _ColumnarExchangeStorage:
             return payload
 
     def _activity_and_ordinal(self, row: int) -> tuple[ActivityId, int]:
-        position = int(np.searchsorted(self.exchange_ends, row, side="right"))
-        if position >= len(self.activity_ids):
+        if not 0 <= row < self.row_count:
             raise KeyError(row)
+        position = int(self._activity_position_by_row[row])
         return (
             int(self.activity_ids[position]),
             row - int(self.exchange_starts[position]),
