@@ -303,6 +303,15 @@ the faster all-sector result included unrelated timing variation and is not
 used as a headline. The exact canonical hash and inventory counts remained
 unchanged.
 
+Geography configuration now caches parsed constants, topology JSON, and
+additional-mapping YAML while deep-copying each result into a new `Geomap`.
+Sector instances therefore remain mutable and isolated, but no longer reparse
+identical source files. In the matched compact final-energy profile, `Geomap`
+construction fell from 0.144 to 0.042 seconds and the sector from 1.011 to
+0.928 seconds. Overall wall time was effectively unchanged and sampled RSS was
+8 MB higher in that run, so no global runtime or memory claim is made. The
+exact canonical hash and inventory counts remained unchanged.
+
 The seed-zero canonical hash is
 `39efcf273da6b52e6c6bdfce8a6546a9a0819a054340fee9062ac2a7fddf808c`.
 Compact builds refuse an unfixed hash seed in the benchmark harness so an
