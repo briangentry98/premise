@@ -8,6 +8,7 @@ import math
 import pickle
 import shutil
 
+import numpy as np
 from bw2data import Database, databases
 from bw2io.importers.base_lci import LCIImporter
 from tqdm import tqdm
@@ -40,6 +41,11 @@ FAST_STRING_FIELDS = {
     "product",
     "unit",
     "location",
+}
+
+FAST_EXCHANGE_FORBIDDEN_FIELDS = {
+    "biosphere": {"location", "product"},
+    "technosphere": {"categories"},
 }
 
 
@@ -383,14 +389,24 @@ def _normalize_no_uncertainty_exchange(exchange: dict) -> dict:
 
 
 def _prepare_fast_exchange_payload(exchange: dict) -> dict:
+    exchange_type = exchange.get("type")
+    forbidden_fields = FAST_EXCHANGE_FORBIDDEN_FIELDS.get(exchange_type, set())
     compact_exchange = {
-        field: value
+        field: (
+            float(value)
+            if isinstance(value, (np.generic, np.ndarray))
+            else value
+        )
         for field, value in exchange.items()
-        if _keep_fast_export_value(value)
+        if field not in forbidden_fields and _keep_fast_export_value(value)
     }
 
     for field in FAST_EXCHANGE_REQUIRED_FIELDS:
-        if field not in compact_exchange and field in exchange:
+        if (
+            field not in forbidden_fields
+            and field not in compact_exchange
+            and field in exchange
+        ):
             if field in FAST_STRING_FIELDS and exchange[field] is None:
                 compact_exchange[field] = ""
             else:
@@ -506,7 +522,12 @@ def _write_search_index_fast(database_filename: str, data: list, name: str) -> N
     index.close()
 
 
-def _write_processed_database_fast(data: list, name: str) -> None:
+def _write_processed_database_fast(
+    data: list,
+    name: str,
+    *,
+    exchange_payloads_prepared: bool = False,
+) -> None:
     from bw_processing import clean_datapackage_name, create_datapackage
     from fsspec.implementations.zip import ZipFileSystem
 
@@ -555,6 +576,11 @@ def _write_processed_database_fast(data: list, name: str) -> None:
     activity_ids = {}
     connection = sqlite3_lci_db.db.connection()
     total_datasets = len(data)
+    prepare_exchange_payload = (
+        (lambda exchange: exchange)
+        if exchange_payloads_prepared
+        else _prepare_fast_exchange_payload
+    )
 
     sqlite3_lci_db.db.autocommit = False
     row_progress = _progress(
@@ -591,7 +617,7 @@ def _write_processed_database_fast(data: list, name: str) -> None:
                 exchange_rows.append(
                     (
                         pickle.dumps(
-                            _prepare_fast_exchange_payload(exchange),
+                            prepare_exchange_payload(exchange),
                             protocol=4,
                         ),
                         input_key[1],
@@ -696,7 +722,7 @@ def _write_processed_database_fast(data: list, name: str) -> None:
                 for exchange in dataset.get("exchanges", []):
                     if exchange["type"] not in labels.biosphere_edge_types:
                         continue
-                    prepared_exchange = _prepare_fast_exchange_payload(exchange)
+                    prepared_exchange = prepare_exchange_payload(exchange)
                     input_key = prepared_exchange.get("input")
                     if input_key is None:
                         raise KeyError(
@@ -734,7 +760,7 @@ def _write_processed_database_fast(data: list, name: str) -> None:
                         and edge_type not in positive_edge_types
                     ):
                         continue
-                    prepared_exchange = _prepare_fast_exchange_payload(exchange)
+                    prepared_exchange = prepare_exchange_payload(exchange)
                     input_key = prepared_exchange.get("input")
                     if input_key is None:
                         raise KeyError(
@@ -822,8 +848,16 @@ def write_brightway_database(
     if fast:
         if name in databases:
             _print_database_overwrite(name)
+        exchange_payloads_prepared = not any(
+            getattr(dataset, "_premise_materialize", None) is not None
+            for dataset in data
+        )
         _compact_payload_for_fast_write(data, name)
-        _write_processed_database_fast(data, name)
+        _write_processed_database_fast(
+            data,
+            name,
+            exchange_payloads_prepared=exchange_payloads_prepared,
+        )
         _store_database_metadata(name, metadata)
         _print_database_written(name)
         return

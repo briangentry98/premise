@@ -777,7 +777,8 @@ class BaseDatasetValidator:
                 if value is None:
                     del ds[key]
 
-            ds["exchanges"] = [clean_up(exc) for exc in ds["exchanges"]]
+            if not getattr(self, "_defer_exchange_cleanup", False):
+                ds["exchanges"] = [clean_up(exc) for exc in ds["exchanges"]]
 
     def add_missing_classifications(self):
 
@@ -880,8 +881,15 @@ class BaseDatasetValidator:
             self.correct_fields_format()
         finally:
             self._correct_fields_in_place = False
-        self.check_amount_format()
-        self.reformat_parameters()
+        # ``validate_dataset_structure`` and ``correct_fields_format`` already
+        # normalize exchange amounts.  The fast writer filters exchange fields
+        # and converts remaining NumPy scalars while building its payload, so a
+        # second full mapping scan here would only repeat that work.
+        self._defer_exchange_cleanup = True
+        try:
+            self.reformat_parameters()
+        finally:
+            self._defer_exchange_cleanup = False
         self.add_missing_classifications()
         self.check_uncertainty()
         self._finalize_logs()

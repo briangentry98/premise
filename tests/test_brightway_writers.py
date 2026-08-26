@@ -1,5 +1,7 @@
 from copy import deepcopy
 
+import numpy as np
+
 import premise.brightway2 as brightway2_module
 import premise.brightway25 as brightway25_module
 from premise.inventory_store import CompactInventoryStore, InventoryStore
@@ -69,7 +71,9 @@ def test_write_brightway25_database_fast_prints_completion_message(monkeypatch, 
     monkeypatch.setattr(
         brightway25_module,
         "_write_processed_database_fast",
-        lambda data, name: calls.__setitem__("write", (data, name)),
+        lambda data, name, **kwargs: calls.__setitem__(
+            "write", (data, name, kwargs)
+        ),
     )
 
     data = [{"code": "a", "exchanges": []}]
@@ -84,7 +88,11 @@ def test_write_brightway25_database_fast_prints_completion_message(monkeypatch, 
     assert calls["change_db_name"] == (data, "fast-db")
     assert calls["check_internal"] == 1
     assert calls["compact"] == (data, "fast-db")
-    assert calls["write"] == (data, "fast-db")
+    assert calls["write"] == (
+        data,
+        "fast-db",
+        {"exchange_payloads_prepared": True},
+    )
     assert "Brightway database written: fast-db" in capsys.readouterr().out
 
 
@@ -101,7 +109,7 @@ def test_write_brightway25_database_fast_prints_overwrite_message(monkeypatch, c
     monkeypatch.setattr(
         brightway25_module,
         "_write_processed_database_fast",
-        lambda data, name: None,
+        lambda data, name, **kwargs: None,
     )
 
     brightway25_module.write_brightway_database(
@@ -474,6 +482,88 @@ def test_brightway25_fast_exchange_payload_normalizes_no_uncertainty_loc():
     assert "scale" not in compact_exchange
     assert "minimum" not in compact_exchange
     assert "maximum" not in compact_exchange
+
+
+def test_brightway25_fast_exchange_payload_applies_exchange_schema_cleanup():
+    technosphere = {
+        "name": "supplier",
+        "product": "product",
+        "unit": "kilogram",
+        "location": "CH",
+        "categories": ("unused",),
+        "amount": np.float64(1.0),
+        "type": "technosphere",
+        "input": ("source-db", "act-2"),
+        "output": ("source-db", "act-1"),
+    }
+    biosphere = {
+        "name": "Carbon dioxide, fossil",
+        "product": "unused",
+        "unit": "kilogram",
+        "location": "unused",
+        "categories": ("air", "urban air close to ground"),
+        "amount": np.float64(2.0),
+        "type": "biosphere",
+        "input": ("biosphere3", "flow-1"),
+        "output": ("source-db", "act-1"),
+    }
+
+    compact_technosphere = brightway25_module._prepare_fast_exchange_payload(
+        technosphere
+    )
+    compact_biosphere = brightway25_module._prepare_fast_exchange_payload(biosphere)
+
+    assert "categories" not in compact_technosphere
+    assert compact_technosphere["amount"] == 1.0
+    assert type(compact_technosphere["amount"]) is float
+    assert "product" not in compact_biosphere
+    assert "location" not in compact_biosphere
+    assert compact_biosphere["categories"] == (
+        "air",
+        "urban air close to ground",
+    )
+    assert compact_biosphere["amount"] == 2.0
+    assert type(compact_biosphere["amount"]) is float
+
+
+def test_brightway2_fast_exchange_payload_applies_exchange_schema_cleanup():
+    technosphere = {
+        "name": "supplier",
+        "product": "product",
+        "unit": "kilogram",
+        "location": "CH",
+        "categories": ("unused",),
+        "amount": np.float64(1.0),
+        "type": "technosphere",
+        "input": ("source-db", "act-2"),
+        "output": ("source-db", "act-1"),
+    }
+    biosphere = {
+        "name": "Carbon dioxide, fossil",
+        "product": "unused",
+        "unit": "kilogram",
+        "location": "unused",
+        "categories": ("air", "urban air close to ground"),
+        "amount": np.float64(2.0),
+        "type": "biosphere",
+        "input": ("biosphere3", "flow-1"),
+        "output": ("source-db", "act-1"),
+    }
+
+    compact_technosphere = brightway2_module._prepare_fast_exchange_payload(
+        technosphere
+    )
+    compact_biosphere = brightway2_module._prepare_fast_exchange_payload(biosphere)
+
+    assert "categories" not in compact_technosphere
+    assert type(compact_technosphere["amount"]) is float
+    assert "product" not in compact_biosphere
+    assert "location" not in compact_biosphere
+    assert compact_biosphere["categories"] == (
+        "air",
+        "urban air close to ground",
+    )
+    assert type(compact_biosphere["amount"]) is float
 
 
 def test_brightway2_fast_exchange_payload_normalizes_no_uncertainty_loc():

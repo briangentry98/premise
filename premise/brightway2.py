@@ -6,6 +6,7 @@ from contextlib import contextmanager
 import math
 import pickle
 
+import numpy as np
 from bw2data import databases
 from bw2io.importers.base_lci import LCIImporter
 from wurst.linking import change_db_name, check_internal_linking, link_internal
@@ -37,6 +38,11 @@ FAST_STRING_FIELDS = {
     "product",
     "unit",
     "location",
+}
+
+FAST_EXCHANGE_FORBIDDEN_FIELDS = {
+    "biosphere": {"location", "product"},
+    "technosphere": {"categories"},
 }
 
 PROCESS_NODE_DEFAULT = "process"
@@ -398,14 +404,24 @@ def _normalize_no_uncertainty_exchange(exchange: dict) -> dict:
 
 
 def _prepare_fast_exchange_payload(exchange: dict) -> dict:
+    exchange_type = exchange.get("type")
+    forbidden_fields = FAST_EXCHANGE_FORBIDDEN_FIELDS.get(exchange_type, set())
     compact_exchange = {
-        field: value
+        field: (
+            float(value)
+            if isinstance(value, (np.generic, np.ndarray))
+            else value
+        )
         for field, value in exchange.items()
-        if _keep_fast_export_value(value)
+        if field not in forbidden_fields and _keep_fast_export_value(value)
     }
 
     for field in FAST_EXCHANGE_REQUIRED_FIELDS:
-        if field not in compact_exchange and field in exchange:
+        if (
+            field not in forbidden_fields
+            and field not in compact_exchange
+            and field in exchange
+        ):
             if field in FAST_STRING_FIELDS and exchange[field] is None:
                 compact_exchange[field] = ""
             else:
