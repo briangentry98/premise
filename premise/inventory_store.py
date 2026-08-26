@@ -73,6 +73,22 @@ _SCENARIO_CACHE_COMMON_FIELDS = (
 _SCENARIO_CACHE_STANDARD_SIDECAR_FIELDS = frozenset(
     {"uncertainty type", "loc", "production volume", "categories"}
 )
+_EXCHANGE_HOT_METADATA_FIELDS = (
+    "categories",
+    "reference product",
+    "uncertainty type",
+    "loc",
+    "product",
+    "scale",
+    "negative",
+    "minimum",
+    "maximum",
+    "input",
+)
+_EXCHANGE_HOT_METADATA_BITS = {
+    field_name: 1 << position
+    for position, field_name in enumerate(_EXCHANGE_HOT_METADATA_FIELDS)
+}
 _COMPACT_EXCHANGE_FIELDS = (
     "name",
     "product",
@@ -789,6 +805,7 @@ class _ColumnarExchangeStorage:
         self._metadata_cache: OrderedDict[int, dict[int, dict[str, Any]]] = (
             OrderedDict()
         )
+        self._metadata_hot_field_masks = np.full(self.row_count, -1, dtype=np.int16)
         self._scenario_cache_scanned_metadata_activities: set[int] = set()
         self._scenario_cache_filtered_metadata: dict[int, dict[int, dict[str, Any]]] = (
             {}
@@ -1100,6 +1117,21 @@ class _ColumnarExchangeStorage:
                     metadata = dict(records)
                 else:
                     metadata = {}
+                position = self._activity_position(activity_id)
+                start = int(self.exchange_starts[position])
+                stop = int(self.exchange_ends[position])
+                masks = self._metadata_hot_field_masks
+                masks[start:stop] = 0
+                for ordinal, payload in metadata.items():
+                    row = start + int(ordinal)
+                    if not start <= row < stop:
+                        raise InventoryStoreCorruptionError(
+                            "Exchange metadata ordinal exceeds its activity block."
+                        )
+                    mask = 0
+                    for field_name in payload:
+                        mask |= _EXCHANGE_HOT_METADATA_BITS.get(field_name, 0)
+                    masks[row] = mask
                 self._metadata_cache[activity_id] = metadata
                 if len(self._metadata_cache) > self._CACHE_SIZE:
                     self._metadata_cache.popitem(last=False)
@@ -1116,6 +1148,15 @@ class _ColumnarExchangeStorage:
             self._last_metadata_activity_id = activity_id
             self._last_metadata_group = metadata
         return metadata.get(ordinal, {})
+
+    def hot_metadata_field_is_absent(self, row: int, field_name: str) -> bool:
+        """Return whether a decoded sidecar omits one common optional field."""
+
+        field_bit = _EXCHANGE_HOT_METADATA_BITS.get(field_name)
+        if field_bit is None:
+            return False
+        mask = int(self._metadata_hot_field_masks[row])
+        return mask >= 0 and not mask & field_bit
 
     def _scenario_cache_metadata_for_activity(
         self, activity_id: ActivityId
@@ -1581,6 +1622,10 @@ class _ColumnarExchangeMapping(MutableMapping[str, Any]):
 
         storage = self._storage
         row = self._row
+        if storage.hot_metadata_field_is_absent(row, key):
+            if default is not _COLUMNAR_MISSING:
+                return default
+            raise KeyError(key)
         metadata = storage.metadata(row)
         if key not in metadata:
             if default is not _COLUMNAR_MISSING:
