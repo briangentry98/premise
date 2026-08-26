@@ -1149,15 +1149,6 @@ class _ColumnarExchangeStorage:
             self._last_metadata_group = metadata
         return metadata.get(ordinal, {})
 
-    def hot_metadata_field_is_absent(self, row: int, field_name: str) -> bool:
-        """Return whether a decoded sidecar omits one common optional field."""
-
-        field_bit = _EXCHANGE_HOT_METADATA_BITS.get(field_name)
-        if field_bit is None:
-            return False
-        mask = int(self._metadata_hot_field_masks[row])
-        return mask >= 0 and not mask & field_bit
-
     def _scenario_cache_metadata_for_activity(
         self, activity_id: ActivityId
     ) -> dict[int, dict[str, Any]]:
@@ -1622,7 +1613,13 @@ class _ColumnarExchangeMapping(MutableMapping[str, Any]):
 
         storage = self._storage
         row = self._row
-        if storage.hot_metadata_field_is_absent(row, key):
+        field_bit = _EXCHANGE_HOT_METADATA_BITS.get(key)
+        metadata_mask = int(storage._metadata_hot_field_masks[row])
+        if (
+            field_bit is not None
+            and metadata_mask >= 0
+            and not metadata_mask & field_bit
+        ):
             if default is not _COLUMNAR_MISSING:
                 return default
             raise KeyError(key)
@@ -1958,7 +1955,9 @@ def filter_biosphere_category(
     matches = []
     append = matches.append
     encoded_categories = len(categories) == 2
-    source_masks: dict[_ColumnarExchangeStorage, tuple[np.ndarray, np.ndarray]] = {}
+    source_storage = None
+    match_mask = None
+    decisive_mask = None
     for exchange in exchanges:
         if (
             encoded_categories
@@ -1966,11 +1965,11 @@ def filter_biosphere_category(
             and exchange._changes is None
         ):
             storage = exchange._storage
-            masks = source_masks.get(storage)
-            if masks is None:
-                masks = storage.biosphere_category_masks(categories, unit)
-                source_masks[storage] = masks
-            match_mask, decisive_mask = masks
+            if storage is not source_storage:
+                match_mask, decisive_mask = storage.biosphere_category_masks(
+                    categories, unit
+                )
+                source_storage = storage
             if match_mask[exchange._row]:
                 append(exchange)
                 continue
