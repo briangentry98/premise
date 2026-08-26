@@ -2217,10 +2217,24 @@ class _ColumnarActivityMapping(dict[str, Any]):
             else copy.deepcopy(self._type, memo)
         )
         for key, value in dict.items(self):
+            if key == "exchanges" and type(value) is list:
+                cloned_value = memo.get(id(value))
+                if cloned_value is None:
+                    cloned_value = value.copy()
+                    memo[id(value)] = cloned_value
+                    for position, exchange in enumerate(value):
+                        compact_clone = getattr(exchange, "_premise_clone", None)
+                        cloned_value[position] = (
+                            compact_clone(memo)
+                            if compact_clone is not None
+                            else copy.deepcopy(exchange, memo)
+                        )
+            else:
+                cloned_value = copy.deepcopy(value, memo)
             dict.__setitem__(
                 duplicate,
-                copy.deepcopy(key, memo),
-                copy.deepcopy(value, memo),
+                key if isinstance(key, str) else copy.deepcopy(key, memo),
+                cloned_value,
             )
         return duplicate
 
