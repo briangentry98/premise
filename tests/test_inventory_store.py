@@ -786,6 +786,30 @@ def test_load_database_keeps_compact_store_for_non_consuming_callers(inventory):
     assert type(loaded["database"][0]) is dict
 
 
+def test_checkpoint_backed_scenario_can_be_consumed_repeatedly(inventory, tmp_path):
+    checkpoint = CompactInventoryStore(inventory).checkpoint(
+        tmp_path / "scenario.inventory-store"
+    )
+    scenario = {"_inventory_checkpoint": checkpoint}
+    manifest = (checkpoint / "manifest.json").read_bytes()
+
+    first = utils_module.load_database(
+        scenario,
+        original_database=[],
+        consume_compact=True,
+    )
+    second = utils_module.load_database(
+        scenario,
+        original_database=[],
+        consume_compact=True,
+    )
+
+    assert first["database"] == inventory
+    assert second["database"] == inventory
+    assert scenario == {"_inventory_checkpoint": checkpoint}
+    assert (checkpoint / "manifest.json").read_bytes() == manifest
+
+
 @pytest.mark.parametrize("consume_compact", [False, True])
 def test_load_database_assigns_missing_codes_for_compact_store(
     inventory, consume_compact

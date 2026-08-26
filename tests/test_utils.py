@@ -59,6 +59,23 @@ def test_scenario_exchange_presence_checks_metadata_truth_only_once(monkeypatch)
     assert calls == 2
 
 
+def test_end_of_process_can_preserve_applied_functions_for_repeated_exports():
+    scenario = {
+        "database": [{"name": "temporary export payload"}],
+        "applied functions": ["update_electricity"],
+        "cache": {"temporary": True},
+        "index": {"temporary": True},
+    }
+
+    result = end_of_process(scenario, preserve_applied_functions=True)
+
+    assert result == {
+        "applied functions": ["update_electricity"],
+        "cache": {},
+        "index": {},
+    }
+
+
 @pytest.mark.parametrize("remove_uncertainty", [False, True])
 def test_rescale_exchanges_accepts_compact_exchange_mappings(
     tmp_path, remove_uncertainty

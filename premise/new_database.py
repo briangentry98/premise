@@ -1974,7 +1974,7 @@ class NewDatabase:
             self.generate_change_report()
 
         for scenario in self.scenarios:
-            end_of_process(scenario)
+            end_of_process(scenario, preserve_applied_functions=True)
 
         delete_all_pickles()
 

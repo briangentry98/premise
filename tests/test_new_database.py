@@ -599,7 +599,7 @@ def test_write_superstructure_to_brightway_uses_fast_writer_after_full_preparati
     monkeypatch.setattr(
         new_database_module,
         "end_of_process",
-        lambda scenario: captured["ended"].append(scenario.copy()),
+        lambda scenario, **kwargs: captured["ended"].append((scenario.copy(), kwargs)),
     )
     monkeypatch.setattr(
         new_database_module,
@@ -644,7 +644,9 @@ def test_write_superstructure_to_brightway_uses_fast_writer_after_full_preparati
     assert [
         s["representative_time"] for s in captured["written"]["metadata"]["scenarios"]
     ] == [f"{scenario['year']}-01-01T00:00:00" for scenario in obj.scenarios]
-    assert captured["ended"] == obj.scenarios
+    assert captured["ended"] == [
+        (scenario, {"preserve_applied_functions": True}) for scenario in obj.scenarios
+    ]
     assert captured["pickles_deleted"] == 1
 
 
@@ -786,7 +788,7 @@ def test_write_scenario_array_writes_database_then_package_and_finalizes_once(
     monkeypatch.setattr(
         new_database_module,
         "end_of_process",
-        lambda scenario: events.append(("end", scenario)),
+        lambda scenario, **kwargs: events.append(("end", scenario, kwargs)),
     )
     monkeypatch.setattr(
         new_database_module,
@@ -813,6 +815,11 @@ def test_write_scenario_array_writes_database_then_package_and_finalizes_once(
         "end",
         "delete",
     ]
+    assert all(
+        event[2] == {"preserve_applied_functions": True}
+        for event in events
+        if event[0] == "end"
+    )
     database_call = events[1][1]
     assert database_call["data"] == prepared_database
     assert database_call["name"] == "scenario-db"

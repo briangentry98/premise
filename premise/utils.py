@@ -1034,11 +1034,18 @@ def delete_all_pickles(filepath: Optional[Path] = None) -> None:
             file.unlink()
 
 
-def end_of_process(scenario: Dict[str, Any]) -> Dict[str, Any]:
+def end_of_process(
+    scenario: Dict[str, Any],
+    *,
+    preserve_applied_functions: bool = False,
+) -> Dict[str, Any]:
     """Release cached information stored in a scenario definition.
 
     :param scenario: Scenario dictionary to clean up.
     :type scenario: dict
+    :param preserve_applied_functions: Keep transformation metadata when the
+        scenario checkpoint will be reused by another exporter.
+    :type preserve_applied_functions: bool
     :return: Scenario stripped of database information and caches.
     :rtype: dict
     """
@@ -1046,7 +1053,7 @@ def end_of_process(scenario: Dict[str, Any]) -> Dict[str, Any]:
     # delete the database from the scenario
     scenario.pop("database", None)
 
-    if "applied functions" in scenario:
+    if not preserve_applied_functions and "applied functions" in scenario:
         del scenario["applied functions"]
 
     if "cache" in scenario:
