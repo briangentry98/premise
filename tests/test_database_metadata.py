@@ -121,7 +121,9 @@ def test_write_brightway25_database_stores_metadata_on_fast_path(monkeypatch):
         brightway25_module, "_compact_payload_for_fast_write", lambda data, name: None
     )
     monkeypatch.setattr(
-        brightway25_module, "_write_processed_database_fast", lambda data, name: None
+        brightway25_module,
+        "_write_processed_database_fast",
+        lambda data, name, *, exchange_payloads_prepared=False: None,
     )
     databases = DummyDatabases({"fast-db": {}})
     monkeypatch.setattr(brightway25_module, "databases", databases)
