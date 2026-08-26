@@ -71,9 +71,7 @@ def test_write_brightway25_database_fast_prints_completion_message(monkeypatch, 
     monkeypatch.setattr(
         brightway25_module,
         "_write_processed_database_fast",
-        lambda data, name, **kwargs: calls.__setitem__(
-            "write", (data, name, kwargs)
-        ),
+        lambda data, name, **kwargs: calls.__setitem__("write", (data, name, kwargs)),
     )
 
     data = [{"code": "a", "exchanges": []}]

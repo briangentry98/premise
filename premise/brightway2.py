@@ -407,11 +407,7 @@ def _prepare_fast_exchange_payload(exchange: dict) -> dict:
     exchange_type = exchange.get("type")
     forbidden_fields = FAST_EXCHANGE_FORBIDDEN_FIELDS.get(exchange_type, set())
     compact_exchange = {
-        field: (
-            float(value)
-            if isinstance(value, (np.generic, np.ndarray))
-            else value
-        )
+        field: (float(value) if isinstance(value, (np.generic, np.ndarray)) else value)
         for field, value in exchange.items()
         if field not in forbidden_fields and _keep_fast_export_value(value)
     }
