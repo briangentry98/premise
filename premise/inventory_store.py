@@ -1576,33 +1576,15 @@ class _ColumnarExchangeMapping(MutableMapping[str, Any]):
             for position in range(0, len(self._changes), 2):
                 yield self._changes[position], self._changes[position + 1]
 
-    def _base_value(self, key: str) -> Any:
+    def _metadata_value(self, key: str, default: Any = _COLUMNAR_MISSING) -> Any:
+        """Read one sidecar value, retaining copy-on-write isolation."""
+
         storage = self._storage
         row = self._row
-        if key in _EXCHANGE_STRING_FIELD_SET:
-            string_id = int(storage._string_columns[key][row])
-            if string_id >= 0:
-                return storage._string_values[string_id]
-        elif key == "amount":
-            kind = int(storage._numeric_kinds["amount"][row])
-            if kind != _NUMERIC_MISSING:
-                return _decode_numeric_column(
-                    kind,
-                    storage._numeric_floats["amount"][row],
-                    storage._numeric_ints["amount"][row],
-                )
-        elif key == "categories":
-            first = int(storage._string_columns["categories__0"][row])
-            second = int(storage._string_columns["categories__1"][row])
-            if first >= 0 and second >= 0:
-                return storage._string_values[first], storage._string_values[second]
-        elif key in _EXCHANGE_BOOLEAN_FIELDS:
-            boolean = int(storage._boolean_columns[key][row])
-            if boolean >= 0:
-                return bool(boolean)
-
         metadata = storage.metadata(row)
         if key not in metadata:
+            if default is not _COLUMNAR_MISSING:
+                return default
             raise KeyError(key)
         value = metadata[key]
         if isinstance(value, (dict, list, set)):
@@ -1759,14 +1741,37 @@ class _ColumnarExchangeMapping(MutableMapping[str, Any]):
         return metadata
 
     def __getitem__(self, key: str) -> Any:
-        if self._changes is None:
-            return self._base_value(key)
-        value = self._changed_value(key)
-        if value is not _COLUMNAR_MISSING:
-            if value is _COLUMNAR_DELETED:
-                raise KeyError(key)
-            return value
-        return self._base_value(key)
+        if self._changes is not None:
+            value = self._changed_value(key)
+            if value is not _COLUMNAR_MISSING:
+                if value is _COLUMNAR_DELETED:
+                    raise KeyError(key)
+                return value
+
+        storage = self._storage
+        row = self._row
+        if key in _EXCHANGE_STRING_FIELD_SET:
+            string_id = int(storage._string_columns[key][row])
+            if string_id >= 0:
+                return storage._string_values[string_id]
+        elif key == "amount":
+            kind = int(storage._numeric_kinds["amount"][row])
+            if kind != _NUMERIC_MISSING:
+                return _decode_numeric_column(
+                    kind,
+                    storage._numeric_floats["amount"][row],
+                    storage._numeric_ints["amount"][row],
+                )
+        elif key == "categories":
+            first = int(storage._string_columns["categories__0"][row])
+            second = int(storage._string_columns["categories__1"][row])
+            if first >= 0 and second >= 0:
+                return storage._string_values[first], storage._string_values[second]
+        elif key in _EXCHANGE_BOOLEAN_FIELDS:
+            boolean = int(storage._boolean_columns[key][row])
+            if boolean >= 0:
+                return bool(boolean)
+        return self._metadata_value(key)
 
     def get(self, key: str, default: Any = None) -> Any:
         if self._changes is not None:
@@ -1775,10 +1780,31 @@ class _ColumnarExchangeMapping(MutableMapping[str, Any]):
                 return default
             if value is not _COLUMNAR_MISSING:
                 return value
-        try:
-            return self._base_value(key)
-        except KeyError:
-            return default
+
+        storage = self._storage
+        row = self._row
+        if key in _EXCHANGE_STRING_FIELD_SET:
+            string_id = int(storage._string_columns[key][row])
+            if string_id >= 0:
+                return storage._string_values[string_id]
+        elif key == "amount":
+            kind = int(storage._numeric_kinds["amount"][row])
+            if kind != _NUMERIC_MISSING:
+                return _decode_numeric_column(
+                    kind,
+                    storage._numeric_floats["amount"][row],
+                    storage._numeric_ints["amount"][row],
+                )
+        elif key == "categories":
+            first = int(storage._string_columns["categories__0"][row])
+            second = int(storage._string_columns["categories__1"][row])
+            if first >= 0 and second >= 0:
+                return storage._string_values[first], storage._string_values[second]
+        elif key in _EXCHANGE_BOOLEAN_FIELDS:
+            boolean = int(storage._boolean_columns[key][row])
+            if boolean >= 0:
+                return bool(boolean)
+        return self._metadata_value(key, default)
 
     def __setitem__(self, key: str, value: Any) -> None:
         self._set_change(key, value)
