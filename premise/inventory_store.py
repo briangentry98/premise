@@ -1103,15 +1103,59 @@ class _ColumnarExchangeStorage:
         metadata = self._metadata_for_activity(activity_id)
         with self._metadata_lock:
             if activity_id not in self._scenario_cache_scanned_metadata_activities:
-                from .utils import _scenario_cache_exchange_field_is_restored
+                from .utils import (
+                    _SCENARIO_TRIMMED_EXCHANGE_FIELDS,
+                    _scenario_cache_exchange_field_is_restored,
+                )
 
                 for metadata_ordinal, payload in metadata.items():
-                    filtered = {
-                        field_name: value
-                        for field_name, value in payload.items()
-                        if _scenario_cache_exchange_field_is_restored(field_name, value)
-                    }
-                    if len(filtered) != len(payload):
+                    deleted_fields = []
+                    for field_name, value in payload.items():
+                        # Source sidecars overwhelmingly contain primitive
+                        # uncertainty fields.  Reproduce the utility helpers'
+                        # exact legacy semantics inline so compatible rows do
+                        # not allocate a filtered dictionary or make millions
+                        # of Python function calls during the first checkpoint.
+                        value_type = type(value)
+                        if field_name in _SCENARIO_TRIMMED_EXCHANGE_FIELDS:
+                            if value is None:
+                                restored = False
+                            elif value_type is str:
+                                restored = value not in {"", "None", "nan"}
+                            elif value_type in {list, tuple, dict, set, bool, int}:
+                                restored = True
+                            elif value_type is float:
+                                restored = value == value
+                            elif value_type in {np.float32, np.float64}:
+                                restored = not np.isnan(value)
+                            else:
+                                restored = _scenario_cache_exchange_field_is_restored(
+                                    field_name, value
+                                )
+                        elif value is None:
+                            restored = False
+                        elif value_type is str:
+                            restored = value not in {"", "None", "nan"}
+                        elif value_type in {list, tuple, dict, set, bool, int}:
+                            restored = bool(value)
+                        elif value_type is float:
+                            restored = value == value and bool(value)
+                        elif value_type in {np.float32, np.float64}:
+                            restored = not np.isnan(value) and bool(value)
+                        else:
+                            restored = _scenario_cache_exchange_field_is_restored(
+                                field_name, value
+                            )
+                        if not restored:
+                            deleted_fields.append(field_name)
+
+                    if deleted_fields:
+                        deleted_field_set = set(deleted_fields)
+                        filtered = {
+                            field_name: value
+                            for field_name, value in payload.items()
+                            if field_name not in deleted_field_set
+                        }
                         compatible_metadata = (
                             self._scenario_cache_filtered_metadata.get(activity_id)
                         )
@@ -1121,7 +1165,7 @@ class _ColumnarExchangeStorage:
                                 compatible_metadata
                             )
                         compatible_metadata[metadata_ordinal] = filtered
-                        deleted_fields = tuple(payload.keys() - filtered.keys())
+                        deleted_fields = tuple(deleted_fields)
                         self._scenario_cache_deleted_metadata[
                             (activity_id, metadata_ordinal)
                         ] = deleted_fields

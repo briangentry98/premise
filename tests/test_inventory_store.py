@@ -630,9 +630,7 @@ def test_columnar_exchange_fast_checkpoint_roundtrip_is_lossless(inventory, tmp_
     assert "input" not in restored["exchanges"][0]
 
 
-def test_columnar_scenario_checkpoint_reuses_compatibility_scan(
-    inventory, tmp_path, monkeypatch
-):
+def test_columnar_scenario_checkpoint_reuses_compatibility_scan(inventory, tmp_path):
     inventory[2]["exchanges"][0].update(
         {
             "location": "None",
@@ -648,23 +646,10 @@ def test_columnar_scenario_checkpoint_reuses_compatibility_scan(
     store = InventoryStore.open(source)
     store._scenario_cache_compatibility = True
 
-    calls = 0
-    original = utils_module._scenario_cache_exchange_field_is_restored
-
-    def counted(field, value):
-        nonlocal calls
-        calls += 1
-        return original(field, value)
-
-    monkeypatch.setattr(
-        utils_module,
-        "_scenario_cache_exchange_field_is_restored",
-        counted,
-    )
     first = store.checkpoint(tmp_path / "first.inventory-store")
-    calls_after_first = calls
     storage = store._state.exchanges._storage
     compatible_rows = storage.scenario_cache_compatible_rows()
+    scanned_activities = frozenset(storage._scenario_cache_scanned_metadata_activities)
     invalid_row = int(storage.exchange_starts[2])
 
     assert storage.scenario_cache_compatible_rows() is compatible_rows
@@ -672,8 +657,10 @@ def test_columnar_scenario_checkpoint_reuses_compatibility_scan(
     assert not compatible_rows[invalid_row]
     second = store.checkpoint(tmp_path / "second.inventory-store")
 
-    assert calls_after_first > 0
-    assert calls == calls_after_first
+    assert scanned_activities == frozenset(storage.exchange_metadata_offsets)
+    assert scanned_activities == frozenset(
+        storage._scenario_cache_scanned_metadata_activities
+    )
     assert (
         InventoryStore.open(first).materialize()
         == InventoryStore.open(second).materialize()
