@@ -663,6 +663,13 @@ def test_columnar_scenario_checkpoint_reuses_compatibility_scan(
     )
     first = store.checkpoint(tmp_path / "first.inventory-store")
     calls_after_first = calls
+    storage = store._state.exchanges._storage
+    compatible_rows = storage.scenario_cache_compatible_rows()
+    invalid_row = int(storage.exchange_starts[2])
+
+    assert storage.scenario_cache_compatible_rows() is compatible_rows
+    assert not compatible_rows.flags.writeable
+    assert not compatible_rows[invalid_row]
     second = store.checkpoint(tmp_path / "second.inventory-store")
 
     assert calls_after_first > 0

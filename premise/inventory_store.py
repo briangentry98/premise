@@ -795,6 +795,7 @@ class _ColumnarExchangeStorage:
         ] = {}
         self._scenario_cache_deleted_fields_by_row: dict[int, tuple[str, ...]] = {}
         self._scenario_cache_scan_complete = not self.exchange_metadata_offsets
+        self._scenario_cache_compatible_rows: np.ndarray | None = None
         self._biosphere_category_masks: dict[
             tuple[tuple[str, str], str], tuple[np.ndarray, np.ndarray]
         ] = {}
@@ -1152,6 +1153,24 @@ class _ColumnarExchangeStorage:
         if activity_id not in self._scenario_cache_scanned_metadata_activities:
             self._scenario_cache_metadata_for_activity(activity_id)
         return self._scenario_cache_deleted_fields_by_row.get(row, ())
+
+    def scenario_cache_compatible_rows(self) -> np.ndarray:
+        """Return source rows needing no legacy compatibility deletions."""
+
+        compatible = self._scenario_cache_compatible_rows
+        if compatible is not None:
+            return compatible
+
+        for activity_id in self.exchange_metadata_offsets:
+            if activity_id not in self._scenario_cache_scanned_metadata_activities:
+                self._scenario_cache_metadata_for_activity(activity_id)
+
+        compatible = self._scenario_cache_invalid_common_masks == 0
+        if self._scenario_cache_deleted_fields_by_row:
+            compatible[list(self._scenario_cache_deleted_fields_by_row)] = False
+        compatible.flags.writeable = False
+        self._scenario_cache_compatible_rows = compatible
+        return compatible
 
     def scenario_cache_metadata(self, row: int) -> Mapping[str, Any]:
         """Return metadata with legacy scenario-cache semantics.
@@ -3923,6 +3942,13 @@ def _write_scenario_delta_checkpoint(
             delta_stream,
             protocol=pickle.HIGHEST_PROTOCOL,
         )
+        compatible_source_rows = storage.scenario_cache_compatible_rows()
+        exchange_table = store._state.exchanges
+        dense_exchange_rows = (
+            exchange_table._rows
+            if isinstance(exchange_table, _DenseExchangeTable)
+            else None
+        )
         for activity_id in store.iter_activity_ids():
             payload = store._state.activities[activity_id]
             materialize = getattr(payload, "_premise_materialize", None)
@@ -3976,12 +4002,31 @@ def _write_scenario_delta_checkpoint(
                     run_length = 0
 
             for exchange_id in store._state.activity_exchanges[activity_id]:
-                exchange = store._state.exchanges[exchange_id]
+                exchange = (
+                    dense_exchange_rows[exchange_id]
+                    if dense_exchange_rows is not None
+                    else exchange_table[exchange_id]
+                )
+                if exchange is None:
+                    raise KeyError(exchange_id)
                 if (
                     isinstance(exchange, _ColumnarExchangeMapping)
                     and exchange._storage is storage
                 ):
                     row = exchange._row
+                    if exchange._changes is None and compatible_source_rows[row]:
+                        if (
+                            run_length
+                            and exchange_id == run_exchange_id + run_length
+                            and row == run_row + run_length
+                        ):
+                            run_length += 1
+                        else:
+                            flush_run()
+                            run_exchange_id = exchange_id
+                            run_row = row
+                            run_length = 1
+                        continue
                     changes = _scenario_delta_exchange_changes(exchange)
                     if not changes:
                         if (
