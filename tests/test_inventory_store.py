@@ -635,6 +635,8 @@ def test_columnar_scenario_checkpoint_reuses_compatibility_scan(inventory, tmp_p
         {
             "location": "None",
             "amount": 0,
+            "uncertainty type": 0,
+            "loc": np.float32("nan"),
             "production volume": np.nan,
             "comment": 0,
             "custom false": False,
@@ -667,7 +669,9 @@ def test_columnar_scenario_checkpoint_reuses_compatibility_scan(inventory, tmp_p
     )
     exchange = InventoryStore.open(second).materialize()[2]["exchanges"][0]
     assert exchange["amount"] == 0
+    assert exchange["uncertainty type"] == 0
     assert "location" not in exchange
+    assert "loc" not in exchange
     assert "production volume" not in exchange
     assert "comment" not in exchange
     assert "custom false" not in exchange
@@ -682,6 +686,7 @@ def test_scenario_delta_checkpoint_roundtrip_preserves_order_and_compatibility(
     database = InventoryStore.open(source)._checkout_materialized()
     database[0]["comment"] = None
     database[0]["has_downstream_consumer"] = False
+    database[0]["custom"]["list"].append("scenario overlay")
     database[0]["exchanges"][0].update(
         {
             "location": "None",

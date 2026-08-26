@@ -70,6 +70,9 @@ _SCENARIO_CACHE_COMMON_FIELDS = (
     *_EXCHANGE_STRING_FIELDS,
     *_EXCHANGE_NUMERIC_FIELDS,
 )
+_SCENARIO_CACHE_STANDARD_SIDECAR_FIELDS = frozenset(
+    {"uncertainty type", "loc", "production volume", "categories"}
+)
 _COMPACT_EXCHANGE_FIELDS = (
     "name",
     "product",
@@ -1038,6 +1041,30 @@ class _ColumnarExchangeStorage:
     def base_activity_payload(self, activity_id: ActivityId) -> dict[str, Any]:
         """Materialize one immutable source activity without its exchanges."""
 
+        position = self._activity_position(activity_id)
+        payload = copy.deepcopy(self.activity_payload(activity_id))
+        for field_name, values in self._activity_common_columns.items():
+            value = values[position]
+            if value is not None and field_name not in payload:
+                payload[field_name] = value
+        return payload
+
+    def scenario_cache_base_activity_payload(
+        self, activity_id: ActivityId
+    ) -> dict[str, Any]:
+        """Return a shallow base snapshot for read-only scenario diffing."""
+
+        position = self._activity_position(activity_id)
+        payload = self.activity_payload(activity_id).copy()
+        for field_name, values in self._activity_common_columns.items():
+            value = values[position]
+            if value is not None and field_name not in payload:
+                payload[field_name] = value
+        return payload
+
+    def _activity_position(self, activity_id: ActivityId) -> int:
+        """Resolve an activity ID to its compact source-row position."""
+
         if self._activity_position_by_id is None:
             position = activity_id
             if not 0 <= position < len(self.activity_ids):
@@ -1047,12 +1074,7 @@ class _ColumnarExchangeStorage:
                 position = self._activity_position_by_id[activity_id]
             except KeyError as error:
                 raise KeyError(activity_id) from error
-        payload = copy.deepcopy(self.activity_payload(activity_id))
-        for field_name, values in self._activity_common_columns.items():
-            value = values[position]
-            if value is not None and field_name not in payload:
-                payload[field_name] = value
-        return payload
+        return position
 
     def _activity_and_ordinal(self, row: int) -> tuple[ActivityId, int]:
         if not 0 <= row < self.row_count:
@@ -1109,6 +1131,42 @@ class _ColumnarExchangeStorage:
                 )
 
                 for metadata_ordinal, payload in metadata.items():
+                    if payload.keys() <= _SCENARIO_CACHE_STANDARD_SIDECAR_FIELDS:
+                        uncertainty_type = payload.get(
+                            "uncertainty type", _COLUMNAR_MISSING
+                        )
+                        loc = payload.get("loc", _COLUMNAR_MISSING)
+                        production_volume = payload.get(
+                            "production volume", _COLUMNAR_MISSING
+                        )
+                        categories = payload.get("categories", _COLUMNAR_MISSING)
+                        if (
+                            (
+                                uncertainty_type is _COLUMNAR_MISSING
+                                or type(uncertainty_type) is int
+                            )
+                            and (
+                                loc is _COLUMNAR_MISSING
+                                or (
+                                    type(loc) in {np.float32, np.float64}
+                                    and not np.isnan(loc)
+                                )
+                            )
+                            and (
+                                production_volume is _COLUMNAR_MISSING
+                                or type(production_volume) is int
+                                or (
+                                    type(production_volume) in {np.float32, np.float64}
+                                    and not np.isnan(production_volume)
+                                )
+                            )
+                            and (
+                                categories is _COLUMNAR_MISSING
+                                or type(categories) is tuple
+                            )
+                        ):
+                            continue
+
                     deleted_fields = []
                     for field_name, value in payload.items():
                         # Source sidecars overwhelmingly contain primitive
@@ -2047,6 +2105,25 @@ class _ColumnarActivityMapping(dict[str, Any]):
 
     def _premise_materialize(self) -> dict[str, Any]:
         return self.copy()
+
+    def _premise_scenario_cache_payload(self) -> dict[str, Any]:
+        """Merge the overlay for read-only checkpoint diffing without cloning."""
+
+        payload = {
+            key: value for key, value in dict.items(self) if key not in self._deleted
+        }
+        for key, hot_attribute in _ACTIVITY_HOT_FIELD_ATTRIBUTES.items():
+            value = getattr(self, hot_attribute)
+            if (
+                key not in self._deleted
+                and value is not _COLUMNAR_ACTIVITY_MISSING
+                and key not in payload
+            ):
+                payload[key] = value
+        for key, value in self._metadata().items():
+            if key not in self._deleted and key not in payload:
+                payload[key] = value
+        return payload
 
     def _premise_clone(self, memo: dict[int, Any]) -> "_ColumnarActivityMapping":
         """Clone resident overlays while sharing immutable columnar storage."""
@@ -3995,7 +4072,11 @@ def _write_scenario_delta_checkpoint(
         )
         for activity_id in store.iter_activity_ids():
             payload = store._state.activities[activity_id]
-            materialize = getattr(payload, "_premise_materialize", None)
+            materialize = getattr(
+                payload,
+                "_premise_scenario_cache_payload",
+                getattr(payload, "_premise_materialize", None),
+            )
             activity_payload = (
                 materialize() if materialize is not None else dict(payload)
             )
@@ -4005,7 +4086,7 @@ def _write_scenario_delta_checkpoint(
                 and payload._storage is storage
             ):
                 source_activity_id = payload._activity_id
-                base_activity_payload = storage.base_activity_payload(
+                base_activity_payload = storage.scenario_cache_base_activity_payload(
                     source_activity_id
                 )
                 _normalize_scenario_cache_activity(base_activity_payload)
