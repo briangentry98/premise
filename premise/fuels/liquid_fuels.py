@@ -245,7 +245,9 @@ class SyntheticFuelsMixin:
                         mapping=mapping,
                         system_model=self.system_model,
                         production_volumes=self.iam_data.production_volumes,
+                        technology_shares=self.iam_data.petrol_blend,
                         flip_treatment_supplier_sign=True,
+                        retain_validation_technology=True,
                     )
 
                     self.update_fuel_carbon_dioxide_emissions(
@@ -274,6 +276,7 @@ class SyntheticFuelsMixin:
                             "petrol, synthetic, from coal",
                             "petrol, synthetic, from coal, with CCS",
                         ],
+                        technology_shares=self.iam_data.petrol_blend,
                     )
 
         # diesel
@@ -303,6 +306,7 @@ class SyntheticFuelsMixin:
                         production_volumes=self.iam_data.production_volumes,
                         technology_shares=self.iam_data.diesel_blend,
                         flip_treatment_supplier_sign=True,
+                        retain_validation_technology=True,
                     )
 
                 self.update_fuel_carbon_dioxide_emissions(
@@ -345,7 +349,9 @@ class SyntheticFuelsMixin:
                     mapping=mapping,
                     system_model=self.system_model,
                     production_volumes=self.iam_data.production_volumes,
+                    technology_shares=self.iam_data.kerosene_blend,
                     flip_treatment_supplier_sign=True,
+                    retain_validation_technology=True,
                 )
 
                 self.update_fuel_carbon_dioxide_emissions(
@@ -364,6 +370,7 @@ class SyntheticFuelsMixin:
                         "kerosene, synthetic, from coal, energy allocation",
                         "kerosene, synthetic, from coal, energy allocation, with CCS",
                     ],
+                    technology_shares=self.iam_data.kerosene_blend,
                 )
 
         # lpg
@@ -383,7 +390,9 @@ class SyntheticFuelsMixin:
                     mapping=mapping,
                     system_model=self.system_model,
                     production_volumes=self.iam_data.production_volumes,
+                    technology_shares=self.iam_data.lpg_blend,
                     flip_treatment_supplier_sign=True,
+                    retain_validation_technology=True,
                 )
 
                 self.update_fuel_carbon_dioxide_emissions(
@@ -403,6 +412,7 @@ class SyntheticFuelsMixin:
                         "liquefied petroleum gas",
                         "liquefied petroleum gas, synthetic, from coal, with CCS",
                     ],
+                    technology_shares=self.iam_data.lpg_blend,
                 )
 
     def update_fuel_carbon_dioxide_emissions(

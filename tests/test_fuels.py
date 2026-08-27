@@ -138,6 +138,7 @@ def test_diesel_markets_receive_the_marginal_blend():
 
     assert len(market_calls) == 4
     assert all(call["technology_shares"] is diesel_blend for call in market_calls)
+    assert all(call["retain_validation_technology"] for call in market_calls)
     assert len(carbon_calls) == 1
     assert carbon_calls[0]["technology_shares"] is diesel_blend
 

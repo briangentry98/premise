@@ -5,6 +5,7 @@ as well as export it back.
 """
 
 import gc
+import hashlib
 import inspect
 import json
 import logging
@@ -77,6 +78,18 @@ from .scenario_array import (
 from .steel import _update_steel
 from .transformation import _SCENARIO_GIS_CACHE_KEY, _SCENARIO_ROW_CACHE_KEY
 from .transport import _update_vehicles
+from .validation_framework import (
+    InventoryGraphValidator,
+    ValidationCertificate,
+    ValidationIntent,
+    ValidationReport,
+    inventory_cycle_signatures,
+)
+from .validation import (
+    normalize_exact_deterministic_exchange_duplicates,
+    normalize_inventory_numeric_types,
+    normalize_inventory_uncertainty,
+)
 from .utils import (
     CACHE_SCHEMA_VERSION,
     cache_ref_fingerprint,
@@ -649,6 +662,11 @@ class NewDatabase:
         if inventory_backend not in {"compact", "legacy"}:
             raise ValueError("inventory_backend must be either 'compact' or 'legacy'.")
         self.inventory_backend = inventory_backend
+        # Critical methodological certification has no public off switch. The
+        # compact backend is the production/performance path; legacy remains an
+        # output-equivalence oracle under the same semantic contract.
+        self._validation_enabled = True
+        self._validation_reports = {}
         self._source_inventory_store = None
         self._compact_source_checkpoint = None
         self.database_cache_filepath = None
@@ -1355,6 +1373,157 @@ class NewDatabase:
             restore_metadata=restore_metadata
         )
 
+    def _validation_source_fingerprint(self) -> str:
+        """Fingerprint source/cache identity without materialising the graph."""
+
+        checkpoint = getattr(self, "_compact_source_checkpoint", None)
+        if checkpoint is not None:
+            manifest_path = Path(checkpoint) / "manifest.json"
+            if manifest_path.is_file():
+                try:
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    manifest = {}
+                fingerprint = manifest.get("source_fingerprint")
+                if fingerprint:
+                    return str(fingerprint)
+
+        payload = {
+            "source": getattr(self, "source", None),
+            "version": getattr(self, "version", None),
+            "system_model": getattr(self, "system_model", None),
+            "database_cache": str(getattr(self, "database_cache_filepath", None)),
+            "inventories_cache": str(getattr(self, "inventories_cache_filepath", None)),
+        }
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+
+    def _ensure_validation_baseline_cycles(self) -> frozenset:
+        """Calculate documented source-graph cycles once for all scenarios."""
+
+        cached = getattr(self, "_validation_baseline_cycles", None)
+        if cached is not None:
+            return cached
+        source_store = getattr(self, "_source_inventory_store", None)
+        if source_store is None:
+            checkpoint = getattr(self, "_compact_source_checkpoint", None)
+            if checkpoint is not None:
+                source_store = InventoryStore.open(checkpoint)
+        if source_store is None:
+            cached = frozenset()
+        else:
+            cached = inventory_cycle_signatures(source_store)
+        self._validation_baseline_cycles = cached
+        return cached
+
+    @staticmethod
+    def _validation_iam_fingerprint(scenario: dict) -> str:
+        """Fingerprint IAM scenario identity and its source reference."""
+
+        external = [
+            item.get("scenario")
+            for item in scenario.get("external scenarios", ())
+            if isinstance(item, dict)
+        ]
+        payload = {
+            "model": scenario.get("model"),
+            "pathway": scenario.get("pathway"),
+            "year": scenario.get("year"),
+            "filepath": str(scenario.get("filepath", "")),
+            "external": external,
+        }
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+
+    def _certify_scenario_store(
+        self,
+        scenario: dict,
+        store: InventoryStore,
+        *,
+        intent: ValidationIntent | None = None,
+        raise_on_error: bool = True,
+    ) -> ValidationCertificate | None:
+        """Certify one exact store generation and attach its immutable report."""
+
+        if not getattr(self, "_validation_enabled", False):
+            return None
+        certificate = InventoryGraphValidator(
+            store,
+            scenario_identity=self._scenario_identity(scenario),
+            source_fingerprint=self._validation_source_fingerprint(),
+            iam_fingerprint=self._validation_iam_fingerprint(scenario),
+            system_model=getattr(self, "system_model", "cutoff"),
+            version=getattr(self, "version", "unknown"),
+            intent=intent,
+            baseline_cycles=self._ensure_validation_baseline_cycles(),
+        ).certify(raise_on_error=raise_on_error)
+        report = certificate.report
+        scenario["_validation_report"] = report.to_dict()
+        reports = getattr(self, "_validation_reports", None)
+        if reports is None:
+            reports = self._validation_reports = {}
+        reports[self._scenario_identity(scenario)] = report
+        for warning in report.warnings:
+            logger.warning("%s: %s", warning.rule_id, warning.message)
+        return certificate
+
+    def _ensure_semantic_certification(self, scenario: dict) -> ValidationReport | None:
+        """Reuse certification or recertify after an inventory mutation."""
+
+        if not getattr(self, "_validation_enabled", False):
+            return None
+        stored_report = scenario.get("_validation_report")
+        store = scenario.get("_inventory_store")
+        if isinstance(stored_report, dict):
+            try:
+                report = ValidationReport.from_dict(stored_report)
+            except (KeyError, TypeError, ValueError):
+                report = None
+            if report is not None and (
+                store is None or report.store_generation == store.generation
+            ):
+                report.raise_for_errors()
+                return report.with_reuse(True)
+        store = self._ensure_scenario_store(scenario)
+        certificate = self._certify_scenario_store(scenario, store)
+        return certificate.report if certificate is not None else None
+
+    def get_validation_report(self, scenario: int = 0) -> ValidationReport:
+        """Return the completed immutable report for a scenario.
+
+        If a writable store has changed since its last certificate, this method
+        performs a new read-only pass and returns the resulting report without
+        suppressing its errors.  Build and export entry points raise those
+        errors through :class:`PremiseValidationError`.
+        """
+
+        if not isinstance(scenario, int):
+            raise TypeError("scenario must be an integer scenario position.")
+        if scenario < 0 or scenario >= len(self.scenarios):
+            raise IndexError(
+                f"scenario position {scenario} is outside 0..{len(self.scenarios) - 1}."
+            )
+        definition = self.scenarios[scenario]
+        store = self._ensure_scenario_store(definition)
+        certificate = self._certify_scenario_store(
+            definition, store, raise_on_error=False
+        )
+        if certificate is None:
+            # The accessor is additive and useful for the legacy oracle too;
+            # it never creates a public validation-off switch.
+            certificate = InventoryGraphValidator(
+                store,
+                scenario_identity=self._scenario_identity(definition),
+                source_fingerprint=self._validation_source_fingerprint(),
+                iam_fingerprint=self._validation_iam_fingerprint(definition),
+                system_model=getattr(self, "system_model", "cutoff"),
+                version=getattr(self, "version", "unknown"),
+            ).certify(raise_on_error=False)
+            definition["_validation_report"] = certificate.report.to_dict()
+        return certificate.report
+
     def _attach_shared_geography_cache(self, runtime_scenario: dict) -> None:
         """Share immutable geographic topology across compact scenario-years."""
 
@@ -1468,6 +1637,9 @@ class NewDatabase:
         store = runtime_scenario.pop("_inventory_store", None)
         if store is None:
             database = runtime_scenario.pop("_inventory_working_copy")
+            normalize_inventory_numeric_types(database)
+            normalize_inventory_uncertainty(database)
+            normalize_exact_deterministic_exchange_duplicates(database)
             store = create_inventory_store(
                 database,
                 backend=self.inventory_backend,
@@ -1478,6 +1650,10 @@ class NewDatabase:
         else:
             runtime_scenario.pop("_inventory_working_copy", None)
         runtime_scenario.pop("_inventory_backend", None)
+        # Certification deliberately happens before the scenario definition is
+        # replaced and before a checkpoint can be written.  Invalid builds
+        # therefore leave the last known-good scenario state untouched.
+        self._certify_scenario_store(runtime_scenario, store)
         scenario_definition.clear()
         scenario_definition.update(runtime_scenario)
         if persist:
@@ -1658,6 +1834,12 @@ class NewDatabase:
             [item for item in sectors if item not in self.sector_update_methods]
         )
 
+        if getattr(self, "_validation_enabled", False):
+            # The source store can be transferred and released while the first
+            # compact scenario is constructed, so baseline cycles are captured
+            # once before scenario processing starts.
+            self._ensure_validation_baseline_cycles()
+
         with tqdm(total=len(self.scenarios), desc=description, ncols=70) as pbar_outer:
             for position, scenario_definition in enumerate(self.scenarios):
                 scenario = self._load_scenario_database_for_update(
@@ -1690,6 +1872,9 @@ class NewDatabase:
                         and "_inventory_store" not in scenario
                     ):
                         database = scenario.pop("_inventory_working_copy")
+                        normalize_inventory_numeric_types(database)
+                        normalize_inventory_uncertainty(database)
+                        normalize_exact_deterministic_exchange_duplicates(database)
                         scenario["_inventory_store"] = create_inventory_store(
                             database,
                             backend="compact",
@@ -1881,6 +2066,7 @@ class NewDatabase:
 
         prepared_scenarios = []
         for scenario_definition in self.scenarios:
+            self._ensure_semantic_certification(scenario_definition)
             scenario = load_database(
                 scenario=scenario_definition,
                 original_database=original_database,
@@ -1932,6 +2118,9 @@ class NewDatabase:
             )
 
         tmp_scenario = self.scenarios[0].copy()
+        # The union graph is a new inventory generation and cannot reuse the
+        # first constituent scenario's semantic certificate.
+        tmp_scenario.pop("_validation_report", None)
         tmp_scenario["database"] = self._database
         additional_regions = sorted(
             {
@@ -2017,6 +2206,7 @@ class NewDatabase:
         print("Write new database(s) to Brightway.")
 
         for s, scenario in enumerate(self.scenarios):
+            self._ensure_semantic_certification(scenario)
             can_use_fast_export = (
                 scenario.get("_inventory_store") is not None
                 or "_inventory_checkpoint" in scenario
@@ -2148,6 +2338,7 @@ class NewDatabase:
         original_database = self._load_original_database()
 
         for s, scenario in enumerate(self.scenarios):
+            self._ensure_semantic_certification(scenario)
             scenario = load_database(
                 scenario=scenario,
                 original_database=original_database,
@@ -2203,6 +2394,7 @@ class NewDatabase:
         original_database = self._load_original_database()
 
         for scenario_definition in self.scenarios:
+            self._ensure_semantic_certification(scenario_definition)
             scenario = load_database(
                 scenario=scenario_definition,
                 original_database=original_database,
@@ -2260,6 +2452,7 @@ class NewDatabase:
         original_database = self._load_original_database()
 
         for scenario in self.scenarios:
+            self._ensure_semantic_certification(scenario)
             scenario = load_database(
                 scenario=scenario,
                 original_database=original_database,
@@ -2313,6 +2506,7 @@ class NewDatabase:
 
         prepared_scenarios = []
         for scenario_definition in self.scenarios:
+            self._ensure_semantic_certification(scenario_definition)
             scenario = load_database(
                 scenario=scenario_definition,
                 original_database=original_database,

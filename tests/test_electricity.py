@@ -16,6 +16,49 @@ from premise.filesystem_constants import DATA_DIR
 LHV_FUELS = DATA_DIR / "fuels_lower_heating_value.txt"
 
 
+def test_supplier_pruning_never_drops_an_entire_technology():
+    first = {"name": "first"}
+    second = {"name": "second"}
+
+    retained = Electricity.prune_and_normalize_suppliers(
+        [(first, 0.0004), (second, 0.0006)]
+    )
+
+    assert retained == [(second, 1.0)]
+
+
+def test_supplier_pruning_renormalizes_retained_providers():
+    retained = Electricity.prune_and_normalize_suppliers(
+        [({"name": "first"}, 0.2), ({"name": "second"}, 0.8)]
+    )
+
+    assert sum(share for _, share in retained) == pytest.approx(1.0)
+
+
+def test_consequential_msw_map_uses_electricity_conversion_provider():
+    valid = {
+        "name": (
+            "electricity, from municipal waste incineration to generic market "
+            "for electricity, medium voltage"
+        ),
+        "reference product": "electricity, medium voltage",
+        "unit": "kilowatt hour",
+    }
+    treatment = {
+        "name": "treatment of municipal solid waste, municipal incineration",
+        "reference product": "municipal solid waste",
+        "unit": "kilogram",
+    }
+    electricity = object.__new__(Electricity)
+    electricity.system_model = "consequential"
+    electricity.database = [treatment, valid]
+    electricity.powerplant_map = {"Biomass MSW": [treatment]}
+
+    electricity.complete_consequential_powerplant_map()
+
+    assert electricity.powerplant_map["Biomass MSW"] == [treatment, valid]
+
+
 def test_coal_power_plant_data_caches_selections_and_emission_factors():
     data = xr.DataArray(
         np.array([[[[100.0, 2.0, 0.4]]]]),

@@ -32,7 +32,11 @@ from .data_collection import get_delimiter
 from .filesystem_constants import DATA_DIR
 from .inventory_imports import get_correspondence_bio_flows, normalize_version
 from .utils import reset_all_codes, get_uuids
-from .validation import BaseDatasetValidator
+from .validation import (
+    VALIDATION_RULESET_VERSION,
+    BaseDatasetValidator,
+    ValidationReport,
+)
 
 FILEPATH_SIMAPRO_UNITS = DATA_DIR / "utils" / "export" / "simapro_units.yml"
 FILEPATH_SIMAPRO_COMPARTMENTS = (
@@ -48,6 +52,17 @@ DIR_DATAPACKAGE_TEMP = Path.cwd() / "export" / "temp"
 
 
 import unicodedata
+
+
+def _has_semantic_certificate(scenario: dict) -> bool:
+    payload = scenario.get("_validation_report")
+    if not isinstance(payload, dict):
+        return False
+    try:
+        report = ValidationReport.from_dict(payload)
+    except (KeyError, TypeError, ValueError):
+        return False
+    return report.ruleset_version == VALIDATION_RULESET_VERSION and report.valid
 
 
 def clean_csv_field(text):
@@ -1233,7 +1248,13 @@ def prepare_db_for_export(
         version=version,
         extra_regions=scenario.get("additional valid regions"),
     )
-    validator.run_all_checks()
+    make_normalizer = getattr(validator, "make_normalizer", None)
+    if make_normalizer is not None:
+        validator.database = make_normalizer().normalize_database()
+    if _has_semantic_certificate(scenario):
+        validator.run_export_schema_checks()
+    else:
+        validator.run_all_checks()
 
     return validator.database
 
@@ -1256,7 +1277,15 @@ def prepare_db_for_fast_export(scenario, name, version, biosphere_name=None):
         version=version,
         extra_regions=scenario.get("additional valid regions"),
     )
-    validator.run_fast_export_checks()
+    make_normalizer = getattr(validator, "make_normalizer", None)
+    if make_normalizer is not None:
+        validator.database = make_normalizer().normalize_database()
+    if _has_semantic_certificate(scenario) and hasattr(
+        validator, "run_export_schema_checks"
+    ):
+        validator.run_export_schema_checks()
+    else:
+        validator.run_fast_export_checks()
 
     return validator.database
 

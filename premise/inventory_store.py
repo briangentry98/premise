@@ -2471,6 +2471,14 @@ class InventoryStore(ABC):
 
     backend_name: str
 
+    @property
+    @abstractmethod
+    def generation(self) -> int: ...
+
+    @property
+    @abstractmethod
+    def scenario_identity(self) -> Any: ...
+
     @abstractmethod
     def __len__(self) -> int: ...
 
@@ -3344,6 +3352,14 @@ class ReadOnlyInventoryStore(InventoryStore):
 
     def __len__(self) -> int:
         return len(self._store)
+
+    @property
+    def generation(self) -> int:
+        return self._store.generation
+
+    @property
+    def scenario_identity(self) -> Any:
+        return self._store.scenario_identity
 
     def iter_activity_ids(self) -> Iterator[ActivityId]:
         return self._store.iter_activity_ids()
@@ -4297,6 +4313,9 @@ def _write_scenario_delta_checkpoint(
             "base_checkpoint": os.path.relpath(base_checkpoint, path.parent),
             "base_checksum_fingerprint": _sha256(base_checkpoint / "checksums.json"),
         }
+        validation_certificate = getattr(store, "_validation_certificate_payload", None)
+        if validation_certificate is not None:
+            manifest["validation_certificate"] = validation_certificate
         try:
             manifest_text = json.dumps(manifest, sort_keys=True, indent=2)
         except TypeError:
@@ -4380,6 +4399,9 @@ def _write_checkpoint(store: _InMemoryInventoryStore, path: Path) -> Path:
             "columnar_format": "arrow-ipc" if pa is not None else "pickle-fallback",
             "metadata_layout": "split-activity-exchange-v5",
         }
+        validation_certificate = getattr(store, "_validation_certificate_payload", None)
+        if validation_certificate is not None:
+            manifest["validation_certificate"] = validation_certificate
         try:
             manifest_text = json.dumps(manifest, sort_keys=True, indent=2)
         except TypeError:
@@ -4619,6 +4641,7 @@ def _open_scenario_delta_checkpoint(
     store._shared_state = False
     store._scenario_cache_compatibility = False
     store._shares_source_storage = True
+    store._validation_certificate_payload = manifest.get("validation_certificate")
     return store
 
 
@@ -4726,6 +4749,7 @@ def _open_checkpoint(path: Path) -> InventoryStore:
         store._active_transaction = False
         store._shared_state = False
         store._scenario_cache_compatibility = False
+        store._validation_certificate_payload = manifest.get("validation_certificate")
         return store
 
     activity_payloads: dict[int, dict[str, Any]] = {}
@@ -4801,6 +4825,7 @@ def _open_checkpoint(path: Path) -> InventoryStore:
         take_ownership=True,
     )
     store._state.generation = int(manifest.get("generation", 0))
+    store._validation_certificate_payload = manifest.get("validation_certificate")
     return store
 
 

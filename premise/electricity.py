@@ -295,6 +295,23 @@ def _update_electricity(
 
     if scenario["iam data"].electricity_mix is not None:
         electricity.update_electricity_markets()
+
+        # Validate the IAM-to-provider composition while the transient
+        # technology provenance is still available. Generic relinking may
+        # legitimately merge rows when multiple IAM technologies share one
+        # ecoinvent supplier.
+        vector_validation = ElectricityValidation(
+            model=scenario["model"],
+            scenario=scenario["pathway"],
+            year=scenario["year"],
+            regions=scenario["iam data"].regions,
+            database=electricity.database,
+            iam_data=scenario["iam data"],
+            technology_map=electricity.powerplant_map,
+            system_model=system_model,
+        )
+        vector_validation.run_supplier_vector_checks()
+        electricity.clear_validation_provenance()
     else:
         print("No electricity information found in IAM data. Skipping.")
 
@@ -319,9 +336,11 @@ def _update_electricity(
         regions=scenario["iam data"].regions,
         database=electricity.database,
         iam_data=scenario["iam data"],
+        technology_map=electricity.powerplant_map,
+        system_model=system_model,
     )
 
-    validate.run_electricity_checks()
+    validate.run_electricity_checks(check_supplier_vectors=False)
 
     return scenario
 
@@ -444,6 +463,7 @@ class Electricity(BaseTransformation):
             self.database, self.version, self.model
         )
         self.powerplant_map = self.mapping.generate_powerplant_map()
+        self.complete_consequential_powerplant_map()
         # reverse dictionary of self.powerplant_map
         self.powerplant_map_rev = {}
         for k, v in self.powerplant_map.items():
@@ -470,6 +490,48 @@ class Electricity(BaseTransformation):
         self.powerplant_min_efficiency, self.powerplant_max_efficiency = (
             self.mapping.generate_powerplant_efficiency_bounds()
         )
+
+    def complete_consequential_powerplant_map(self) -> None:
+        """Add valid MSW electricity providers when allocation removes them.
+
+        Consequential ecoinvent models municipal-waste electricity with
+        dedicated conversion activities. The cut-off mapping instead targets
+        allocated waste-treatment activities, whose reference product is no
+        longer electricity in the consequential system model.
+        """
+
+        if self.system_model != "consequential":
+            return
+        candidates = [
+            dataset
+            for dataset in self.database
+            if dataset.get("name")
+            == (
+                "electricity, from municipal waste incineration to generic "
+                "market for electricity, medium voltage"
+            )
+            and "electricity" in dataset.get("reference product", "").lower()
+            and dataset.get("unit") == "kilowatt hour"
+        ]
+        existing = self.powerplant_map.get("Biomass MSW", [])
+        seen = {
+            (
+                dataset.get("name"),
+                dataset.get("reference product"),
+                dataset.get("location"),
+            )
+            for dataset in existing
+        }
+        self.powerplant_map["Biomass MSW"] = existing + [
+            dataset
+            for dataset in candidates
+            if (
+                dataset.get("name"),
+                dataset.get("reference product"),
+                dataset.get("location"),
+            )
+            not in seen
+        ]
 
     @lru_cache
     def get_production_per_tech_dict(self) -> Dict[Tuple[str, str], float]:
@@ -529,6 +591,30 @@ class Electricity(BaseTransformation):
             return loc_production / total_production
         # If not, we allocate an equal share of supply
         return 1 / len(suppliers)
+
+    @staticmethod
+    def prune_and_normalize_suppliers(
+        suppliers: list[tuple[dict, float]], cutoff: float = 0.001
+    ) -> list[tuple[dict, float]]:
+        """Prune tiny provider shares without dropping an IAM technology."""
+
+        if not suppliers:
+            return []
+        retained = [supplier for supplier in suppliers if supplier[1] > cutoff]
+        if not retained:
+            retained = [max(suppliers, key=lambda supplier: supplier[1])]
+        total = sum(share for _, share in retained)
+        if total <= 0:
+            equal_share = 1 / len(retained)
+            return [(supplier, equal_share) for supplier, _ in retained]
+        return [(supplier, share / total) for supplier, share in retained]
+
+    def clear_validation_provenance(self) -> None:
+        """Remove transient IAM labels after incremental vector validation."""
+
+        for dataset in self.database:
+            for exchange in dataset.get("exchanges", ()):
+                exchange.pop("premise electricity technology", None)
 
     def create_new_markets_low_voltage(self) -> None:
         """
@@ -606,20 +692,9 @@ class Electricity(BaseTransformation):
                             )
                             tech_suppliers[technology].append((supplier, share))
 
-                        # remove suppliers that have a supply share inferior to 0.1%
-                        tech_suppliers[technology] = [
-                            supplier
-                            for supplier in tech_suppliers[technology]
-                            if supplier[1] > 0.001
-                        ]
-                        # rescale the shares so that they sum to 1
-                        total_share = sum(
-                            supplier[1] for supplier in tech_suppliers[technology]
+                        tech_suppliers[technology] = self.prune_and_normalize_suppliers(
+                            tech_suppliers[technology]
                         )
-                        tech_suppliers[technology] = [
-                            (supplier[0], supplier[1] / total_share)
-                            for supplier in tech_suppliers[technology]
-                        ]
 
                     except IndexError as exc:
                         if self.system_model == "consequential":
@@ -764,6 +839,7 @@ class Electricity(BaseTransformation):
                                 "name": supplier["name"],
                                 "unit": supplier["unit"],
                                 "location": supplier["location"],
+                                "premise electricity technology": technology,
                             }
                         )
 
@@ -1116,20 +1192,9 @@ class Electricity(BaseTransformation):
                         share = self.get_production_weighted_share(supplier, suppliers)
                         tech_suppliers[technology].append((supplier, share))
 
-                    # remove suppliers that have a supply share inferior to 0.1%
-                    tech_suppliers[technology] = [
-                        supplier
-                        for supplier in tech_suppliers[technology]
-                        if supplier[1] > 0.001
-                    ]
-                    # rescale the shares so that they sum to 1
-                    total_share = sum(
-                        supplier[1] for supplier in tech_suppliers[technology]
+                    tech_suppliers[technology] = self.prune_and_normalize_suppliers(
+                        tech_suppliers[technology]
                     )
-                    tech_suppliers[technology] = [
-                        (supplier[0], supplier[1] / total_share)
-                        for supplier in tech_suppliers[technology]
-                    ]
 
                 tech_suppliers_by_region[region] = tech_suppliers
 
@@ -1235,6 +1300,7 @@ class Electricity(BaseTransformation):
                                 "name": supplier["name"],
                                 "unit": supplier["unit"],
                                 "location": supplier["location"],
+                                "premise electricity technology": technology,
                             }
                         )
 
@@ -1740,6 +1806,7 @@ class Electricity(BaseTransformation):
 
         # update self.powerplant_map
         self.powerplant_map = self.mapping.generate_powerplant_map()
+        self.complete_consequential_powerplant_map()
 
     def update_electricity_efficiency(self) -> None:
         """
@@ -2078,6 +2145,7 @@ class Electricity(BaseTransformation):
 
         mapping = InventorySet(self.database, model=self.model)
         self.powerplant_map = mapping.generate_powerplant_map()
+        self.complete_consequential_powerplant_map()
 
         # reverse dictionary of self.powerplant_map
         self.powerplant_map_rev = {}

@@ -45,6 +45,20 @@ def _update_fuels(scenario, version, system_model):
         fuels.generate_hydrogen_activities()
         fuels.generate_synthetic_fuel_activities()
         fuels.generate_biogas_activities()
+
+        if system_model == "consequential":
+            vector_validation = FuelsValidation(
+                model=scenario["model"],
+                scenario=scenario["pathway"],
+                year=scenario["year"],
+                regions=scenario["iam data"].regions,
+                database=fuels.database,
+                iam_data=scenario["iam data"],
+                technology_map=fuels.fuel_map,
+                system_model=system_model,
+            )
+            vector_validation.run_consequential_supplier_vector_checks()
+        fuels.clear_validation_provenance()
         fuels.relink_datasets()
         replace_scenario_inventory(scenario, fuels.database)
         scenario["cache"] = fuels.cache
@@ -64,9 +78,11 @@ def _update_fuels(scenario, version, system_model):
         regions=scenario["iam data"].regions,
         database=fuels.database,
         iam_data=scenario["iam data"],
+        technology_map=fuels.fuel_map,
+        system_model=system_model,
     )
 
-    validate.run_fuel_checks()
+    validate.run_fuel_checks(check_supplier_vectors=False)
 
     return scenario
 
@@ -128,6 +144,13 @@ class Fuels(
                 )
 
         self.new_fuel_markets = {}
+
+    def clear_validation_provenance(self) -> None:
+        """Remove transient technology labels after incremental validation."""
+
+        for dataset in self.database:
+            for exchange in dataset.get("exchanges", ()):
+                exchange.pop("premise market technology", None)
 
     def write_log(self, dataset, status="created"):
         """

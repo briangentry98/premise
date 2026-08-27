@@ -1101,6 +1101,7 @@ class BaseTransformation:
         blacklist=None,
         conversion_factor=None,
         flip_treatment_supplier_sign=False,
+        retain_validation_technology=False,
     ):
         """
         Generalized method to create and add regionalized market datasets.
@@ -1115,6 +1116,10 @@ class BaseTransformation:
             Separate technology mix used for the market's supplier shares.
             Consequential markets use this to retain marginal mixes while
             keeping absolute production volumes for regional weighting.
+        retain_validation_technology : bool, optional
+            Retain a transient IAM-technology label on supplier exchanges so
+            an incremental validator can distinguish technologies sharing the
+            same provider. Callers must remove these labels after validation.
         additional_exchanges_fn : callable, optional
             Function to add extra exchanges to the market dataset (e.g., transport, losses).
         """
@@ -1228,19 +1233,18 @@ class BaseTransformation:
                             conversion_factor.get(technology, 1.0),
                         )
                         for supplier in suppliers:
-                            market_dataset["exchanges"].append(
-                                {
-                                    "name": supplier["name"],
-                                    "product": supplier["reference product"],
-                                    "location": supplier["location"],
-                                    "amount": share
-                                    * factor
-                                    * supplier.get("share", 1.0),
-                                    "unit": supplier["unit"],
-                                    "uncertainty type": 0,
-                                    "type": "technosphere",
-                                }
-                            )
+                            exchange = {
+                                "name": supplier["name"],
+                                "product": supplier["reference product"],
+                                "location": supplier["location"],
+                                "amount": share * factor * supplier.get("share", 1.0),
+                                "unit": supplier["unit"],
+                                "uncertainty type": 0,
+                                "type": "technosphere",
+                            }
+                            if retain_validation_technology:
+                                exchange["premise market technology"] = technology
+                            market_dataset["exchanges"].append(exchange)
 
             market_dataset["exchanges"] = self.summarize_market_exchanges(
                 market_dataset["exchanges"]
@@ -1430,6 +1434,7 @@ class BaseTransformation:
                 exchange.get("product"),
                 exchange.get("location"),
                 exchange.get("unit"),
+                exchange.get("premise market technology"),
             )
             if key not in technosphere_by_key:
                 technosphere_by_key[key] = copy.deepcopy(exchange)

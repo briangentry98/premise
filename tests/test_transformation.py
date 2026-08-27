@@ -1048,6 +1048,7 @@ def test_market_uses_explicit_technology_shares_and_keeps_absolute_volume(
         },
         production_volumes=production_volumes,
         technology_shares=marginal_mix,
+        retain_validation_technology=True,
     )
 
     market = next(ds for ds in transformation.database if ds["location"] == "WEU")
@@ -1060,3 +1061,9 @@ def test_market_uses_explicit_technology_shares_and_keeps_absolute_volume(
 
     assert production["production volume"] == 10.0
     assert suppliers == {"diesel production": 1.0}
+    assert (
+        next(exc for exc in market["exchanges"] if exc["type"] == "technosphere")[
+            "premise market technology"
+        ]
+        == "diesel"
+    )

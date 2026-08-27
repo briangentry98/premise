@@ -879,6 +879,7 @@ class Heat(BaseTransformation):
             target_location = self._target_location(dataset, new_input)
             if target_location is None:
                 continue
+            changed = False
             for exchange in ws.technosphere(dataset):
                 if (
                     exchange.get("name") not in names
@@ -889,6 +890,11 @@ class Heat(BaseTransformation):
                 exchange["product"] = new_input["reference product"]
                 exchange["location"] = target_location
                 exchange.pop("input", None)
+                changed = True
+            if changed:
+                dataset["exchanges"] = self.summarize_market_exchanges(
+                    dataset["exchanges"]
+                )
 
     def assert_no_heat_cycles(self) -> None:
         """Reject direct or indirect links among generated heat datasets."""
