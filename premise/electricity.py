@@ -39,6 +39,7 @@ from .utils import (
     rescale_exchanges,
 )
 from .validation import ElectricityValidation
+from .validation_framework import record_validation_phase
 
 POWERPLANT_TECHS = VARIABLES_DIR / "electricity.yaml"
 
@@ -310,7 +311,9 @@ def _update_electricity(
             technology_map=electricity.powerplant_map,
             system_model=system_model,
         )
-        vector_validation.run_supplier_vector_checks()
+        record_validation_phase(
+            scenario, vector_validation.run_supplier_vector_checks()
+        )
         electricity.clear_validation_provenance()
     else:
         print("No electricity information found in IAM data. Skipping.")
@@ -340,7 +343,9 @@ def _update_electricity(
         system_model=system_model,
     )
 
-    validate.run_electricity_checks(check_supplier_vectors=False)
+    record_validation_phase(
+        scenario, validate.run_electricity_checks(check_supplier_vectors=False)
+    )
 
     return scenario
 

@@ -16,9 +16,12 @@ from lcia_regression import assert_lcia_regression_scores, get_lcia_regression_m
 
 load_dotenv()
 
-ei_user = os.environ["EI_USERNAME"]
-ei_pass = os.environ["EI_PASSWORD"]
-key = os.environ["IAM_FILES_KEY"]
+ei_user = os.environ.get("EI_USERNAME")
+ei_pass = os.environ.get("EI_PASSWORD")
+key = os.environ.get("IAM_FILES_KEY", "")
+pytestmark = pytest.mark.skipif(
+    not (ei_user and ei_pass and key), reason="ecoinvent credentials are unavailable"
+)
 # convert to bytes
 key = key.encode()
 
@@ -58,8 +61,8 @@ def updated_ei312_cutoff():
         key=key,
         system_model=system_model,
         biosphere_name=bio_db,
-        inventory_backend="compact",
         generate_reports=False,
+        inventory_backend="compact",
     )
 
     ndb.update(persist=True)
@@ -94,6 +97,7 @@ def assert_persisted_scenarios_unchanged(ndb, checkpoint_snapshots):
         assert scenario.get("applied functions") == applied_functions
 
 
+@pytest.mark.slow
 def test_brightway(updated_ei312_cutoff):
     ndb, checkpoint_snapshots = updated_ei312_cutoff
 

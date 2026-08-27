@@ -13,7 +13,6 @@ import yaml
 from .filesystem_constants import DATA_DIR
 from .geomap import Geomap
 from .logger import create_logger
-from .utils import rescale_exchanges
 from .inventory_imports import (
     get_biosphere_code,
     get_classification_entry,
@@ -21,6 +20,7 @@ from .inventory_imports import (
 )
 import country_converter as coco
 import wurst.searching as ws
+from .marginal_mixes import consequential_method
 
 from .validation_framework import (
     VALIDATION_RULESET_VERSION,
@@ -30,6 +30,7 @@ from .validation_framework import (
     ValidationCertificate,
     ValidationIntent,
     ValidationIssue,
+    ValidationPhaseResult,
     ValidationReport,
     ValidationRuleResult,
     ValidationSuppression,
@@ -46,6 +47,7 @@ __all__ = [
     "ValidationCertificate",
     "ValidationIntent",
     "ValidationIssue",
+    "ValidationPhaseResult",
     "ValidationReport",
     "ValidationRuleResult",
     "ValidationSuppression",
@@ -55,6 +57,28 @@ __all__ = [
 ]
 
 logger = create_logger("validation")
+
+
+def independent_consequential_mix(iam_data, sector, year):
+    """Recompute a marginal vector from the pre-transformation IAM market data."""
+
+    inputs = getattr(iam_data, "_validation_market_inputs", {})
+    raw = inputs.get(sector)
+    if raw is None:
+        return None
+    cache = getattr(iam_data, "_validation_market_oracles", None)
+    if cache is None:
+        cache = iam_data._validation_market_oracles = {}
+    key = (sector, int(year), repr(getattr(iam_data, "system_model_args", None)))
+    if key not in cache:
+        oracle = consequential_method(
+            raw.copy(deep=True),
+            int(year),
+            getattr(iam_data, "system_model_args", None),
+            sector,
+        )
+        cache[key] = oracle.bfill(dim="year").fillna(0)
+    return cache[key]
 
 
 @lru_cache(maxsize=1)
@@ -307,11 +331,16 @@ def normalize_inventory_numeric_types(database):
             return float(value)
         return value
 
+    def assign_if_converted(mapping, key, value):
+        normalized = normalize_scalar(value)
+        if normalized is not value:
+            mapping[key] = normalized
+
     for dataset in database:
         for value in dataset.values():
             if isinstance(value, dict):
                 for key, item in value.items():
-                    value[key] = normalize_scalar(item)
+                    assign_if_converted(value, key, item)
         for exchange in dataset.get("exchanges", ()):
             amount = exchange.get("amount")
             if (
@@ -319,9 +348,11 @@ def normalize_inventory_numeric_types(database):
                 and not isinstance(amount, (bool, np.bool_))
                 and (not isinstance(amount, np.ndarray) or amount.size == 1)
             ):
-                exchange["amount"] = float(np.asarray(amount).reshape(-1)[0])
+                normalized_amount = float(np.asarray(amount).reshape(-1)[0])
+                if type(amount) is not float:
+                    exchange["amount"] = normalized_amount
             for key, value in tuple(exchange.items()):
-                exchange[key] = normalize_scalar(value)
+                assign_if_converted(exchange, key, value)
     return database
 
 
@@ -340,10 +371,24 @@ def normalize_inventory_uncertainty(database):
                 and not isinstance(amount, (bool, np.bool_))
                 and np.isfinite(amount)
             )
-            if uncertainty_type == 2 and numeric_amount and amount != 0:
-                if "loc" not in exchange:
-                    exchange["loc"] = float(math.log(abs(float(amount))))
-                exchange["negative"] = bool(amount < 0)
+            if uncertainty_type == 2 and numeric_amount:
+                if amount == 0:
+                    # A lognormal distribution cannot represent zero. Some
+                    # transformations legitimately scale an exchange to zero;
+                    # make that result deterministic before read-only
+                    # certification instead of leaving stale distribution
+                    # metadata attached to it.
+                    exchange["uncertainty type"] = 0
+                    exchange["loc"] = 0.0
+                    exchange.pop("negative", None)
+                    for field in ("scale", "minimum", "maximum", "shape"):
+                        exchange.pop(field, None)
+                else:
+                    if "loc" not in exchange:
+                        exchange["loc"] = float(math.log(abs(float(amount))))
+                    negative = bool(amount < 0)
+                    if exchange.get("negative") is not negative:
+                        exchange["negative"] = negative
             elif uncertainty_type == 3 and numeric_amount and "loc" not in exchange:
                 exchange["loc"] = float(amount)
             elif uncertainty_type == 5 and numeric_amount:
@@ -367,6 +412,7 @@ def normalize_exact_deterministic_exchange_duplicates(database):
     for dataset in database:
         normalized = []
         exact_rows = {}
+        duplicate_found = False
         for exchange in dataset.get("exchanges", ()):
             if exchange.get("type") != "technosphere" or int(
                 exchange.get("uncertainty type", 0) or 0
@@ -382,7 +428,9 @@ def normalize_exact_deterministic_exchange_duplicates(database):
                 normalized.append(exchange)
             else:
                 existing["amount"] += exchange["amount"]
-        dataset["exchanges"] = normalized
+                duplicate_found = True
+        if duplicate_found:
+            dataset["exchanges"] = normalized
     return database
 
 
@@ -1151,7 +1199,7 @@ class BaseDatasetValidator:
 
         return DatasetNormalizer.from_validator(self)
 
-    def _finalize_logs(self):
+    def _finalize_logs(self, *, phase_id=None, phase_kind=None):
         self.save_log()
         issues_by_rule = {}
         for issue in getattr(self, "validation_issues", ()):
@@ -1167,6 +1215,17 @@ class BaseDatasetValidator:
             )
             for rule_id, issues in sorted(issues_by_rule.items())
         )
+        is_export = self.__class__ is BaseDatasetValidator and self.db_name is not None
+        phase = ValidationPhaseResult(
+            phase_id=phase_id
+            or (
+                f"export:schema:{self.db_name}"
+                if is_export
+                else f"sector:{self.__class__.__name__.removesuffix('Validation').lower()}"
+            ),
+            kind=phase_kind or ("export" if is_export else "sector"),
+            rule_results=results,
+        )
         report = ValidationReport(
             scenario_identity=(
                 getattr(self, "model", None),
@@ -1177,6 +1236,7 @@ class BaseDatasetValidator:
             ruleset_version=VALIDATION_RULESET_VERSION,
             certificate_key="legacy-export-validation",
             rule_results=results,
+            phase_results=(phase,),
         )
         self.report = report
         report.raise_for_errors()
@@ -1684,12 +1744,13 @@ class HeatValidation(BaseDatasetValidator):
                     )
 
                 if efficiency > 3.0 and "co-generation" in ds["name"]:
-                    message = f"Heat conversion efficiency is {efficiency:.2f}, expected to be less than 3.0. Corrected to 3.0."
-                    self.log_issue(ds, "heat conversion efficiency", message)
-
-                    scaling_factor = efficiency / 3.0
-                    rescale_exchanges(ds, scaling_factor)
-                    expected_co2 *= scaling_factor
+                    message = f"Heat conversion efficiency is {efficiency:.2f}, expected to be less than 3.0."
+                    self.log_issue(
+                        ds,
+                        "heat conversion efficiency",
+                        message,
+                        issue_type="major",
+                    )
 
                 co2 = sum(
                     [
@@ -1849,14 +1910,11 @@ class TransportValidation(BaseDatasetValidator):
             return
 
         if not math.isclose(actual, expected, rel_tol=0.5):
-            new_actual = np.clip(actual, 0.9 * expected, 1.1 * expected)
-            if not 0.5 < new_actual / actual < 2:
-                message = f"Emission factor for {pollutant} has been corrected from {actual} to {new_actual}."
-                self.log_issue(ds, f"incorrect emission factor", message)
-
-            for exc in ds["exchanges"]:
-                if pollutant.lower() in exc["name"].lower():
-                    exc["amount"] *= new_actual / actual
+            message = (
+                f"Emission factor for {pollutant} is {actual}; expected approximately "
+                f"{expected}."
+            )
+            self.log_issue(ds, "incorrect emission factor", message, issue_type="major")
 
     def check_pollutant_emissions(self, vehicle_name):
 
@@ -1924,8 +1982,10 @@ class TransportValidation(BaseDatasetValidator):
                     [
                         x["amount"]
                         for x in ds["exchanges"]
-                        if x["name"].startswith("market group for electricity")
-                        or x["name"].startswith("market for electricity")
+                        if (
+                            x["name"].startswith("market group for electricity")
+                            or x["name"].startswith("market for electricity")
+                        )
                         and x["type"] == "technosphere"
                     ]
                 )
@@ -1946,8 +2006,10 @@ class TransportValidation(BaseDatasetValidator):
                     [
                         x["amount"]
                         for x in ds["exchanges"]
-                        if x["name"].startswith("market for diesel")
-                        or x["name"].startswith("market for petrol")
+                        if (
+                            x["name"].startswith("market for diesel")
+                            or x["name"].startswith("market for petrol")
+                        )
                         and x["type"] == "technosphere"
                     ]
                 )
@@ -1960,8 +2022,10 @@ class TransportValidation(BaseDatasetValidator):
                             * (47.5 if x["unit"] == "kilogram" else 36)
                             / 42.6
                             for x in ds["exchanges"]
-                            if x["name"].startswith("market for natural gas")
-                            or x["name"].startswith("market group for natural gas")
+                            if (
+                                x["name"].startswith("market for natural gas")
+                                or x["name"].startswith("market group for natural gas")
+                            )
                             and x["type"] == "technosphere"
                         ]
                     )
@@ -2068,7 +2132,12 @@ class ElectricityValidation(BaseDatasetValidator):
     def check_complete_electricity_supplier_vectors(self):
         """Compare every high-voltage supplier share with the IAM mix."""
 
-        if self.iam_data.electricity_mix is None or not self.technology_map:
+        target_mix = self.iam_data.electricity_mix
+        if self.system_model == "consequential":
+            target_mix = independent_consequential_mix(
+                self.iam_data, "electricity", self.year
+            )
+        if target_mix is None or not self.technology_map:
             self.log_issue(
                 {},
                 "missing electricity validation targets",
@@ -2106,7 +2175,7 @@ class ElectricityValidation(BaseDatasetValidator):
             return
 
         for market in markets:
-            mix = self.iam_data.electricity_mix.sel(region=market["location"])
+            mix = target_mix.sel(region=market["location"])
             if "year" in mix.dims:
                 if self.year in mix.coords["year"].values:
                     mix = mix.sel(year=self.year)
@@ -2478,7 +2547,7 @@ class ElectricityValidation(BaseDatasetValidator):
 
     def run_supplier_vector_checks(self):
         self.check_complete_electricity_supplier_vectors()
-        return self._finalize_logs()
+        return self._finalize_logs(phase_id="sector:electricity:supplier-vector")
 
     def run_electricity_checks(self, *, check_supplier_vectors=True):
         if check_supplier_vectors:
@@ -2527,7 +2596,13 @@ class FuelsValidation(BaseDatasetValidator):
         )
         checked = 0
         for market_prefix, attribute in families:
-            blend = getattr(self.iam_data, attribute, None)
+            sector = {
+                "petrol_blend": "petrol",
+                "diesel_blend": "diesel",
+                "kerosene_blend": "kerosene",
+                "lpg_blend": "lpg",
+            }[attribute]
+            blend = independent_consequential_mix(self.iam_data, sector, self.year)
             if blend is None:
                 continue
             variables = [
@@ -2817,7 +2892,7 @@ class FuelsValidation(BaseDatasetValidator):
 
     def run_consequential_supplier_vector_checks(self):
         self.check_consequential_fuel_supplier_vectors()
-        return self._finalize_logs()
+        return self._finalize_logs(phase_id="sector:fuels:supplier-vector")
 
     def run_fuel_checks(self, *, check_supplier_vectors=True):
         if check_supplier_vectors:

@@ -62,7 +62,10 @@ def _update_emissions(scenario, version, system_model, gains_scenario):
             system_model=system_model,
             gains_scenario=gains_scenario,
         )
-        emissions.update_emissions_in_store(store)
+        affected_activity_keys = emissions.update_emissions_in_store(store)
+        scenario.setdefault("_validation_direct_targets", {})["emissions"] = {
+            "activity_keys": sorted(affected_activity_keys, key=repr)
+        }
         return scenario
 
     emissions = Emissions(
@@ -337,11 +340,14 @@ class Emissions(BaseTransformation):
                     )
                     self.write_log(ds, status="updated")
 
-    def update_emissions_in_store(self, store: CompactInventoryStore) -> None:
+    def update_emissions_in_store(
+        self, store: CompactInventoryStore
+    ) -> frozenset[tuple[str, str, str]]:
         """Patch hot-pollutant exchanges directly in a compact transaction."""
 
         relevant = set(self.ei_pollutants)
         regions = self.gains_IAM.region.values
+        affected_activity_keys = set()
         with store.transaction("sector:emissions") as transaction:
             for activity_id, dataset, exchange_ids in store._iter_storage_activities():
                 name = dataset["name"]
@@ -381,6 +387,7 @@ class Emissions(BaseTransformation):
                             exchange,
                             scaling_factor,
                         ),
+                        activity_id=activity_id,
                     )
                     if "GAINS sector" not in log_parameters:
                         log_parameters["GAINS sector"] = sector
@@ -392,10 +399,18 @@ class Emissions(BaseTransformation):
                         activity_id,
                         {"log parameters": log_parameters},
                     )
+                    affected_activity_keys.add(
+                        (
+                            dataset.get("name"),
+                            dataset.get("reference product"),
+                            dataset.get("location"),
+                        )
+                    )
                 log_dataset = dict(dataset)
                 if log_changed:
                     log_dataset["log parameters"] = log_parameters
                 self.write_log(log_dataset, status="updated")
+        return frozenset(affected_activity_keys)
 
     def update_pollutant_emissions(
         self, dataset: dict, sector: str, regions: list

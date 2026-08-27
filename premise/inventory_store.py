@@ -2,8 +2,8 @@
 
 The store is deliberately stricter than the historical ``list[dict]`` API:
 readers receive immutable snapshots and writers must use a transaction.  The
-legacy implementation is the semantic oracle; the compact implementation adds
-copy-on-write forks and a versioned, columnar checkpoint representation.
+compact implementation adds copy-on-write forks and a versioned, columnar
+checkpoint representation.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ except ImportError:  # pragma: no cover - exercised only in minimal environments
 
 ActivityId: TypeAlias = int
 ExchangeId: TypeAlias = int
-STORE_SCHEMA_VERSION = 5
+STORE_SCHEMA_VERSION = 10
 _UNHASHABLE = object()
 _COLUMNAR_ACTIVITY_MISSING = object()
 
@@ -64,7 +64,7 @@ _EXCHANGE_STRING_FIELDS = (
     "type",
 )
 _EXCHANGE_STRING_FIELD_SET = frozenset(_EXCHANGE_STRING_FIELDS)
-_EXCHANGE_NUMERIC_FIELDS = ("amount",)
+_EXCHANGE_NUMERIC_FIELDS = ("amount", "uncertainty type")
 _EXCHANGE_BOOLEAN_FIELDS = ()
 _SCENARIO_CACHE_COMMON_FIELDS = (
     *_EXCHANGE_STRING_FIELDS,
@@ -247,6 +247,27 @@ class IndexedInventoryList(list):
         )
         self._query_indexes = None
         self._indexed_query_fields: set[str] = set()
+        self._validation_added_targets: dict[int, Mapping[str, Any]] | None = None
+
+    def track_validation_additions(
+        self, sink: dict[int, Mapping[str, Any]] | None
+    ) -> None:
+        """Record structural additions made by one sector transformation.
+
+        Initial contents are deliberately not recorded.  A fresh sink is attached
+        by :class:`BaseTransformation` at each sector boundary, and the immutable
+        validation intent retains the semantic keys after the sector completes.
+        """
+
+        self._validation_added_targets = sink
+
+    def _record_validation_additions(self, additions: Iterable[Any]) -> None:
+        sink = self._validation_added_targets
+        if sink is None:
+            return
+        for item in additions:
+            if isinstance(item, Mapping):
+                sink[id(item)] = item
 
     def _invalidate(self) -> None:
         self._query_indexes = None
@@ -415,17 +436,20 @@ class IndexedInventoryList(list):
 
     def append(self, item) -> None:
         super().append(item)
+        self._record_validation_additions((item,))
         self._index_item(len(self) - 1, item)
 
     def extend(self, iterable) -> None:
         additions = list(iterable)
         start = len(self)
         super().extend(additions)
+        self._record_validation_additions(additions)
         for offset, item in enumerate(additions):
             self._index_item(start + offset, item)
 
     def insert(self, index, item) -> None:
         super().insert(index, item)
+        self._record_validation_additions((item,))
         self._invalidate()
 
     def __setitem__(self, key, value) -> None:
@@ -677,6 +701,7 @@ class _StoreState:
     activity_exchanges: dict[ActivityId, list[ExchangeId] | range] = field(
         default_factory=dict
     )
+    activity_fingerprints: dict[ActivityId, str] = field(default_factory=dict)
     next_activity_id: int = 0
     next_exchange_id: int = 0
     generation: int = 0
@@ -816,6 +841,7 @@ class _ColumnarExchangeStorage:
         self._scenario_cache_deleted_fields_by_row: dict[int, tuple[str, ...]] = {}
         self._scenario_cache_scan_complete = not self.exchange_metadata_offsets
         self._scenario_cache_compatible_rows: np.ndarray | None = None
+        self._validation_modified_targets: dict[int, Mapping[str, Any]] | None = None
         self._biosphere_category_masks: dict[
             tuple[tuple[str, str], str], tuple[np.ndarray, np.ndarray]
         ] = {}
@@ -1565,12 +1591,13 @@ def compact_exchange_payload(payload: Mapping[str, Any]) -> MutableMapping[str, 
 class _ColumnarExchangeMapping(MutableMapping[str, Any]):
     """Mutable copy-on-write view over one compact exchange row."""
 
-    __slots__ = ("_storage", "_row", "_changes")
+    __slots__ = ("_storage", "_row", "_changes", "_validation_owner")
 
     def __init__(self, storage: _ColumnarExchangeStorage, row: int) -> None:
         self._storage = storage
         self._row = row
         self._changes: tuple[str, Any] | list[Any] | None = None
+        self._validation_owner: _ColumnarActivityMapping | None = None
 
     def _changed_value(self, key: str) -> Any:
         if self._changes is None:
@@ -1583,6 +1610,19 @@ class _ColumnarExchangeMapping(MutableMapping[str, Any]):
         return _COLUMNAR_MISSING
 
     def _set_change(self, key: str, value: Any) -> None:
+        owner = self._validation_owner
+        if owner is not None:
+            recorder = getattr(owner, "_record_validation_modification", None)
+            if recorder is not None:
+                recorder()
+            else:
+                # Scenario-delta checkpoints reconstruct activity overlays as
+                # ordinary dictionaries while retaining columnar exchange
+                # views. Keep scope tracking functional for those overlays;
+                # exporter normalization normally has no active sink.
+                sink = self._storage._validation_modified_targets
+                if sink is not None:
+                    sink[id(owner)] = owner
         if self._changes is None:
             self._changes = (key, value)
         elif isinstance(self._changes, tuple):
@@ -1796,13 +1836,13 @@ class _ColumnarExchangeMapping(MutableMapping[str, Any]):
             string_id = int(storage._string_columns[key][row])
             if string_id >= 0:
                 return storage._string_values[string_id]
-        elif key == "amount":
-            kind = int(storage._numeric_kinds["amount"][row])
+        elif key in _EXCHANGE_NUMERIC_FIELDS:
+            kind = int(storage._numeric_kinds[key][row])
             if kind != _NUMERIC_MISSING:
                 return _decode_numeric_column(
                     kind,
-                    storage._numeric_floats["amount"][row],
-                    storage._numeric_ints["amount"][row],
+                    storage._numeric_floats[key][row],
+                    storage._numeric_ints[key][row],
                 )
         elif key == "categories":
             first = int(storage._string_columns["categories__0"][row])
@@ -1829,13 +1869,13 @@ class _ColumnarExchangeMapping(MutableMapping[str, Any]):
             string_id = int(storage._string_columns[key][row])
             if string_id >= 0:
                 return storage._string_values[string_id]
-        elif key == "amount":
-            kind = int(storage._numeric_kinds["amount"][row])
+        elif key in _EXCHANGE_NUMERIC_FIELDS:
+            kind = int(storage._numeric_kinds[key][row])
             if kind != _NUMERIC_MISSING:
                 return _decode_numeric_column(
                     kind,
-                    storage._numeric_floats["amount"][row],
-                    storage._numeric_ints["amount"][row],
+                    storage._numeric_floats[key][row],
+                    storage._numeric_ints[key][row],
                 )
         elif key == "categories":
             first = int(storage._string_columns["categories__0"][row])
@@ -1914,6 +1954,7 @@ class _ColumnarExchangeMapping(MutableMapping[str, Any]):
 
         duplicate = type(self)(self._storage, self._row)
         memo[id(self)] = duplicate
+        duplicate._validation_owner = self._validation_owner
         if isinstance(self._changes, tuple):
             key, value = self._changes
             duplicate._changes = (
@@ -2015,6 +2056,11 @@ class _ColumnarActivityMapping(dict[str, Any]):
     def _metadata(self) -> Mapping[str, Any]:
         return self._storage.activity_payload(self._activity_id)
 
+    def _record_validation_modification(self) -> None:
+        sink = self._storage._validation_modified_targets
+        if sink is not None:
+            sink[id(self)] = self
+
     def _premise_common_value(self, key: str, default: Any = None) -> Any:
         """Read an Arrow-resident field without touching the metadata sidecar."""
 
@@ -2078,6 +2124,7 @@ class _ColumnarActivityMapping(dict[str, Any]):
         return value
 
     def __setitem__(self, key: str, value: Any) -> None:
+        self._record_validation_modification()
         self._deleted.discard(key)
         hot_attribute = _ACTIVITY_HOT_FIELD_ATTRIBUTES.get(key)
         if hot_attribute is not None:
@@ -2088,6 +2135,7 @@ class _ColumnarActivityMapping(dict[str, Any]):
     def __delitem__(self, key: str) -> None:
         if not self.__contains__(key):
             raise KeyError(key)
+        self._record_validation_modification()
         hot_attribute = _ACTIVITY_HOT_FIELD_ATTRIBUTES.get(key)
         if hot_attribute is not None:
             setattr(self, hot_attribute, _COLUMNAR_ACTIVITY_MISSING)
@@ -2229,6 +2277,8 @@ class _ColumnarActivityMapping(dict[str, Any]):
                             if compact_clone is not None
                             else copy.deepcopy(exchange, memo)
                         )
+                        if isinstance(cloned_value[position], _ColumnarExchangeMapping):
+                            cloned_value[position]._validation_owner = duplicate
             else:
                 cloned_value = copy.deepcopy(value, memo)
             dict.__setitem__(
@@ -2412,6 +2462,40 @@ def _hashable(value: Any) -> Any:
     return value
 
 
+def _activity_structural_fingerprint(
+    payload: Mapping[str, Any],
+    exchanges: Iterable[Mapping[str, Any]],
+    *,
+    canonical_order: bool = False,
+) -> str:
+    """Hash one activity independent of top-level mapping insertion order.
+
+    Compact columnar round-trips reconstruct hot fields in a different order
+    from imported dictionaries.  Ingestion canonicalizes those top-level maps
+    once, allowing its common path to be serialized directly in C.  The slower
+    fallback is used only after transaction mutations or by foreign stores.
+    """
+
+    if canonical_order:
+        activity = payload
+        exchange_rows = tuple(exchanges)
+    else:
+        activity = {key: payload[key] for key in sorted(payload)}
+        exchange_rows = tuple(
+            {key: exchange[key] for key in sorted(exchange)} for exchange in exchanges
+        )
+    encoded = pickle.dumps((activity, exchange_rows), protocol=pickle.HIGHEST_PROTOCOL)
+    return hashlib.blake2b(encoded, digest_size=16).hexdigest()
+
+
+def _canonicalize_top_level_mapping(payload: MutableMapping[str, Any]) -> None:
+    """Put string-keyed inventory fields in deterministic insertion order."""
+
+    items = sorted(payload.items())
+    payload.clear()
+    payload.update(items)
+
+
 def _normalise_query(
     query: ActivityQuery | FilterExpression | Mapping[str, Any] | Callable | None,
 ) -> ActivityQuery | Callable | None:
@@ -2551,10 +2635,10 @@ class InventoryStore(ABC):
 
 
 class _InMemoryInventoryStore(InventoryStore):
-    backend_name = "legacy"
-    eager_indexes = True
-    eager_exchange_owners = True
-    dense_exchange_table = False
+    backend_name = "compact"
+    eager_indexes = False
+    eager_exchange_owners = False
+    dense_exchange_table = True
 
     def __init__(
         self,
@@ -2563,6 +2647,7 @@ class _InMemoryInventoryStore(InventoryStore):
         scenario_identity: Any = None,
         take_ownership: bool = False,
         scenario_cache_compatibility: bool = False,
+        compute_fingerprints: bool = False,
     ) -> None:
         self._state = self._new_state()
         self._scenario_identity = scenario_identity
@@ -2574,6 +2659,7 @@ class _InMemoryInventoryStore(InventoryStore):
             database,
             take_ownership=take_ownership,
             scenario_cache_compatibility=scenario_cache_compatibility,
+            compute_fingerprints=compute_fingerprints,
         )
 
     def _new_state(self) -> _StoreState:
@@ -2600,6 +2686,28 @@ class _InMemoryInventoryStore(InventoryStore):
             _normalize_scenario_cache_exchange(payload)
         return payload
 
+    def _activity_fingerprint(self, activity_id: ActivityId) -> str:
+        fingerprint = self._state.activity_fingerprints.get(activity_id)
+        if fingerprint is None:
+            fingerprint = _activity_structural_fingerprint(
+                self._state.activities[activity_id],
+                (
+                    self._state.exchanges[exchange_id]
+                    for exchange_id in self._state.activity_exchanges[activity_id]
+                    if exchange_id in self._state.exchanges
+                ),
+            )
+            self._state.activity_fingerprints[activity_id] = fingerprint
+        return fingerprint
+
+    def _ensure_activity_fingerprints(self) -> dict[ActivityId, str]:
+        for activity_id in self.iter_activity_ids():
+            self._activity_fingerprint(activity_id)
+        return self._state.activity_fingerprints
+
+    def _invalidate_activity_fingerprint(self, activity_id: ActivityId) -> None:
+        self._state.activity_fingerprints.pop(activity_id, None)
+
     @property
     def generation(self) -> int:
         return self._state.generation
@@ -2614,6 +2722,7 @@ class _InMemoryInventoryStore(InventoryStore):
         *,
         take_ownership: bool,
         scenario_cache_compatibility: bool,
+        compute_fingerprints: bool,
     ) -> None:
         normalize_activity = None
         normalize_exchange = None
@@ -2627,6 +2736,7 @@ class _InMemoryInventoryStore(InventoryStore):
             normalize_exchange = _normalize_scenario_cache_exchange
 
         for dataset in database:
+            payload_is_plain = type(dataset) is dict
             payload = (
                 dataset
                 if take_ownership and isinstance(dataset, dict)
@@ -2635,13 +2745,19 @@ class _InMemoryInventoryStore(InventoryStore):
             if normalize_activity is not None:
                 normalize_activity(payload)
             exchanges = payload.pop("exchanges", [])
+            if payload_is_plain:
+                _canonicalize_top_level_mapping(payload)
             activity_id = self._state.next_activity_id
             self._state.next_activity_id += 1
             self._state.activities[activity_id] = payload
             self._state.activity_order.append(activity_id)
+            exchanges_are_plain = self.dense_exchange_table
             if self.dense_exchange_table:
                 exchange_start = self._state.next_exchange_id
+                exchanges_are_plain = True
                 for exchange in exchanges:
+                    exchange_is_plain = type(exchange) is dict
+                    exchanges_are_plain = exchanges_are_plain and exchange_is_plain
                     stored_exchange = (
                         exchange
                         if take_ownership and isinstance(exchange, Mapping)
@@ -2649,6 +2765,8 @@ class _InMemoryInventoryStore(InventoryStore):
                     )
                     if normalize_exchange is not None:
                         normalize_exchange(stored_exchange)
+                    if exchange_is_plain:
+                        _canonicalize_top_level_mapping(stored_exchange)
                     exchange_id = self._state.next_exchange_id
                     self._state.next_exchange_id += 1
                     self._state.exchanges[exchange_id] = stored_exchange
@@ -2667,16 +2785,25 @@ class _InMemoryInventoryStore(InventoryStore):
                     self._add_exchange_unchecked(
                         activity_id, exchange, take_ownership=take_ownership
                     )
+            if compute_fingerprints:
+                self._state.activity_fingerprints[activity_id] = (
+                    _activity_structural_fingerprint(
+                        payload,
+                        (
+                            self._state.exchanges[exchange_id]
+                            for exchange_id in self._state.activity_exchanges[
+                                activity_id
+                            ]
+                        ),
+                        canonical_order=payload_is_plain and exchanges_are_plain,
+                    )
+                )
         if self.eager_indexes:
             self._rebuild_indexes()
 
     def _ensure_owned_state(self) -> None:
         if self._shared_state:
-            self._state = (
-                self._copy_compact_state()
-                if self.backend_name == "compact"
-                else copy.deepcopy(self._state)
-            )
+            self._state = self._copy_compact_state()
             self._shared_state = False
 
     def _copy_compact_state(self) -> _StoreState:
@@ -2689,6 +2816,7 @@ class _InMemoryInventoryStore(InventoryStore):
         duplicate.exchanges = state.exchanges.shallow_copy()
         duplicate.exchange_owner = state.exchange_owner.copy()
         duplicate.activity_exchanges = state.activity_exchanges.copy()
+        duplicate.activity_fingerprints = state.activity_fingerprints.copy()
         duplicate.transaction_log = state.transaction_log.copy()
         return duplicate
 
@@ -2697,14 +2825,9 @@ class _InMemoryInventoryStore(InventoryStore):
 
         Transaction mutation methods replace activity and exchange dictionaries
         instead of changing existing payloads in place. A shallow structural
-        snapshot is therefore sufficient for compact stores and keeps a small
-        sector transaction from duplicating the complete inventory graph.
-        Legacy retains its historical deep-copy oracle semantics.
+        snapshot is therefore sufficient and keeps a small sector transaction
+        from duplicating the complete inventory graph.
         """
-
-        if self.backend_name != "compact":
-            return copy.deepcopy(self._state)
-
         return self._copy_compact_state()
 
     def _invalidate_indexes(self) -> None:
@@ -2778,6 +2901,25 @@ class _InMemoryInventoryStore(InventoryStore):
         if exchange_id not in self._state.exchanges:
             raise KeyError(f"Unknown exchange id: {exchange_id}")
         return MappingProxyType(self._state.exchanges[exchange_id])
+
+    def _iter_validation_storage(self):
+        """Yield direct payloads to the package's strictly read-only validator.
+
+        This is intentionally private: avoiding 1.6 million transient
+        ``MappingProxyType`` wrappers materially reduces certification time,
+        while all public store readers remain immutable.
+        """
+
+        for activity_id in self.iter_activity_ids():
+            yield (
+                activity_id,
+                self._state.activities[activity_id],
+                tuple(
+                    (exchange_id, self._state.exchanges[exchange_id])
+                    for exchange_id in self._state.activity_exchanges[activity_id]
+                    if exchange_id in self._state.exchanges
+                ),
+            )
 
     def activity(self, activity_id: ActivityId) -> ActivityRecord:
         return ActivityRecord(
@@ -2932,6 +3074,7 @@ class _InMemoryInventoryStore(InventoryStore):
         self._state.activity_exchanges[activity_id] = []
         for exchange in exchanges:
             self._add_exchange_unchecked(activity_id, exchange)
+        self._activity_fingerprint(activity_id)
         return activity_id
 
     def _add_exchange_unchecked(
@@ -2947,7 +3090,7 @@ class _InMemoryInventoryStore(InventoryStore):
         self._state.next_exchange_id += 1
         self._state.exchanges[exchange_id] = (
             payload
-            if take_ownership and isinstance(payload, Mapping)
+            if take_ownership and type(payload) is dict
             else copy.deepcopy(dict(payload))
         )
         self._normalize_scenario_exchange(self._state.exchanges[exchange_id])
@@ -2957,6 +3100,7 @@ class _InMemoryInventoryStore(InventoryStore):
         exchange_ids = list(exchange_ids)
         exchange_ids.append(exchange_id)
         self._state.activity_exchanges[activity_id] = exchange_ids
+        self._invalidate_activity_fingerprint(activity_id)
         return exchange_id
 
     def _remove_exchange_unchecked(self, exchange_id: ExchangeId) -> None:
@@ -2968,6 +3112,7 @@ class _InMemoryInventoryStore(InventoryStore):
         exchange_ids.remove(exchange_id)
         self._state.activity_exchanges[owner] = exchange_ids
         del self._state.exchanges[exchange_id]
+        self._invalidate_activity_fingerprint(owner)
 
     def _rebuild_indexes(self) -> None:
         fields: dict[str, dict[Any, list[ActivityId]]] = defaultdict(
@@ -3035,9 +3180,12 @@ class _InMemoryInventoryStore(InventoryStore):
 
 
 class LegacyInventoryStore(_InMemoryInventoryStore):
-    """Exact, dictionary-backed oracle implementation."""
+    """Dictionary-backed compatibility and differential-testing store."""
 
     backend_name = "legacy"
+    eager_indexes = True
+    eager_exchange_owners = True
+    dense_exchange_table = False
 
 
 class CompactInventoryStore(_InMemoryInventoryStore):
@@ -3103,6 +3251,9 @@ class CompactInventoryStore(_InMemoryInventoryStore):
                     if isinstance(exchange_ids, range)
                     else exchange_ids.copy()
                 )
+                fingerprint = self._state.activity_fingerprints.get(activity_id)
+                if fingerprint is not None:
+                    state.activity_fingerprints[activity_id] = fingerprint
 
             state.next_activity_id = self._state.next_activity_id
             state.next_exchange_id = self._state.next_exchange_id
@@ -3137,7 +3288,7 @@ class CompactInventoryStore(_InMemoryInventoryStore):
                     "every other reference."
                 )
             state = self._state
-            database = IndexedInventoryList(inventory_backend=self.backend_name)
+            database = IndexedInventoryList()
             # Bypass IndexedInventoryList.append: no query index exists yet,
             # and building it incrementally would only add overhead here.
             append = list.append
@@ -3150,6 +3301,9 @@ class CompactInventoryStore(_InMemoryInventoryStore):
                     for exchange_id in state.activity_exchanges[activity_id]
                     if exchange_id in state.exchanges
                 ]
+                for exchange in payload["exchanges"]:
+                    if isinstance(exchange, _ColumnarExchangeMapping):
+                        exchange._validation_owner = payload
                 append(database, payload)
             self._state = self._new_state()
             self._shared_state = False
@@ -3501,6 +3655,7 @@ class InventoryTransaction:
             payload.pop(field_name, None)
         self.store._normalize_scenario_activity(payload)
         self.store._state.activities[activity_id] = payload
+        self.store._invalidate_activity_fingerprint(activity_id)
         if exchanges is not None:
             self.replace_exchanges(activity_id, exchanges)
         else:
@@ -3514,6 +3669,7 @@ class InventoryTransaction:
             self.store._remove_exchange_unchecked(exchange_id)
         del self.store._state.activity_exchanges[activity_id]
         del self.store._state.activities[activity_id]
+        self.store._state.activity_fingerprints.pop(activity_id, None)
         self.store._invalidate_indexes()
 
     def add_exchange(
@@ -3529,6 +3685,8 @@ class InventoryTransaction:
         exchange_id: ExchangeId,
         updates: Mapping[str, Any],
         delete_fields: Iterable[str] = (),
+        *,
+        activity_id: ActivityId | None = None,
     ) -> None:
         self._require_entered()
         if exchange_id not in self.store._state.exchanges:
@@ -3539,6 +3697,16 @@ class InventoryTransaction:
             payload.pop(field_name, None)
         self.store._normalize_scenario_exchange(payload)
         self.store._state.exchanges[exchange_id] = payload
+        if activity_id is None:
+            self.store._ensure_exchange_owners()
+            activity_id = self.store._state.exchange_owner[exchange_id]
+        elif exchange_id not in self.store._state.activity_exchanges.get(
+            activity_id, ()
+        ):
+            raise ValueError(
+                f"Exchange {exchange_id} does not belong to activity {activity_id}."
+            )
+        self.store._invalidate_activity_fingerprint(activity_id)
         self.store._invalidate_indexes()
 
     def remove_exchange(self, exchange_id: ExchangeId) -> None:
@@ -3597,22 +3765,21 @@ def create_inventory_store(
     scenario_identity: Any = None,
     take_ownership: bool = False,
     scenario_cache_compatibility: bool = False,
+    compute_fingerprints: bool = False,
 ) -> InventoryStore:
-    if backend == "compact":
-        return CompactInventoryStore(
-            database,
-            scenario_identity=scenario_identity,
-            take_ownership=take_ownership,
-            scenario_cache_compatibility=scenario_cache_compatibility,
-        )
-    if backend == "legacy":
-        return LegacyInventoryStore(
-            database,
-            scenario_identity=scenario_identity,
-            take_ownership=take_ownership,
-            scenario_cache_compatibility=scenario_cache_compatibility,
-        )
-    raise ValueError("inventory_backend must be either 'compact' or 'legacy'.")
+    store_class = {
+        "compact": CompactInventoryStore,
+        "legacy": LegacyInventoryStore,
+    }.get(backend)
+    if store_class is None:
+        raise ValueError("inventory_backend must be either 'compact' or 'legacy'.")
+    return store_class(
+        database,
+        scenario_identity=scenario_identity,
+        take_ownership=take_ownership,
+        scenario_cache_compatibility=scenario_cache_compatibility,
+        compute_fingerprints=compute_fingerprints,
+    )
 
 
 def get_scenario_inventory(scenario: dict[str, Any]) -> list[dict[str, Any]]:
@@ -3667,10 +3834,10 @@ def replace_scenario_inventory(
     store = scenario.get("_inventory_store")
     if store is None:
         current = scenario.get("_inventory_working_copy")
-        inventory_backend = getattr(
-            database,
-            "_inventory_backend",
-            getattr(current, "_inventory_backend", scenario.get("_inventory_backend")),
+        inventory_backend = (
+            getattr(database, "_inventory_backend", None)
+            or getattr(current, "_inventory_backend", None)
+            or scenario.get("_inventory_backend")
         )
         scenario["_inventory_backend"] = inventory_backend
         scenario["_inventory_working_copy"] = IndexedInventoryList(
@@ -3693,6 +3860,31 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _read_activity_fingerprints(
+    path: Path, activity_ids: Iterable[ActivityId]
+) -> dict[ActivityId, str]:
+    try:
+        fingerprints = pickle.loads((path / "activity-fingerprints.pkl").read_bytes())
+    except Exception as error:
+        raise InventoryStoreCorruptionError(
+            "Invalid activity fingerprint checkpoint payload."
+        ) from error
+    expected_ids = {int(activity_id) for activity_id in activity_ids}
+    if not isinstance(fingerprints, dict) or not set(fingerprints).issubset(
+        expected_ids
+    ):
+        raise InventoryStoreCorruptionError(
+            "Activity fingerprint IDs are not checkpoint activities."
+        )
+    if not all(
+        isinstance(value, str) and len(value) == 32 for value in fingerprints.values()
+    ):
+        raise InventoryStoreCorruptionError(
+            "Activity fingerprint checkpoint values are invalid."
+        )
+    return {int(key): value for key, value in fingerprints.items()}
 
 
 def _write_table(path: Path, columns: Mapping[str, list[Any]]) -> None:
@@ -3897,8 +4089,13 @@ def _write_checkpoint_payloads(
             metadata = _exchange_sidecar_metadata(payload, numeric_kinds=numeric_kinds)
 
         if scenario_cache_compatibility:
-            assert exchange_field_is_restored is not None
-            assert normalize_exchange_metadata is not None
+            if (
+                exchange_field_is_restored is None
+                or normalize_exchange_metadata is None
+            ):
+                raise InventoryStoreError(
+                    "Scenario-compatible exchange metadata hooks are unavailable."
+                )
             if any(
                 not exchange_field_is_restored(field_name, value)
                 for field_name, value in metadata.items()
@@ -3939,7 +4136,8 @@ def _write_checkpoint_payloads(
     def flush(writer) -> None:
         if not columns["exchange_id"]:
             return
-        assert schema is not None
+        if schema is None:
+            raise InventoryStoreError("Arrow exchange schema is unavailable.")
         arrays = []
         for arrow_field in schema:
             values = columns[arrow_field.name]
@@ -4287,6 +4485,12 @@ def _write_scenario_delta_checkpoint(
             )
         delta_stream.close()
         delta_stream = None
+        (temporary / "activity-fingerprints.pkl").write_bytes(
+            pickle.dumps(
+                dict(store._state.activity_fingerprints),
+                protocol=pickle.HIGHEST_PROTOCOL,
+            )
+        )
 
         try:
             from . import __version__ as premise_version
@@ -4324,7 +4528,11 @@ def _write_scenario_delta_checkpoint(
         (temporary / "manifest.json").write_text(manifest_text, encoding="utf-8")
         checksums = {
             name: _sha256(temporary / name)
-            for name in ("manifest.json", "scenario-delta.pkl")
+            for name in (
+                "manifest.json",
+                "scenario-delta.pkl",
+                "activity-fingerprints.pkl",
+            )
         }
         (temporary / "checksums.json").write_text(
             json.dumps(checksums, sort_keys=True, indent=2), encoding="utf-8"
@@ -4369,6 +4577,13 @@ def _write_checkpoint(store: _InMemoryInventoryStore, path: Path) -> Path:
     backup: Path | None = None
     try:
         offsets, activities, strings = _write_checkpoint_payloads(store, temporary)
+
+        (temporary / "activity-fingerprints.pkl").write_bytes(
+            pickle.dumps(
+                dict(store._state.activity_fingerprints),
+                protocol=pickle.HIGHEST_PROTOCOL,
+            )
+        )
 
         _write_table(temporary / "strings.arrow", {"value": strings})
         _write_table(temporary / "activities.arrow", dict(activities))
@@ -4416,6 +4631,7 @@ def _write_checkpoint(store: _InMemoryInventoryStore, path: Path) -> Path:
             "exchanges.arrow",
             "metadata.bin",
             "metadata_offsets.arrow",
+            "activity-fingerprints.pkl",
         ]
         checksums = {name: _sha256(temporary / name) for name in checksummed}
         (temporary / "checksums.json").write_text(
@@ -4635,6 +4851,9 @@ def _open_scenario_delta_checkpoint(
     store._state.next_activity_id = max(store._state.activity_order, default=-1) + 1
     store._state.next_exchange_id = len(exchange_table._rows)
     store._state.generation = int(manifest.get("generation", 0))
+    store._state.activity_fingerprints = _read_activity_fingerprints(
+        path, store._state.activity_order
+    )
     store._scenario_identity = manifest.get("scenario_identity")
     store._lock = threading.RLock()
     store._active_transaction = False
@@ -4694,6 +4913,10 @@ def _open_checkpoint(path: Path) -> InventoryStore:
 
     activities = _read_table(path / "activities.arrow")
     backend = manifest.get("backend", "compact")
+    if backend not in {"compact", "legacy"}:
+        raise InventoryStoreVersionError(
+            f"Unsupported inventory-store backend {backend!r}."
+        )
     if (
         backend == "compact"
         and pa is not None
@@ -4744,6 +4967,9 @@ def _open_checkpoint(path: Path) -> InventoryStore:
             int(storage.exchange_ids.max()) + 1 if storage.row_count else 0
         )
         store._state.generation = int(manifest.get("generation", 0))
+        store._state.activity_fingerprints = _read_activity_fingerprints(
+            path, store._state.activity_order
+        )
         store._scenario_identity = manifest.get("scenario_identity")
         store._lock = threading.RLock()
         store._active_transaction = False
@@ -4820,11 +5046,14 @@ def _open_checkpoint(path: Path) -> InventoryStore:
 
     store = create_inventory_store(
         database,
-        backend=backend if backend in {"compact", "legacy"} else "compact",
+        backend=backend,
         scenario_identity=manifest.get("scenario_identity"),
         take_ownership=True,
     )
     store._state.generation = int(manifest.get("generation", 0))
+    store._state.activity_fingerprints = _read_activity_fingerprints(
+        path, store._state.activity_order
+    )
     store._validation_certificate_payload = manifest.get("validation_certificate")
     return store
 

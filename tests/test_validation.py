@@ -1,14 +1,101 @@
 import numpy as np
+import xarray as xr
+from types import SimpleNamespace
 
+import premise.validation as validation_module
 from premise.geomap import Geomap
 from premise.inventory_imports import canonicalize_classification_key
 from premise.validation import (
     BaseDatasetValidator,
     DatasetNormalizer,
+    TransportValidation,
     normalize_exact_deterministic_exchange_duplicates,
     normalize_inventory_numeric_types,
     normalize_inventory_uncertainty,
 )
+
+
+def test_transport_energy_filters_require_technosphere_exchanges():
+    validator = object.__new__(TransportValidation)
+    validator.database = [
+        {
+            "name": "transport, passenger car, unspecified",
+            "location": "EUR",
+            "exchanges": [
+                {
+                    "name": "market group for electricity, low voltage",
+                    "type": "production",
+                    "unit": "kilowatt hour",
+                    "amount": 5.0,
+                },
+                {
+                    "name": "market for diesel",
+                    "type": "biosphere",
+                    "unit": "kilogram",
+                    "amount": 5.0,
+                },
+                {
+                    "name": "market for natural gas",
+                    "type": "production",
+                    "unit": "kilogram",
+                    "amount": 5.0,
+                },
+            ],
+        }
+    ]
+    validator.regions = ["EUR"]
+    validator.major_issues_log = []
+    validator.minor_issues_log = []
+    validator.validation_issues = []
+
+    validator.check_vehicle_efficiency("transport, passenger car")
+
+    assert validator.major_issues_log == []
+
+
+def test_consequential_validation_recomputes_and_caches_an_independent_mix(
+    monkeypatch,
+):
+    raw = xr.DataArray(
+        np.array([[[10.0, 12.0], [20.0, 18.0]]]),
+        dims=("region", "variables", "year"),
+        coords={
+            "region": ["World"],
+            "variables": ["technology A", "technology B"],
+            "year": [2040, 2050],
+        },
+    )
+    average_mix = raw / raw.sum(dim="variables")
+    iam_data = SimpleNamespace(
+        electricity_mix=average_mix,
+        system_model_args={"range time": 2},
+        _validation_market_inputs={"electricity": raw.copy(deep=True)},
+        _validation_market_oracles={},
+    )
+    calls = []
+
+    def oracle(data, year, args, sector):
+        calls.append((year, args, sector))
+        assert data.identical(raw)
+        data.values[:] = 0.0
+        data.loc[dict(variables="technology B")] = 1.0
+        return data
+
+    monkeypatch.setattr(validation_module, "consequential_method", oracle)
+
+    first = validation_module.independent_consequential_mix(
+        iam_data, "electricity", 2050
+    )
+    second = validation_module.independent_consequential_mix(
+        iam_data, "electricity", 2050
+    )
+
+    assert calls == [(2050, {"range time": 2}, "electricity")]
+    assert first.identical(second)
+    assert first.sel(variables="technology A").sum().item() == 0.0
+    assert first.sel(variables="technology B").sum().item() == 2.0
+    assert iam_data._validation_market_inputs["electricity"].identical(raw)
+    assert not first.identical(iam_data.electricity_mix)
 
 
 def _validator_for_locations(database_locations, regions=None, extra_regions=None):
@@ -128,6 +215,27 @@ def test_uncertainty_normalization_repairs_lognormal_sign_metadata():
     normalize_inventory_uncertainty(database)
 
     assert database[0]["exchanges"][0]["negative"] is True
+
+
+def test_uncertainty_normalization_makes_zero_lognormal_deterministic():
+    database = [
+        {
+            "exchanges": [
+                {
+                    "amount": 0.0,
+                    "uncertainty type": 2,
+                    "loc": -10.0,
+                    "scale": 0.2,
+                    "negative": False,
+                }
+            ]
+        }
+    ]
+
+    normalize_inventory_uncertainty(database)
+
+    exchange = database[0]["exchanges"][0]
+    assert exchange == {"amount": 0.0, "uncertainty type": 0, "loc": 0.0}
 
 
 def test_exact_deterministic_duplicates_are_summed_but_stochastic_rows_remain():

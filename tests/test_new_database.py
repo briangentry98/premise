@@ -115,6 +115,25 @@ def test_compact_geography_topology_is_shared_by_model_and_regions():
     assert "cache" not in legacy_scenario
 
 
+def test_validation_iam_fingerprint_tracks_source_content(tmp_path):
+    source = tmp_path / "image_path.csv"
+    source.write_text("first", encoding="utf-8")
+    obj = object.__new__(NewDatabase)
+    scenario = {
+        "model": "image",
+        "pathway": "path",
+        "year": 2050,
+        "filepath": source,
+    }
+
+    first = obj._validation_iam_fingerprint(scenario)
+    assert obj._validation_iam_fingerprint(scenario) == first
+
+    source.write_text("second-content", encoding="utf-8")
+
+    assert obj._validation_iam_fingerprint(scenario) != first
+
+
 def test_ecospold_constructor_does_not_check_biosphere_database(monkeypatch):
     def fail_if_called(_):
         raise AssertionError("constructor should not validate biosphere presence")

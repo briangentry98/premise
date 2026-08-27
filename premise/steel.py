@@ -11,6 +11,7 @@ from .inventory_store import get_scenario_inventory, replace_scenario_inventory
 from .transformation import BaseTransformation, ws
 from .utils import rescale_exchanges
 from .validation import SteelValidation
+from .validation_framework import record_validation_phase
 from .activity_maps import InventorySet
 
 logger = create_logger("steel")
@@ -55,7 +56,7 @@ def _update_steel(scenario, version, system_model):
         iam_data=scenario["iam data"],
         system_model=system_model,
     )
-    validate.run_steel_checks()
+    record_validation_phase(scenario, validate.run_steel_checks())
 
     return scenario
 

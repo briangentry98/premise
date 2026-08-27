@@ -22,6 +22,7 @@ from .transformation import (
     ws,
 )
 from .validation import CementValidation
+from .validation_framework import record_validation_phase
 
 logger = create_logger("cement")
 
@@ -66,7 +67,7 @@ def _update_cement(scenario, version, system_model):
             iam_data=scenario["iam data"],
         )
 
-        validate.run_cement_checks()
+        record_validation_phase(scenario, validate.run_cement_checks())
     else:
         print("No cement markets found in IAM data. Skipping.")
 

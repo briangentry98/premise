@@ -24,6 +24,7 @@ from .transformation import (
 )
 from .activity_maps import InventorySet, act_fltr, get_mapping
 from .validation import BiomassValidation
+from .validation_framework import record_validation_phase
 
 IAM_BIOMASS_VARS = VARIABLES_DIR / "biomass.yaml"
 BIOMASS_ACTIVITIES = DATA_DIR / "biomass" / "biomass_activities.yaml"
@@ -66,7 +67,7 @@ def _update_biomass(scenario, version, system_model):
         system_model=system_model,
     )
 
-    validate.run_biomass_checks()
+    record_validation_phase(scenario, validate.run_biomass_checks())
 
     replace_scenario_inventory(scenario, biomass.database)
     scenario["index"] = biomass.index

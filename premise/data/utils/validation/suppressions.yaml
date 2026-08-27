@@ -47,13 +47,12 @@
     feedback path.
 - rule_id: GRAPH.NEW_FORBIDDEN_CYCLE
   dataset:
-    name: Distiller's Dried Grains with Solubles to generic market for protein feed
-    product: Distiller's Dried Grains with Solubles
+    name_pattern: "^Distiller's Dried Grains with Solubles to generic market for (energy|protein) feed$"
     location: GLO
   versions: ["3.8", "3.9", "3.10", "3.11", "3.12"]
-  system_models: [consequential]
+  system_models: [cutoff, consequential]
   explanation: >-
-    The consequential ecoinvent DDGS substitution chain intentionally links
+    The ecoinvent DDGS substitution chain intentionally links
     the global DDGS market and generic feed markets back through the DDGS
     conversion activity. Relinking resolves the source-code exchanges into the
     documented substitution loop without changing its modeled amounts.

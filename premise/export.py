@@ -1252,9 +1252,12 @@ def prepare_db_for_export(
     if make_normalizer is not None:
         validator.database = make_normalizer().normalize_database()
     if _has_semantic_certificate(scenario):
-        validator.run_export_schema_checks()
+        report = validator.run_export_schema_checks()
     else:
-        validator.run_all_checks()
+        report = validator.run_all_checks()
+
+    if isinstance(report, ValidationReport) and report.phase_results:
+        scenario["_export_validation_phase"] = report.phase_results[0].to_dict()
 
     return validator.database
 
@@ -1283,9 +1286,12 @@ def prepare_db_for_fast_export(scenario, name, version, biosphere_name=None):
     if _has_semantic_certificate(scenario) and hasattr(
         validator, "run_export_schema_checks"
     ):
-        validator.run_export_schema_checks()
+        report = validator.run_export_schema_checks()
     else:
-        validator.run_fast_export_checks()
+        report = validator.run_fast_export_checks()
+
+    if isinstance(report, ValidationReport) and report.phase_results:
+        scenario["_export_validation_phase"] = report.phase_results[0].to_dict()
 
     return validator.database
 

@@ -620,6 +620,11 @@ class IAMDataCollection:
 
         self.regions = data.region.values.tolist()
         self.system_model = system_model
+        # Inputs retained before normalization/marginalization allow validation
+        # to recompute consequential mixes independently from the arrays used
+        # by transformations.
+        self._validation_market_inputs = {}
+        self._validation_market_oracles = {}
 
         self.gains_data_IAM = get_gains_IAM_data(
             self.model, gains_scenario=gains_scenario
@@ -1601,6 +1606,9 @@ class IAMDataCollection:
             set(market_data.coords["variables"].values.tolist())
         ):
             market_data = market_data.groupby("variables").sum(dim="variables")
+
+        if sector is not None:
+            self._validation_market_inputs[sector] = market_data.copy(deep=True)
 
         if system_model == "consequential":
             market_data = consequential_method(

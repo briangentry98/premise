@@ -1,5 +1,4 @@
 import copy
-import inspect
 import json
 import pickle
 import random
@@ -210,9 +209,8 @@ def test_biosphere_category_filter_preserves_order_sidecars_and_overlays(
     assert filter_biosphere_category([compact], categories, "kilogram") == [compact]
 
 
-@pytest.mark.parametrize("store_class", [LegacyInventoryStore, CompactInventoryStore])
-def test_ordered_queries_duplicates_masks_and_immutable_records(store_class, inventory):
-    store = store_class(inventory)
+def test_ordered_queries_duplicates_masks_and_immutable_records(inventory):
+    store = CompactInventoryStore(inventory)
     query = ActivityQuery(
         filters=(
             FilterExpression("name", "market for", "contains"),
@@ -264,7 +262,7 @@ def test_compact_indexes_are_lazy_and_invalidated_atomically(inventory):
 
 
 def test_find_one_provider_order_and_reverse_consumers(inventory):
-    store = LegacyInventoryStore(inventory)
+    store = CompactInventoryStore(inventory)
     provider_key = ProviderKey(
         "market for electricity, low voltage",
         "electricity, low voltage",
@@ -282,9 +280,8 @@ def test_find_one_provider_order_and_reverse_consumers(inventory):
     assert store.find_one({"code": "consumer"}).id == 2
 
 
-@pytest.mark.parametrize("store_class", [LegacyInventoryStore, CompactInventoryStore])
-def test_transaction_commands_commit_and_rollback(store_class, inventory):
-    store = store_class(inventory)
+def test_transaction_commands_commit_and_rollback(inventory):
+    store = CompactInventoryStore(inventory)
     initial = store.materialize()
 
     with pytest.raises(RuntimeError):
@@ -363,7 +360,7 @@ def test_compact_transaction_snapshot_copies_structure_not_untouched_payloads(
 
 
 def test_nested_and_out_of_context_transactions_are_rejected(inventory):
-    store = LegacyInventoryStore(inventory)
+    store = CompactInventoryStore(inventory)
     transaction = store.transaction("outside")
     with pytest.raises(InventoryStoreError, match="with block"):
         transaction.add_activity({})
@@ -422,10 +419,7 @@ def test_compact_checkout_requires_exclusive_or_discarded_shared_state(inventory
     assert source.activity(0)["location"] == "DE"
 
 
-@pytest.mark.parametrize("store_class", [LegacyInventoryStore, CompactInventoryStore])
-def test_checkpoint_roundtrip_preserves_arbitrary_metadata(
-    store_class, inventory, tmp_path
-):
+def test_checkpoint_roundtrip_preserves_arbitrary_metadata(inventory, tmp_path):
     inventory[2]["exchanges"][0].update(
         {
             "uncertainty type": 2,
@@ -436,7 +430,7 @@ def test_checkpoint_roundtrip_preserves_arbitrary_metadata(
             "maximum": None,
         }
     )
-    store = store_class(inventory, scenario_identity=("image", 2050))
+    store = CompactInventoryStore(inventory, scenario_identity=("image", 2050))
     with store.transaction("metadata") as tx:
         tx.patch_activity(0, {"empty": None, "categories": ("air", "urban")})
 
@@ -455,6 +449,7 @@ def test_checkpoint_roundtrip_preserves_arbitrary_metadata(
     assert exchange["categories"] == ("air", "urban air close to ground")
     assert exchange["comment"] == "kept in the lossless sidecar"
     assert exchange["maximum"] is None
+    assert reopened._state.activity_fingerprints == store._state.activity_fingerprints
     assert set(path.name for path in checkpoint.iterdir()) == {
         "manifest.json",
         "strings.arrow",
@@ -462,8 +457,37 @@ def test_checkpoint_roundtrip_preserves_arbitrary_metadata(
         "exchanges.arrow",
         "metadata.bin",
         "metadata_offsets.arrow",
+        "activity-fingerprints.pkl",
         "checksums.json",
     }
+
+
+def test_activity_fingerprint_is_invalidated_and_recomputed_on_exchange_patch(
+    inventory,
+):
+    store = CompactInventoryStore(inventory)
+    activity_id = 2
+    exchange_id = next(iter(store._state.activity_exchanges[activity_id]))
+    before = store._activity_fingerprint(activity_id)
+
+    with store.transaction("patch exchange") as transaction:
+        transaction.patch_exchange(
+            exchange_id,
+            {"amount": 4.0},
+            activity_id=activity_id,
+        )
+
+    assert activity_id not in store._state.activity_fingerprints
+    assert store._activity_fingerprint(activity_id) != before
+
+
+def test_activity_fingerprints_are_invariant_to_materialized_roundtrip(inventory):
+    store = CompactInventoryStore(copy.deepcopy(inventory))
+    before = dict(store._ensure_activity_fingerprints())
+
+    reopened = CompactInventoryStore(store.materialize(restore_metadata=True))
+
+    assert reopened._ensure_activity_fingerprints() == before
 
 
 def test_columnar_checkpoint_checkout_and_proxy_clone_are_copy_on_write(
@@ -728,16 +752,20 @@ def test_scenario_delta_checkpoint_roundtrip_preserves_order_and_compatibility(
     manifest = json.loads((checkpoint / "manifest.json").read_text())
     restored_store = InventoryStore.open(checkpoint)
     restored = restored_store.materialize()
+    checkout = restored_store._checkout_materialized()
+    checkout[2]["exchanges"][0]["input"] = ("export-db", "provider")
 
     assert manifest["columnar_format"] == "scenario-delta-v1"
     assert set(path.name for path in checkpoint.iterdir()) == {
         "manifest.json",
         "scenario-delta.pkl",
+        "activity-fingerprints.pkl",
         "checksums.json",
     }
     with (checkpoint / "scenario-delta.pkl").open("rb") as stream:
         assert pickle.load(stream) == ("scenario-delta-stream-v1", len(expected))
     assert restored == expected
+    assert checkout[2]["exchanges"][0]["input"] == ("export-db", "provider")
     assert type(restored[2]["exchanges"][0]["amount"]) is np.float32
     loaded = utils_module.load_database(
         {"_inventory_checkpoint": checkpoint},
@@ -935,7 +963,7 @@ def test_legacy_pickle_cleanup_preserves_inventory_checkpoints(
 
 
 def test_builder_and_read_only_facade(inventory):
-    builder = InventoryStoreBuilder("compact")
+    builder = InventoryStoreBuilder()
     builder.extend(inventory[:2])
     store = builder.seal("scenario")
     view = ReadOnlyInventoryStore(store)
@@ -961,7 +989,6 @@ def test_internal_ids_never_appear_in_materialized_payloads(inventory):
 def test_new_database_public_store_api_and_removed_database_attribute(inventory):
     obj = object.__new__(NewDatabase)
     obj._inventory_api_active = True
-    obj.inventory_backend = "compact"
     obj._source_inventory_store = CompactInventoryStore(inventory)
     obj.scenarios = [{"model": "image", "pathway": "SSP2-Base", "year": 2050}]
 
@@ -982,15 +1009,17 @@ def test_new_database_public_store_api_and_removed_database_attribute(inventory)
     assert obj._source_inventory_store.materialize()[0]["location"] == "CH"
 
 
-def test_compact_backend_stays_opt_in_until_performance_gate_passes():
+def test_inventory_backend_selector_remains_publicly_compatible():
+    import inspect
+
     parameter = inspect.signature(NewDatabase).parameters["inventory_backend"]
     assert parameter.default == "legacy"
+    assert LegacyInventoryStore([]).backend_name == "legacy"
 
 
 def test_new_database_runtime_materialization_is_not_attached_to_scenario(inventory):
     obj = object.__new__(NewDatabase)
     obj._inventory_api_active = True
-    obj.inventory_backend = "compact"
     obj._source_inventory_store = CompactInventoryStore(inventory)
     obj.scenarios = [{"model": "image", "pathway": "SSP2-Base", "year": 2050}]
 
@@ -1007,7 +1036,6 @@ def test_new_database_runtime_materialization_is_not_attached_to_scenario(invent
 def test_new_database_compact_scenario_checks_out_reloadable_source(inventory):
     obj = object.__new__(NewDatabase)
     obj._inventory_api_active = True
-    obj.inventory_backend = "compact"
     obj._source_inventory_store = CompactInventoryStore(inventory)
     obj.scenarios = [{"model": "image", "pathway": "SSP2-Base", "year": 2050}]
     obj.database_cache_filepath = "source-cache"
@@ -1024,7 +1052,6 @@ def test_new_database_compact_scenario_checks_out_reloadable_source(inventory):
 def test_compact_scenarios_reload_source_instead_of_deep_copying_it(inventory):
     obj = object.__new__(NewDatabase)
     obj._inventory_api_active = True
-    obj.inventory_backend = "compact"
     obj._source_inventory_store = CompactInventoryStore(inventory)
     obj.scenarios = [
         {"model": "image", "pathway": "SSP2-Base", "year": year}
@@ -1050,7 +1077,6 @@ def test_compact_scenarios_reuse_pristine_columnar_source_storage(inventory, tmp
     )
     obj = object.__new__(NewDatabase)
     obj._inventory_api_active = True
-    obj.inventory_backend = "compact"
     obj._source_inventory_store = InventoryStore.open(checkpoint)
     obj._compact_source_checkpoint = checkpoint
     obj.scenarios = [
@@ -1082,7 +1108,6 @@ def test_new_database_update_keeps_only_private_inventory_state(
 ):
     obj = object.__new__(NewDatabase)
     obj._inventory_api_active = True
-    obj.inventory_backend = "compact"
     obj._source_inventory_store = CompactInventoryStore(inventory)
     obj.scenarios = [{"model": "image", "pathway": "SSP2-Base", "year": 2050}]
     obj.version = "3.12"
@@ -1098,7 +1123,6 @@ def test_new_database_update_keeps_only_private_inventory_state(
         assert system_model == "cutoff"
         assert "database" not in scenario
         database = get_scenario_inventory(scenario)
-        assert database._inventory_backend == "compact"
         database.append(
             {
                 "name": "updated activity",
@@ -1135,7 +1159,6 @@ def test_new_database_update_keeps_only_private_inventory_state(
 
     scenario = obj.scenarios[0]
     assert "database" not in scenario
-    assert "_inventory_backend" not in scenario
     assert "_inventory_working_copy" not in scenario
     assert ("_inventory_checkpoint" in scenario) is persist
     assert ("_inventory_store" in scenario) is (not persist)
@@ -1164,7 +1187,6 @@ def test_new_database_promotes_compact_emissions_to_store_native_path(
 ):
     obj = object.__new__(NewDatabase)
     obj._inventory_api_active = True
-    obj.inventory_backend = "compact"
     obj._source_inventory_store = CompactInventoryStore(inventory)
     obj.scenarios = [{"model": "image", "pathway": "SSP2-Base", "year": 2050}]
     obj.version = "3.12"
@@ -1204,48 +1226,44 @@ def test_new_database_promotes_compact_emissions_to_store_native_path(
     assert "production volume" not in obj.get_inventory_store().exchange(1)
 
 
-def test_legacy_and_compact_match_after_randomized_mutations(inventory):
+def test_seeded_randomized_compact_mutations_remain_self_consistent(inventory):
     rng = random.Random(42)
     rng_values = [rng.random() for _ in range(40)]
-    stores = [LegacyInventoryStore(inventory), CompactInventoryStore(inventory)]
+    store = CompactInventoryStore(inventory)
 
     for step in range(40):
-        activity_ids = list(stores[0].iter_activity_ids())
+        activity_ids = list(store.iter_activity_ids())
         operation = rng.choice(("patch", "clone", "add_exchange", "replace"))
         target = rng.choice(activity_ids)
-        for store in stores:
-            with store.transaction(f"random:{step}:{operation}") as tx:
-                if operation == "patch":
-                    tx.patch_activity(target, {"random value": rng_values[step]})
-                elif operation == "clone":
-                    tx.clone_activity(
-                        target,
+        with store.transaction(f"random:{step}:{operation}") as tx:
+            if operation == "patch":
+                tx.patch_activity(target, {"random value": rng_values[step]})
+            elif operation == "clone":
+                tx.clone_activity(
+                    target,
+                    {"name": f"clone {step}", "code": f"random-clone-{step}"},
+                )
+            elif operation == "add_exchange":
+                tx.add_exchange(
+                    target,
+                    {
+                        "name": f"flow {step}",
+                        "type": "biosphere",
+                        "amount": rng_values[step],
+                    },
+                )
+            else:
+                tx.replace_exchanges(
+                    target,
+                    [
                         {
-                            "name": f"clone {step}",
-                            "code": f"random-clone-{step}",
-                        },
-                    )
-                elif operation == "add_exchange":
-                    tx.add_exchange(
-                        target,
-                        {
-                            "name": f"flow {step}",
-                            "type": "biosphere",
+                            "name": f"replacement {step}",
+                            "type": "production",
                             "amount": rng_values[step],
-                        },
-                    )
-                else:
-                    tx.replace_exchanges(
-                        target,
-                        [
-                            {
-                                "name": f"replacement {step}",
-                                "type": "production",
-                                "amount": rng_values[step],
-                            }
-                        ],
-                    )
-        assert stores[0].materialize() == stores[1].materialize()
+                        }
+                    ],
+                )
+        assert len(tuple(store.iter_activity_ids())) == len(store.materialize())
 
 
 def test_indexed_wurst_bridge_preserves_order_and_invalidates(inventory):

@@ -10,7 +10,9 @@ import inspect
 import json
 import logging
 import os
+import pickle
 import uuid
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import List, Literal, Union
@@ -75,15 +77,18 @@ from .scenario_array import (
     _load_scenario_array_dependencies,
     _write_scenario_array_datapackage,
 )
+from .sector_validation import validate_sector_contract
 from .steel import _update_steel
 from .transformation import _SCENARIO_GIS_CACHE_KEY, _SCENARIO_ROW_CACHE_KEY
 from .transport import _update_vehicles
 from .validation_framework import (
+    VALIDATION_RULESET_VERSION,
     InventoryGraphValidator,
     ValidationCertificate,
     ValidationIntent,
+    ValidationPhaseResult,
     ValidationReport,
-    inventory_cycle_signatures,
+    inventory_baseline_snapshot,
 )
 from .validation import (
     normalize_exact_deterministic_exchange_duplicates,
@@ -116,6 +121,15 @@ from .utils import (
 from .renewables import _update_wind_turbines
 
 logger = logging.getLogger("module")
+
+
+def _normalize_inventory_before_certification(database):
+    """Apply idempotent historical normalizations before baseline capture."""
+
+    normalize_inventory_numeric_types(database)
+    normalize_inventory_uncertainty(database)
+    normalize_exact_deterministic_exchange_duplicates(database)
+    return database
 
 
 if int(bw2data.__version__[0]) >= 4:
@@ -334,13 +348,11 @@ def check_year(year: [int, float]) -> int:
     """Check for the validity of the year passed."""
     try:
         year = int(year)
-    except ValueError as err:
-        raise Exception(f"{year} is not a valid year.") from err
+    except (TypeError, ValueError) as err:
+        raise ValueError(f"{year} is not a valid year.") from err
 
-    try:
-        assert 2005 <= year <= 2100
-    except AssertionError as err:
-        raise Exception(f"{year} must be comprised between 2005 and 2100.") from err
+    if not 2005 <= year <= 2100:
+        raise ValueError(f"{year} must be comprised between 2005 and 2100.")
 
     return year
 
@@ -478,11 +490,17 @@ def check_scenarios(scenario: dict, key: bytes) -> dict:
     scenario["year"] = check_year(scenario["year"])
 
     if "external scenarios" in scenario:
-        assert isinstance(scenario["external scenarios"], list)
+        if not isinstance(scenario["external scenarios"], list):
+            raise TypeError("external scenarios must be provided as a list.")
 
         # ensure both keys `data` and `scenario` are present
         for external_scenario in scenario["external scenarios"]:
-            assert all(key in external_scenario for key in ["data", "scenario"])
+            if not isinstance(external_scenario, dict) or not all(
+                key in external_scenario for key in ("data", "scenario")
+            ):
+                raise ValueError(
+                    "Each external scenario requires 'data' and 'scenario' fields."
+                )
 
         scenario["external scenarios"] = check_external_scenarios(
             scenario["external scenarios"]
@@ -643,9 +661,8 @@ class NewDatabase:
             only when exporting to Brightway. Default is "biosphere3".
         :param generate_reports: whether to generate change and summary reports. Default is True.
         :param inventory_backend: inventory storage implementation. ``"compact"``
-            uses copy-on-write scenario stores; ``"legacy"`` is retained as a
-            differential-testing oracle. The legacy backend remains the default
-            until the compact backend passes the release performance gates.
+            is the production and certification-performance path; ``"legacy"``
+            remains available as a compatibility and differential-testing oracle.
         """
         self._inventory_api_active = False
         self.sector_update_methods = None
@@ -663,10 +680,11 @@ class NewDatabase:
             raise ValueError("inventory_backend must be either 'compact' or 'legacy'.")
         self.inventory_backend = inventory_backend
         # Critical methodological certification has no public off switch. The
-        # compact backend is the production/performance path; legacy remains an
-        # output-equivalence oracle under the same semantic contract.
+        # compact backend is the production/performance path; legacy remains a
+        # compatibility and output-equivalence oracle under the same contract.
         self._validation_enabled = True
         self._validation_reports = {}
+        self._validation_iam_fingerprints = {}
         self._source_inventory_store = None
         self._compact_source_checkpoint = None
         self.database_cache_filepath = None
@@ -825,14 +843,19 @@ class NewDatabase:
             except (InventoryStoreCorruptionError, InventoryStoreVersionError):
                 # The versioned pickle caches remain the source of truth. A
                 # partial or corrupt compact derivative is rebuilt wholesale.
-                assert compact_cache_hit is not None
+                if compact_cache_hit is None:  # pragma: no cover - invariant guard
+                    raise InventoryStoreError(
+                        "A compact checkpoint was selected without cache references."
+                    )
                 _, cache_refs = compact_cache_hit
                 self._database = self._load_compact_source_cache_payload(cache_refs)
+                _normalize_inventory_before_certification(self._database)
                 self._source_inventory_store = create_inventory_store(
                     self._database,
                     backend="compact",
                     scenario_identity="source",
                     take_ownership=True,
+                    compute_fingerprints=True,
                 )
                 self._compact_source_checkpoint = self._write_compact_source_checkpoint(
                     source_db, self._source_inventory_store
@@ -844,11 +867,13 @@ class NewDatabase:
                     self._compact_source_checkpoint
                 )
         else:
+            _normalize_inventory_before_certification(self._database)
             self._source_inventory_store = create_inventory_store(
                 self._database,
                 backend=self.inventory_backend,
                 scenario_identity="source",
                 take_ownership=True,
+                compute_fingerprints=True,
             )
             if compact_cache_eligible:
                 self._compact_source_checkpoint = self._write_compact_source_checkpoint(
@@ -1309,7 +1334,7 @@ class NewDatabase:
             if source_store is None:
                 compact_checkpoint = getattr(self, "_compact_source_checkpoint", None)
                 if (
-                    getattr(self, "inventory_backend", "legacy") == "compact"
+                    getattr(self, "inventory_backend", "compact") == "compact"
                     and compact_checkpoint is not None
                 ):
                     source_store = InventoryStore.open(compact_checkpoint)
@@ -1317,10 +1342,13 @@ class NewDatabase:
                 # Supports narrowly constructed NewDatabase instances in tools
                 # and tests without reintroducing a public mutable attribute.
                 source_store = create_inventory_store(
-                    self._load_original_database(),
-                    backend=getattr(self, "inventory_backend", "legacy"),
+                    _normalize_inventory_before_certification(
+                        self._load_original_database()
+                    ),
+                    backend=getattr(self, "inventory_backend", "compact"),
                     scenario_identity="source",
                     take_ownership=True,
+                    compute_fingerprints=True,
                 )
                 self._source_inventory_store = source_store
             scenario_identity = self._scenario_identity(scenario)
@@ -1399,10 +1427,10 @@ class NewDatabase:
             json.dumps(payload, sort_keys=True).encode("utf-8")
         ).hexdigest()
 
-    def _ensure_validation_baseline_cycles(self) -> frozenset:
-        """Calculate documented source-graph cycles once for all scenarios."""
+    def _ensure_validation_baseline_snapshot(self) -> tuple:
+        """Capture source fingerprints and cycles once for fresh scenarios."""
 
-        cached = getattr(self, "_validation_baseline_cycles", None)
+        cached = getattr(self, "_validation_source_baseline_snapshot", None)
         if cached is not None:
             return cached
         source_store = getattr(self, "_source_inventory_store", None)
@@ -1411,26 +1439,106 @@ class NewDatabase:
             if checkpoint is not None:
                 source_store = InventoryStore.open(checkpoint)
         if source_store is None:
-            cached = frozenset()
+            cached = ({}, frozenset())
         else:
-            cached = inventory_cycle_signatures(source_store)
-        self._validation_baseline_cycles = cached
+            source_fingerprint = self._validation_source_fingerprint()
+            cache_path = DIR_CACHED_FILES / (
+                f"validation-baseline-r{VALIDATION_RULESET_VERSION}-"
+                f"s{STORE_SCHEMA_VERSION}-{source_fingerprint}.pkl"
+            )
+            try:
+                payload = pickle.loads(cache_path.read_bytes())
+                fingerprints = payload["fingerprints"]
+                cycles = payload["cycles"]
+                if len(fingerprints) != len(source_store):
+                    raise ValueError("baseline activity count changed")
+                cached = (fingerprints, cycles)
+            except (
+                OSError,
+                EOFError,
+                AttributeError,
+                KeyError,
+                TypeError,
+                ValueError,
+                pickle.PickleError,
+            ):
+                # Source checkpoints persist fingerprints computed while the
+                # import dictionaries are in hand.  Recompute once after the
+                # columnar checkpoint is reopened so the baseline and the
+                # transformed scenario use the same scalar/mapping
+                # representation.  The resulting audit is cached below.
+                underlying = getattr(source_store, "_store", source_store)
+                state = getattr(underlying, "_state", None)
+                if state is not None:
+                    state.activity_fingerprints.clear()
+                fingerprints, cycles = inventory_baseline_snapshot(source_store)
+                cached = (dict(fingerprints), cycles)
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                temporary = cache_path.with_name(
+                    f".{cache_path.name}.tmp-{uuid.uuid4().hex}"
+                )
+                temporary.write_bytes(
+                    pickle.dumps(
+                        {"fingerprints": cached[0], "cycles": cached[1]},
+                        protocol=pickle.HIGHEST_PROTOCOL,
+                    )
+                )
+                temporary.replace(cache_path)
+        self._validation_source_baseline_snapshot = cached
         return cached
 
-    @staticmethod
-    def _validation_iam_fingerprint(scenario: dict) -> str:
-        """Fingerprint IAM scenario identity and its source reference."""
+    def _ensure_validation_baseline_cycles(self) -> frozenset:
+        """Return source cycles retained for compatibility with internal callers."""
+
+        return self._ensure_validation_baseline_snapshot()[1]
+
+    def _validation_iam_fingerprint(self, scenario: dict) -> str:
+        """Fingerprint IAM identity and source bytes without hashing repeatedly."""
 
         external = [
             item.get("scenario")
             for item in scenario.get("external scenarios", ())
             if isinstance(item, dict)
         ]
+        source = Path(str(scenario.get("filepath", "")))
+        candidates = []
+        if source.is_file():
+            candidates = [source]
+        elif source.is_dir():
+            stem = f"{scenario.get('model')}_{scenario.get('pathway')}"
+            candidates = sorted(
+                candidate
+                for candidate in source.glob(f"{stem}.*")
+                if candidate.is_file()
+            )
+        signature = tuple(
+            (
+                str(candidate.resolve()),
+                candidate.stat().st_size,
+                candidate.stat().st_mtime_ns,
+            )
+            for candidate in candidates
+        )
+        cache = getattr(self, "_validation_iam_fingerprints", None)
+        if cache is None:
+            cache = self._validation_iam_fingerprints = {}
+        source_hashes = cache.get(signature)
+        if source_hashes is None:
+            source_hashes = []
+            for candidate in candidates:
+                digest = hashlib.sha256()
+                with candidate.open("rb") as stream:
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                source_hashes.append((str(candidate.resolve()), digest.hexdigest()))
+            source_hashes = tuple(source_hashes)
+            cache[signature] = source_hashes
+
         payload = {
             "model": scenario.get("model"),
             "pathway": scenario.get("pathway"),
             "year": scenario.get("year"),
-            "filepath": str(scenario.get("filepath", "")),
+            "sources": source_hashes,
             "external": external,
         }
         return hashlib.sha256(
@@ -1449,6 +1557,8 @@ class NewDatabase:
 
         if not getattr(self, "_validation_enabled", False):
             return None
+        if intent is None:
+            intent = self._scenario_validation_intent(scenario, store=store)
         certificate = InventoryGraphValidator(
             store,
             scenario_identity=self._scenario_identity(scenario),
@@ -1457,17 +1567,178 @@ class NewDatabase:
             system_model=getattr(self, "system_model", "cutoff"),
             version=getattr(self, "version", "unknown"),
             intent=intent,
-            baseline_cycles=self._ensure_validation_baseline_cycles(),
+            baseline_cycles=(
+                intent.baseline_cycles
+                if intent is not None and intent.baseline_cycles
+                else self._ensure_validation_baseline_cycles()
+            ),
         ).certify(raise_on_error=raise_on_error)
         report = certificate.report
+        for phase_payload in scenario.get("_validation_phase_results", ()):
+            try:
+                phase = ValidationPhaseResult.from_dict(phase_payload)
+            except (KeyError, TypeError, ValueError):
+                continue
+            report = report.with_phase(phase)
+        if raise_on_error:
+            report.raise_for_errors()
+        certificate = replace(certificate, report=report)
+        underlying = getattr(store, "_store", store)
+        underlying._validation_certificate_payload = certificate.to_dict()
         scenario["_validation_report"] = report.to_dict()
         reports = getattr(self, "_validation_reports", None)
         if reports is None:
             reports = self._validation_reports = {}
+        previous = reports.get(self._scenario_identity(scenario))
+        if previous is not None:
+            for phase in previous.phase_results:
+                if phase.kind == "export":
+                    report = report.with_phase(phase)
         reports[self._scenario_identity(scenario)] = report
         for warning in report.warnings:
             logger.warning("%s: %s", warning.rule_id, warning.message)
         return certificate
+
+    def _scenario_validation_intent(
+        self, scenario: dict, *, store: InventoryStore | None = None
+    ) -> ValidationIntent | None:
+        """Combine applied sector declarations for one full-graph pass."""
+
+        payloads = scenario.get("_validation_intents", {})
+        intents = []
+        for payload in payloads.values() if isinstance(payloads, dict) else ():
+            try:
+                intents.append(ValidationIntent.from_dict(payload))
+            except (KeyError, TypeError, ValueError):
+                continue
+        if not intents:
+            return None
+        applicable = [
+            intent for intent in intents if intent.applicability == "applicable"
+        ]
+        affected_keys = frozenset(
+            key for intent in applicable for key in intent.affected_activity_keys
+        )
+        current_affected_keys = affected_keys
+        affected_ids = frozenset(
+            activity_id
+            for intent in applicable
+            for activity_id in intent.affected_activity_ids
+        )
+        intended_suppliers = {
+            target: entries
+            for intent in applicable
+            for target, entries in intent.intended_suppliers.items()
+        }
+        transformations = tuple(intent.transformation for intent in applicable)
+        baseline_fingerprints = dict(
+            scenario.get("_validation_baseline_fingerprints", {})
+        )
+        target_semantics = {(key[0], key[1]) for key in affected_keys}
+        baseline_semantic_targets = {
+            key for key in baseline_fingerprints if (key[0], key[1]) in target_semantics
+        }
+        affected_keys = frozenset(set(affected_keys) | baseline_semantic_targets)
+        resolved_target_count = None
+        if store is not None:
+            underlying = getattr(store, "_store", store)
+            iterator = getattr(underlying, "_iter_storage_activities", None)
+            if iterator is not None:
+                current_keys_by_id = {
+                    activity_id: (
+                        payload.get("name"),
+                        payload.get("reference product", payload.get("product")),
+                        payload.get("location"),
+                    )
+                    for activity_id, payload, _ in iterator()
+                }
+                current_keys = set(current_keys_by_id.values())
+                resolved_target_count = sum(
+                    key in current_keys for key in affected_keys
+                ) + sum(
+                    activity_id in current_keys_by_id
+                    and current_keys_by_id[activity_id] not in affected_keys
+                    for activity_id in affected_ids
+                )
+        algorithm = None
+        if {"electricity", "fuels"}.intersection(transformations):
+            algorithm = (
+                "marginal mix"
+                if self.system_model == "consequential"
+                else "average production-volume mix"
+            )
+        return ValidationIntent(
+            transformation="scenario",
+            targeted=False,
+            scope_complete=bool(applicable)
+            and all(intent.scope_complete for intent in applicable),
+            affected_activity_ids=affected_ids,
+            affected_activity_keys=affected_keys,
+            allowed_added_keys=frozenset(
+                key for intent in applicable for key in intent.allowed_added_keys
+            ),
+            allowed_removed_keys=frozenset(baseline_semantic_targets),
+            baseline_fingerprints=baseline_fingerprints,
+            expected_match_count=(
+                resolved_target_count
+                if resolved_target_count is not None
+                else len(affected_ids) + len(current_affected_keys)
+            ),
+            expected_regions=tuple(
+                sorted(
+                    {
+                        region
+                        for intent in applicable
+                        for region in intent.expected_regions
+                    }
+                )
+            ),
+            expected_technologies=tuple(
+                sorted(
+                    {
+                        technology
+                        for intent in applicable
+                        for technology in intent.expected_technologies
+                    }
+                )
+            ),
+            algorithm=algorithm,
+            intended_suppliers=intended_suppliers,
+            computed_target_values={
+                "transformations": transformations,
+                "sector_target_counts": {
+                    intent.transformation: len(intent.affected_activity_keys)
+                    for intent in applicable
+                },
+            },
+            baseline_cycles=frozenset(
+                frozenset(tuple(key) for key in cycle)
+                for cycle in scenario.get("_validation_baseline_cycles", ())
+            ),
+            tolerance=min((intent.tolerance for intent in applicable), default=1e-9),
+        )
+
+    def _record_export_validation_phase(
+        self, scenario_definition: dict, runtime_scenario: dict, exporter: str
+    ) -> None:
+        """Keep exporter schema checks in memory without changing checkpoints."""
+
+        payload = runtime_scenario.pop("_export_validation_phase", None)
+        if not isinstance(payload, dict):
+            return
+        phase = ValidationPhaseResult.from_dict(payload)
+        phase = replace(phase, phase_id=f"export:{exporter}", kind="export")
+        identity = self._scenario_identity(scenario_definition)
+        reports = getattr(self, "_validation_reports", None)
+        if reports is None:
+            reports = self._validation_reports = {}
+        report = reports.get(identity)
+        if report is None:
+            stored = scenario_definition.get("_validation_report")
+            if isinstance(stored, dict):
+                report = ValidationReport.from_dict(stored)
+        if report is not None:
+            reports[identity] = report.with_phase(phase)
 
     def _ensure_semantic_certification(self, scenario: dict) -> ValidationReport | None:
         """Reuse certification or recertify after an inventory mutation."""
@@ -1480,6 +1751,11 @@ class NewDatabase:
             try:
                 report = ValidationReport.from_dict(stored_report)
             except (KeyError, TypeError, ValueError):
+                report = None
+            if (
+                report is not None
+                and report.ruleset_version != VALIDATION_RULESET_VERSION
+            ):
                 report = None
             if report is not None and (
                 store is None or report.store_generation == store.generation
@@ -1506,13 +1782,10 @@ class NewDatabase:
                 f"scenario position {scenario} is outside 0..{len(self.scenarios) - 1}."
             )
         definition = self.scenarios[scenario]
-        store = self._ensure_scenario_store(definition)
-        certificate = self._certify_scenario_store(
-            definition, store, raise_on_error=False
-        )
-        if certificate is None:
-            # The accessor is additive and useful for the legacy oracle too;
-            # it never creates a public validation-off switch.
+        report = self._ensure_semantic_certification(definition)
+        if report is None:
+            # The accessor never creates a public validation-off switch.
+            store = self._ensure_scenario_store(definition)
             certificate = InventoryGraphValidator(
                 store,
                 scenario_identity=self._scenario_identity(definition),
@@ -1522,12 +1795,20 @@ class NewDatabase:
                 version=getattr(self, "version", "unknown"),
             ).certify(raise_on_error=False)
             definition["_validation_report"] = certificate.report.to_dict()
-        return certificate.report
+            report = certificate.report
+        cached = getattr(self, "_validation_reports", {}).get(
+            self._scenario_identity(definition)
+        )
+        if cached is not None:
+            for phase in cached.phase_results:
+                if phase.kind == "export":
+                    report = report.with_phase(phase)
+        return report
 
     def _attach_shared_geography_cache(self, runtime_scenario: dict) -> None:
         """Share immutable geographic topology across compact scenario-years."""
 
-        if self.inventory_backend != "compact":
+        if getattr(self, "inventory_backend", "legacy") != "compact":
             return
         topology_key = self._geography_topology_key(runtime_scenario)
         shared_geography_caches = getattr(self, "_shared_geography_caches", None)
@@ -1557,7 +1838,7 @@ class NewDatabase:
     ) -> None:
         """Release a topology cache after its final matching scenario."""
 
-        if self.inventory_backend != "compact":
+        if getattr(self, "inventory_backend", "legacy") != "compact":
             return
         topology_key = self._geography_topology_key(scenario)
         if any(
@@ -1599,6 +1880,19 @@ class NewDatabase:
         runtime_scenario.pop("_inventory_checkpoint", None)
         self._attach_shared_geography_cache(runtime_scenario)
         store = self._ensure_scenario_store(scenario)
+        if getattr(self, "_validation_enabled", False):
+            if runtime_scenario.get("applied functions"):
+                baseline_fingerprints, baseline_cycles = inventory_baseline_snapshot(
+                    store
+                )
+            else:
+                baseline_fingerprints, baseline_cycles = (
+                    self._ensure_validation_baseline_snapshot()
+                )
+            runtime_scenario["_validation_baseline_fingerprints"] = dict(
+                baseline_fingerprints
+            )
+            runtime_scenario["_validation_baseline_cycles"] = baseline_cycles
         can_transfer_source = self._can_reload_original_database()
         has_mapping = bool(runtime_scenario.get("mapping"))
         activity_ids = tuple(store.iter_activity_ids()) if has_mapping else ()
@@ -1637,23 +1931,24 @@ class NewDatabase:
         store = runtime_scenario.pop("_inventory_store", None)
         if store is None:
             database = runtime_scenario.pop("_inventory_working_copy")
-            normalize_inventory_numeric_types(database)
-            normalize_inventory_uncertainty(database)
-            normalize_exact_deterministic_exchange_duplicates(database)
+            _normalize_inventory_before_certification(database)
             store = create_inventory_store(
                 database,
-                backend=self.inventory_backend,
+                backend=runtime_scenario.get("_inventory_backend")
+                or getattr(self, "inventory_backend", "compact"),
                 scenario_identity=self._scenario_identity(runtime_scenario),
                 take_ownership=True,
                 scenario_cache_compatibility=not persist,
             )
         else:
             runtime_scenario.pop("_inventory_working_copy", None)
-        runtime_scenario.pop("_inventory_backend", None)
         # Certification deliberately happens before the scenario definition is
         # replaced and before a checkpoint can be written.  Invalid builds
         # therefore leave the last known-good scenario state untouched.
         self._certify_scenario_store(runtime_scenario, store)
+        runtime_scenario.pop("_inventory_backend", None)
+        runtime_scenario.pop("_validation_baseline_fingerprints", None)
+        runtime_scenario.pop("_validation_baseline_cycles", None)
         scenario_definition.clear()
         scenario_definition.update(runtime_scenario)
         if persist:
@@ -1824,15 +2119,15 @@ class NewDatabase:
             description = "Processing scenarios for all sectors"
             sectors = [s for s in list(self.sector_update_methods.keys())]
 
-        assert isinstance(sectors, list), "sector_name should be a list of strings"
-        assert all(
+        if not isinstance(sectors, list) or not all(
             isinstance(item, str) for item in sectors
-        ), "sector_name should be a list of strings"
-        assert all(
-            item in self.sector_update_methods for item in sectors
-        ), "Unknown resource name(s): {}".format(
-            [item for item in sectors if item not in self.sector_update_methods]
-        )
+        ):
+            raise TypeError("sectors must be a string or a list of strings.")
+        unknown_sectors = [
+            item for item in sectors if item not in self.sector_update_methods
+        ]
+        if unknown_sectors:
+            raise ValueError(f"Unknown resource name(s): {unknown_sectors}")
 
         if getattr(self, "_validation_enabled", False):
             # The source store can be transferred and released while the first
@@ -1866,23 +2161,28 @@ class NewDatabase:
                     # Prepare the function and arguments
                     update_func = self.sector_update_methods[sector]["func"]
                     fixed_args = self.sector_update_methods[sector]["args"]
-                    if (
-                        sector == "emissions"
-                        and self.inventory_backend == "compact"
-                        and "_inventory_store" not in scenario
-                    ):
+                    if sector == "emissions" and "_inventory_store" not in scenario:
                         database = scenario.pop("_inventory_working_copy")
-                        normalize_inventory_numeric_types(database)
-                        normalize_inventory_uncertainty(database)
-                        normalize_exact_deterministic_exchange_duplicates(database)
+                        _normalize_inventory_before_certification(database)
                         scenario["_inventory_store"] = create_inventory_store(
                             database,
-                            backend="compact",
+                            backend=scenario.get("_inventory_backend")
+                            or getattr(self, "inventory_backend", "compact"),
                             scenario_identity=self._scenario_identity(scenario),
                             take_ownership=True,
                             scenario_cache_compatibility=not persist,
                         )
                     scenario = update_func(scenario, *fixed_args)
+                    contract_phase = validate_sector_contract(scenario, sector)
+                    if contract_phase.errors:
+                        ValidationReport(
+                            scenario_identity=self._scenario_identity(scenario),
+                            store_generation=0,
+                            ruleset_version=VALIDATION_RULESET_VERSION,
+                            certificate_key=f"sector:{sector}:incremental",
+                            rule_results=contract_phase.rule_results,
+                            phase_results=(contract_phase,),
+                        ).raise_for_errors()
 
                     if "applied functions" not in scenario:
                         scenario["applied functions"] = []
@@ -2086,6 +2386,11 @@ class NewDatabase:
                 raise ValueError(
                     "The database is not ready for export: MAJOR anomalies found. Check the change report."
                 )
+            self._record_export_validation_phase(
+                scenario_definition,
+                scenario,
+                "scenario-array" if scenario_array else "superstructure",
+            )
             prepared_scenarios.append(scenario)
 
         scenario_labels = create_scenario_list(self.scenarios)
@@ -2235,6 +2540,10 @@ class NewDatabase:
                         "The database is not ready for export: MAJOR anomalies found. Check the change report."
                     )
 
+                self._record_export_validation_phase(
+                    self.scenarios[s], scenario, "brightway"
+                )
+
                 scenario["database name"] = name[s]
                 write_brightway_database(
                     scenario["database"],
@@ -2270,6 +2579,10 @@ class NewDatabase:
                 raise ValueError(
                     "The database is not ready for export: MAJOR anomalies found. Check the change report."
                 )
+
+            self._record_export_validation_phase(
+                self.scenarios[s], scenario, "brightway"
+            )
 
             scenario["database name"] = name[s]
             write_brightway_database(
@@ -2359,6 +2672,10 @@ class NewDatabase:
                     "The database is not ready for export: MAJOR anomalies found. Check the change report."
                 )
 
+            self._record_export_validation_phase(
+                self.scenarios[s], scenario, "matrices"
+            )
+
             Export(
                 scenario=scenario,
                 filepath=filepath[s],
@@ -2414,6 +2731,9 @@ class NewDatabase:
                 raise ValueError(
                     "The database is not ready for export: MAJOR anomalies found. Check the change report."
                 )
+            self._record_export_validation_phase(
+                scenario_definition, scenario, "simapro"
+            )
             export = Export(
                 scenario=scenario,
                 filepath=filepath,
@@ -2451,10 +2771,10 @@ class NewDatabase:
         print("Write Simapro import file(s) for OpenLCA.")
         original_database = self._load_original_database()
 
-        for scenario in self.scenarios:
-            self._ensure_semantic_certification(scenario)
+        for scenario_definition in self.scenarios:
+            self._ensure_semantic_certification(scenario_definition)
             scenario = load_database(
-                scenario=scenario,
+                scenario=scenario_definition,
                 original_database=original_database,
                 load_metadata=True,
             )
@@ -2472,6 +2792,10 @@ class NewDatabase:
                 raise ValueError(
                     "The database is not ready for export: MAJOR anomalies found. Check the change report."
                 )
+
+            self._record_export_validation_phase(
+                scenario_definition, scenario, "openlca"
+            )
 
             Export(
                 scenario=scenario,
@@ -2526,6 +2850,9 @@ class NewDatabase:
                 raise ValueError(
                     "The database is not ready for export: MAJOR anomalies found. Check the change report."
                 )
+            self._record_export_validation_phase(
+                scenario_definition, scenario, "datapackage"
+            )
             prepared_scenarios.append(scenario)
 
         list_scenarios = create_scenario_list(self.scenarios)

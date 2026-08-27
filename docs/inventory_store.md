@@ -8,7 +8,7 @@ dictionaries.
 ndb = premise.NewDatabase(
     scenarios=[{"model": "image", "pathway": "SSP2-M", "year": 2050}],
     source_db="ecoinvent-3.12-cutoff",
-    inventory_backend="compact",  # opt-in while the performance gate is open
+    inventory_backend="compact",
 )
 
 store = ndb.get_inventory_store()
@@ -39,14 +39,16 @@ This duplicates the complete graph as Python dictionaries and can require
 several gigabytes for a full ecoinvent scenario. It is therefore an integration
 boundary, not the normal inspection API.
 
-## Backends and checkpoints
+## Compact storage and checkpoints
 
-`legacy` is the dictionary-backed semantic oracle. `compact` provides
-copy-on-write scenario forks, ordered indexes, and versioned Arrow IPC
-checkpoints with a lossless metadata sidecar. Common exchange strings and
-numeric values use typed, batched Arrow columns; arbitrary fields are stored in
-one sidecar bundle per activity. Reopening preserves Python and NumPy numeric
-scalar types exactly. The bundle contains:
+`CompactInventoryStore` is the production and certification-performance
+backend. It provides copy-on-write scenario forks, ordered indexes, and
+versioned Arrow IPC checkpoints with a lossless metadata sidecar. The
+dictionary-backed `LegacyInventoryStore` remains available as a compatibility
+and differential-testing oracle. Common exchange strings and numeric values use
+typed, batched Arrow columns; arbitrary fields are stored in one sidecar bundle
+per activity. Reopening preserves Python and NumPy numeric scalar types exactly.
+The bundle contains:
 
 ```text
 manifest.json
@@ -55,14 +57,57 @@ activities.arrow
 exchanges.arrow
 metadata.bin
 metadata_offsets.arrow
+activity-fingerprints.pkl
 checksums.json
 ```
 
 Checkpoint writes use a sibling temporary directory and replacement; every
 file is verified before a bundle is opened. Store schema versions are
-independent from the historical pickle cache schema.
+independent from the historical pickle cache schema. Existing
+`inventory_backend="legacy"` and `inventory_backend="compact"` calls remain
+accepted; certification has identical semantics on both backends, while all
+acceptance and integration runs use `"compact"` explicitly.
 
-The compact backend remains opt-in until every required single- and
-multi-scenario benchmark reduces both wall time and sampled peak RSS by at
-least 50%. `legacy` remains the constructor default while this release gate is
-open.
+## Validation reports
+
+Every completed scenario update receives one cached semantic certificate.
+Incremental sector phases and the full graph phase are persisted with the
+scenario checkpoint; exporter schema phases are held only in memory so exports
+cannot rewrite a certified checkpoint.
+
+```python
+report = ndb.get_validation_report(scenario=0)
+report.raise_for_errors()
+
+for phase in report.phase_results:
+    checked = sum(result.checked_object_count for result in phase.rule_results)
+    print(phase.phase_id, checked, phase.elapsed_seconds)
+```
+
+Validation is read-only and cannot be disabled through the public API.
+Unsuppressed errors stop an update before checkpointing or export; warnings and
+narrow, versioned suppressions remain visible in the immutable report.
+
+The semantic certificate combines targeted sector contracts with one compact
+full-graph pass. It covers required fields and exchange types, finite amounts
+and uncertainty, reference production, provider identity and product/unit
+agreement, geographic fallback, market shares, exact duplicate supplier rows,
+stale links, declared transformation scope, target cardinality, and newly
+introduced cycles. Electricity and fuel contracts independently recompute
+consequential marginal mixes; heat, steel, cement, biomass, metals, transport,
+batteries, renewables, mining, carbon removal, final energy, emissions, and
+external scenarios add sector-specific coverage, composition, linking, and
+physical-bound checks.
+
+Normalization is a separate mutating step which runs before certification.
+Validation itself only reads compact columns and indexes. A certificate key
+includes the store generation, scenario, source and IAM identities, system
+model, ecoinvent version, and validation ruleset version. Changing the store or
+ruleset therefore forces recertification. Brightway, SimaPro, openLCA,
+datapackage, and superstructure exports reuse the semantic certificate and add
+only their streaming schema phase.
+
+The public surface is additive: `NewDatabase.get_validation_report()` and the
+immutable `ValidationIssue`, `ValidationRuleResult`, `ValidationPhaseResult`,
+`ValidationReport`, and `PremiseValidationError` types are exported from
+`premise`. Existing constructor and export signatures remain accepted.

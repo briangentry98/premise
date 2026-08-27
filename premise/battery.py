@@ -11,6 +11,7 @@ from .logger import create_logger
 from .inventory_store import get_scenario_inventory, replace_scenario_inventory
 from .transformation import BaseTransformation, IAMDataCollection, List, np, ws
 from .validation import BatteryValidation
+from .validation_framework import record_validation_phase
 
 logger = create_logger("battery")
 
@@ -36,7 +37,10 @@ def load_cell_energy_density():
 
 def _update_battery(scenario, version, system_model):
 
-    if scenario["iam data"].battery_mobile_scenarios is None:
+    if (
+        scenario["iam data"].battery_mobile_scenarios is None
+        and scenario["iam data"].battery_stationary_scenarios is None
+    ):
         print("No battery scenario data available -- skipping")
         return scenario
 
@@ -63,6 +67,9 @@ def _update_battery(scenario, version, system_model):
     replace_scenario_inventory(scenario, battery.database)
     scenario["index"] = battery.index
     scenario["cache"] = battery.cache
+    scenario.setdefault("mapping", {})["battery"] = {
+        "transformed activities": list(battery._validation_targets.values())
+    }
 
     validation = BatteryValidation(
         model=scenario["model"],
@@ -72,7 +79,7 @@ def _update_battery(scenario, version, system_model):
         database=battery.database,
         iam_data=scenario["iam data"],
     )
-    validation.run_battery_checks()
+    record_validation_phase(scenario, validation.run_battery_checks())
 
     return scenario
 
@@ -108,6 +115,7 @@ class Battery(BaseTransformation):
             index,
         )
         self.system_model = system_model
+        self._validation_targets = {}
 
     def adjust_battery_market_shares(self) -> None:
         """
@@ -172,6 +180,8 @@ class Battery(BaseTransformation):
             battery_scenarios = self.iam_data.battery_mobile_scenarios
         else:
             battery_scenarios = self.iam_data.battery_stationary_scenarios
+        if battery_scenarios is None:
+            return
 
         for ds in ws.get_many(
             self.database,
@@ -310,6 +320,8 @@ class Battery(BaseTransformation):
         """
         Write log file.
         """
+
+        self._validation_targets[id(dataset)] = dataset
 
         log_params = dataset.get("log parameters", {})
         battery_input = log_params.get("battery input", "")

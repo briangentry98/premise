@@ -11,6 +11,7 @@ from ..transformation import (
     BaseTransformation,
 )
 from ..validation import FuelsValidation
+from ..validation_framework import record_validation_phase
 from ..activity_maps import InventorySet
 from ..inventory_imports import get_biosphere_code
 from ..logger import create_logger
@@ -57,7 +58,10 @@ def _update_fuels(scenario, version, system_model):
                 technology_map=fuels.fuel_map,
                 system_model=system_model,
             )
-            vector_validation.run_consequential_supplier_vector_checks()
+            record_validation_phase(
+                scenario,
+                vector_validation.run_consequential_supplier_vector_checks(),
+            )
         fuels.clear_validation_provenance()
         fuels.relink_datasets()
         replace_scenario_inventory(scenario, fuels.database)
@@ -82,7 +86,9 @@ def _update_fuels(scenario, version, system_model):
         system_model=system_model,
     )
 
-    validate.run_fuel_checks(check_supplier_vectors=False)
+    record_validation_phase(
+        scenario, validate.run_fuel_checks(check_supplier_vectors=False)
+    )
 
     return scenario
 

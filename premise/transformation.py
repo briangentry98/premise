@@ -33,7 +33,7 @@ from .activity_maps import InventorySet
 from .data_collection import IAMDataCollection
 from .filesystem_constants import DATA_DIR
 from .geomap import Geomap
-from .inventory_store import compact_exchange_payload
+from .inventory_store import IndexedInventoryList, compact_exchange_payload
 from .utils import get_fuel_properties, rescale_exchange
 
 LOG_CONFIG = DATA_DIR / "utils" / "logging" / "logconfig.yaml"
@@ -52,6 +52,12 @@ logger = logging.getLogger("module")
 
 _SCENARIO_GIS_CACHE_KEY = "__premise_gis_match_v1__"
 _SCENARIO_ROW_CACHE_KEY = "__premise_resolved_row_v1__"
+_VALIDATION_RELINKED_TARGETS_KEY = "__premise_validation_relinked_targets_v1__"
+_VALIDATION_ADDED_TARGETS_KEY = "__premise_validation_added_targets_v1__"
+
+
+class RelinkingInvariantError(RuntimeError):
+    """Raised when relinking does not preserve a product's demanded amount."""
 
 
 def _exclude_exchange_objects(exchanges, excluded):
@@ -709,7 +715,6 @@ class BaseTransformation:
     ) -> None:
         self.mapping = None
         self.database: List[dict] = database
-        self._inventory_backend = getattr(database, "_inventory_backend", None)
         self.iam_data: IAMDataCollection = iam_data
         self.model: str = model
         self.regions: List[str] = iam_data.regions
@@ -727,6 +732,17 @@ class BaseTransformation:
         self._resolved_row_faces_cache: dict[tuple, set] = self.cache.setdefault(
             _SCENARIO_ROW_CACHE_KEY, {}
         )
+        self._validation_relinked_targets: dict[int, dict] = {}
+        self.cache[_VALIDATION_RELINKED_TARGETS_KEY] = self._validation_relinked_targets
+        storage = getattr(self.database, "_validation_columnar_storage", None)
+        if storage is None and self.database:
+            storage = getattr(self.database[0], "_storage", None)
+        if storage is not None:
+            storage._validation_modified_targets = self._validation_relinked_targets
+        self._validation_added_targets: dict[int, dict] = {}
+        self.cache[_VALIDATION_ADDED_TARGETS_KEY] = self._validation_added_targets
+        if isinstance(self.database, IndexedInventoryList):
+            self.database.track_validation_additions(self._validation_added_targets)
         self.ecoinvent_to_iam_loc: Dict[str, str] = {
             loc: self.geo.ecoinvent_to_iam_location(loc)
             for loc in self.get_ecoinvent_locs()
@@ -763,8 +779,17 @@ class BaseTransformation:
         provider_semantics = self._get_provider_semantic_index()
         for d in ds:
             key = (copy.deepcopy(d["name"]), copy.deepcopy(d["reference product"]))
-            self.index[key].append(_provider_record(d))
             semantic_key = key[0], key[1], d["location"]
+            if semantic_key not in provider_semantics and hasattr(
+                self, "_validation_added_targets"
+            ):
+                # ``add_to_index`` is the common creation boundary used by sector
+                # transformations.  Recording the exact object here gives scope
+                # validation an independent declaration of intended additions;
+                # arbitrary list appends which bypass the creation boundary remain
+                # visible as undeclared collateral changes.
+                self._validation_added_targets[id(d)] = d
+            self.index[key].append(_provider_record(d))
             provider_semantics[semantic_key] = (
                 provider_semantics.get(semantic_key, 0) + 1
             )
@@ -1761,7 +1786,7 @@ class BaseTransformation:
 
             if self.is_in_index(dataset, region):
                 # delete original dataset from the database
-                self.database = [
+                self.database[:] = [
                     d
                     for d in self.database
                     if (d["name"], d["reference product"], d["location"])
@@ -1810,7 +1835,7 @@ class BaseTransformation:
 
         if delete_original_datasets is True:
             # remove the dataset from `self.database`
-            self.database = [ds for ds in self.database if ds not in datasets]
+            self.database[:] = [ds for ds in self.database if ds not in datasets]
 
         return d_act
 
@@ -2030,6 +2055,7 @@ class BaseTransformation:
             )
             # Update act["exchanges"] by adding new exchanges
             act["exchanges"].extend(new_exchanges)
+            self._validation_relinked_targets[id(act)] = act
 
             new_exchanges_dict = defaultdict(float)
             for exc in new_exchanges:
@@ -2038,17 +2064,21 @@ class BaseTransformation:
             # compare with the original exchanges
             # if the amount is different, add a log
             for key in excs_to_relink_dict:
-                assert (
-                    key in new_exchanges_dict
-                ), f"{key} not in {new_exchanges_dict} in dataset {act['name']}, {act['location']}"
-                assert np.isclose(
+                if key not in new_exchanges_dict:
+                    raise RelinkingInvariantError(
+                        f"Product {key!r} disappeared while relinking "
+                        f"{act['name']!r} in {act['location']!r}."
+                    )
+                if not np.isclose(
                     excs_to_relink_dict[key],
                     new_exchanges_dict[key],
                     rtol=0.001,
-                ), (
-                    f"{excs_to_relink_dict[key]} != {new_exchanges_dict[key]} in dataset {act['name']}, {act['location']}."
-                    f" Exchanges to relink: {excs_to_relink_dict}, new exchanges: {new_exchanges_dict}"
-                )
+                ):
+                    raise RelinkingInvariantError(
+                        f"Relinking {act['name']!r} in {act['location']!r} "
+                        f"changed {key!r} from {excs_to_relink_dict[key]!r} to "
+                        f"{new_exchanges_dict[key]!r}."
+                    )
 
     def process_exchanges_to_relink(
         self,
@@ -2276,9 +2306,7 @@ class BaseTransformation:
             }
             for (name, prod, loc, unit), excs in grouped_exchanges
         )
-        if getattr(self, "_inventory_backend", None) == "compact":
-            return [compact_exchange_payload(exchange) for exchange in summarized]
-        return list(summarized)
+        return [compact_exchange_payload(exchange) for exchange in summarized]
 
     def find_iam_efficiency_change(
         self,

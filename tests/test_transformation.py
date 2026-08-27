@@ -32,13 +32,8 @@ def test_exclude_exchange_objects_does_not_compare_mapping_contents():
     ]
 
 
-@pytest.mark.parametrize(
-    ("backend", "is_compact"),
-    [("compact", True), ("legacy", False), (None, False)],
-)
-def test_summarize_exchanges_compacts_only_compact_builds(backend, is_compact):
+def test_summarize_exchanges_uses_compact_payloads():
     transformation = object.__new__(BaseTransformation)
-    transformation._inventory_backend = backend
     exchanges = [
         {
             "name": "market for fuel",
@@ -67,9 +62,7 @@ def test_summarize_exchanges_compacts_only_compact_builds(backend, is_compact):
         "type": "technosphere",
         "amount": 4.0,
     }
-    assert (
-        bool(getattr(summarized[0], "_premise_compact_exchange", False)) is is_compact
-    )
+    assert bool(getattr(summarized[0], "_premise_compact_exchange", False)) is True
 
 
 def make_market_transformation(monkeypatch, technology_shares):

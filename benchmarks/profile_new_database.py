@@ -25,6 +25,7 @@ import resource
 import sys
 import threading
 import time
+from collections import Counter
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -371,6 +372,36 @@ def main() -> None:
         )
         with recorder.phase("update-total"):
             ndb.update(args.sectors)
+        with recorder.phase("validation:cache-reuse"):
+            report = ndb.get_validation_report()
+        semantic_phases = [
+            phase for phase in report.phase_results if phase.kind != "export"
+        ]
+        validation_metrics = {
+            "ruleset_version": report.ruleset_version,
+            "sector_seconds": sum(
+                phase.elapsed_seconds
+                for phase in semantic_phases
+                if phase.kind == "sector"
+            ),
+            "full_graph_seconds": sum(
+                phase.elapsed_seconds
+                for phase in semantic_phases
+                if phase.kind == "graph"
+            ),
+            "phase_count": len(semantic_phases),
+            "warning_count": len(report.warnings),
+            "warning_rule_counts": dict(
+                sorted(Counter(issue.rule_id for issue in report.warnings).items())
+            ),
+            "error_count": len(report.errors),
+            "suppressed_rule_counts": dict(
+                sorted(
+                    Counter(issue.rule_id for issue in report.suppressed_issues).items()
+                )
+            ),
+            "certificate_reused": report.reused,
+        }
     finally:
         if profiler is not None:
             profiler.disable()
@@ -407,6 +438,7 @@ def main() -> None:
         "resource_peak_rss_bytes": _max_rss_bytes(),
         "phases": recorder.phases,
         "query_diagnostics": get_wurst_query_diagnostics(),
+        "validation": validation_metrics,
     }
     args.output.write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(f"profile_output={args.output}", flush=True)

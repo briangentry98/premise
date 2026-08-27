@@ -4,6 +4,7 @@ import random
 
 import pytest
 
+import premise
 import premise.new_database as new_database_module
 from premise.inventory_store import CompactInventoryStore, InventoryStore
 from premise.new_database import NewDatabase
@@ -12,8 +13,12 @@ from premise.validation_framework import (
     InventoryGraphValidator,
     PremiseValidationError,
     ValidationIntent,
+    ValidationPhaseResult,
+    ValidationReport,
+    ValidationRuleResult,
     ValidationSuppression,
     inventory_activity_fingerprints,
+    inventory_baseline_snapshot,
     inventory_cycle_signatures,
     inventory_store_fingerprint,
 )
@@ -84,6 +89,13 @@ def validate(inventory, **kwargs):
     ).validate()
 
 
+def test_validation_contract_types_are_public():
+    assert premise.ValidationIssue is not None
+    assert premise.ValidationPhaseResult is ValidationPhaseResult
+    assert premise.ValidationReport is ValidationReport
+    assert premise.PremiseValidationError is PremiseValidationError
+
+
 def rule_issues(report, rule_id):
     return tuple(issue for issue in report.issues if issue.rule_id == rule_id)
 
@@ -103,6 +115,15 @@ def test_valid_graph_is_accepted_and_validation_is_read_only(valid_inventory):
     assert inventory_store_fingerprint(store) == before
 
 
+def test_baseline_snapshot_combines_fingerprints_and_cycle_audit(valid_inventory):
+    store = CompactInventoryStore(valid_inventory)
+
+    fingerprints, cycles = inventory_baseline_snapshot(store)
+
+    assert dict(fingerprints) == dict(inventory_activity_fingerprints(store))
+    assert cycles == inventory_cycle_signatures(store)
+
+
 @pytest.mark.parametrize(
     ("mutate", "rule_id"),
     [
@@ -110,6 +131,10 @@ def test_valid_graph_is_accepted_and_validation_is_read_only(valid_inventory):
         (
             lambda data: data[0]["exchanges"][0].update(type="invalid"),
             "GRAPH.EXCHANGE_TYPE",
+        ),
+        (
+            lambda data: data[1]["exchanges"][1].pop("product"),
+            "GRAPH.REQUIRED_EXCHANGE_FIELDS",
         ),
         (
             lambda data: data[0]["exchanges"][0].update(amount=math.nan),
@@ -124,6 +149,10 @@ def test_valid_graph_is_accepted_and_validation_is_read_only(valid_inventory):
         (
             lambda data: data[0]["exchanges"][0].update(product="wrong"),
             "GRAPH.PRODUCTION_REFERENCE",
+        ),
+        (
+            lambda data: data[0]["exchanges"][0].update(amount=0.0),
+            "GRAPH.REFERENCE_PRODUCTION_AMOUNT",
         ),
         (
             lambda data: data[1]["exchanges"][1].update(
@@ -175,6 +204,26 @@ def test_ambiguous_provider_without_resolving_identifier_is_rejected(valid_inven
     report = validate(valid_inventory)
 
     assert rule_issues(report, "GRAPH.PROVIDER_AMBIGUOUS")
+
+
+def test_stale_input_is_rejected_even_when_semantic_provider_exists(valid_inventory):
+    valid_inventory[1]["exchanges"][1]["input"] = ("test-db", "removed-code")
+
+    report = validate(valid_inventory)
+
+    assert rule_issues(report, "GRAPH.STALE_SUPPLIER")
+
+
+def test_repeated_provider_with_a_distinct_exchange_record_is_supported(
+    valid_inventory,
+):
+    duplicate = copy.deepcopy(valid_inventory[1]["exchanges"][1])
+    duplicate["amount"] = 0.25
+    valid_inventory[1]["exchanges"].append(duplicate)
+
+    report = validate(valid_inventory)
+
+    assert not rule_issues(report, "GRAPH.DUPLICATE_SUPPLIER")
 
 
 def test_exact_input_identifier_supports_duplicate_semantic_activity_keys(
@@ -252,6 +301,19 @@ def test_zero_match_target_and_expected_coverage_are_explicit(valid_inventory):
     assert cardinality.expected == 1
     assert rule_issues(report, "GRAPH.RULE_TARGET_CARDINALITY")
     assert len(rule_issues(report, "METHOD.EXPECTED_COVERAGE")) == 2
+
+
+def test_expected_coverage_is_limited_to_declared_targets(valid_inventory):
+    intent = ValidationIntent(
+        transformation="electricity",
+        affected_activity_keys=frozenset({MARKET_KEY}),
+        expected_match_count=1,
+        expected_technologies=(SUPPLIER_KEY[0],),
+    )
+
+    report = validate(valid_inventory, intent=intent)
+
+    assert rule_issues(report, "METHOD.EXPECTED_COVERAGE")
 
 
 def test_consequential_average_algorithm_and_wrong_supplier_vector_are_rejected(
@@ -371,6 +433,44 @@ def test_certificate_cache_invalidation_and_checkpoint_reuse(valid_inventory, tm
     assert rule_issues(invalid.report, "GRAPH.FINITE_NUMERIC")
 
 
+def test_report_aggregates_phases_and_keeps_export_phase_transient():
+    rule = ValidationRuleResult(
+        rule_id="EXPORT.SCHEMA",
+        severity="error",
+        applicability="applicable",
+        checked_object_count=1,
+    )
+    graph = ValidationReport(
+        scenario_identity="scenario",
+        store_generation=1,
+        ruleset_version=2,
+        certificate_key="key",
+        rule_results=(),
+    )
+    combined = graph.with_phase(
+        ValidationPhaseResult(
+            phase_id="export:brightway", kind="export", rule_results=(rule,)
+        )
+    )
+
+    assert combined.get_phase("export:brightway") is not None
+    assert combined.semantic_only().get_phase("export:brightway") is None
+    assert ValidationReport.from_dict(combined.to_dict()).phase_results == (
+        combined.phase_results
+    )
+
+
+def test_validation_intent_roundtrip_preserves_tuple_keyed_contracts():
+    intent = ValidationIntent(
+        transformation="electricity",
+        affected_activity_keys=frozenset({MARKET_KEY}),
+        intended_suppliers={MARKET_KEY: ((SUPPLIER_KEY, 1.0),)},
+        baseline_fingerprints={MARKET_KEY: "abc"},
+    )
+
+    assert ValidationIntent.from_dict(intent.to_dict()) == intent
+
+
 def test_seeded_randomized_invalid_amount_mutations_are_deterministic(valid_inventory):
     randomizer = random.Random(42)
     invalid_values = [math.nan, math.inf, -math.inf, "not-a-number"]
@@ -393,7 +493,6 @@ def configured_new_database(valid_inventory):
     database._validation_enabled = True
     database._validation_reports = {}
     database._validation_baseline_cycles = frozenset()
-    database.inventory_backend = "compact"
     database.source = "test-db"
     database.version = "3.12"
     database.system_model = "cutoff"

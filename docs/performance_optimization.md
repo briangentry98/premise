@@ -1,17 +1,19 @@
 # Runtime and resident-memory optimization
 
-> **Premise 3.0 InventoryStore status (24 August 2026):** The store contract,
+> **Premise 3.0 InventoryStore status (27 August 2026):** The store contract,
 > immutable records, atomic transactions, copy-on-write forks, ordered indexes,
 > Arrow checkpoints, private scenario ownership, and explicit materialization
-> API are implemented. The compact backend is still opt-in. On the current
+> API are implemented. Compact storage is the production and performance path;
+> the legacy selector remains available for compatibility and differential
+> testing. On the earlier
 > warm IMAGE SSP2-M 2050 all-sector differential run it produced the exact same
 > semantic hash as the legacy store (`39efcf273da6b52e6c6bdfce8a6546a9a0819a054340fee9062ac2a7fddf808c`),
 > with 50,938 datasets and 1,597,616 exchanges. A matched diagnostic run (not
 > the five-run acceptance median) reduced wall time from 82.67 to 45.25 seconds
 > (45.3%) and sampled peak RSS from 2.692 to 2.030 GB (24.6%). This is well
-> short of the required 50%/50% activation gate.
-> The default therefore remains `legacy`; transformation hot paths still need
-> to move off their private mutable working materialization.
+> short of the original 50%/50% activation target. Later bridge and checkpoint
+> optimizations made compact storage suitable for certification runs while
+> preserving the public backend selector.
 
 This document records the profiling baseline, the first optimization pass, and
 the architectural work that should follow it. The benchmark is a complete
@@ -24,6 +26,28 @@ Brightway database.
 Run the benchmark with the project environment and an existing Brightway
 project. Encrypted IAM files require `PREMISE_KEY` or `IAM_FILES_KEY`; a local
 plaintext IAM file does not.
+
+## Validation certification acceptance
+
+The 27 August 2026 warm IMAGE SSP2-M 2050 cutoff run compared the completed
+validator with the frozen pre-change validator on the same Python environment,
+source database, IAM input, compact backend, and fixed hash seed. The full graph
+pass took 8.140 seconds in isolation, but it replaces previous end-of-update
+validation and checkpoint work; the acceptance gate therefore compares total
+`update()` time.
+
+| Metric | Pre-change | Certified | Change / budget |
+| --- | ---: | ---: | ---: |
+| `update()` | 94.547 s | 90.922 s | -3.8% (maximum +3%) |
+| Incremental sector contracts | — | 0.626 s | 0.66% (maximum 1%) |
+| Certificate reuse | — | 0.032 s | below 0.1 s |
+| Sampled peak RSS | 1.926 GB | 1.696 GB | -11.9% (maximum +3%) |
+
+The certified result had zero errors, 130 reviewed warnings, and 237 documented
+baseline-cycle suppressions. A separate ecoinvent 3.12 consequential IMAGE run
+also completed with zero errors and reused its certificate in 0.026 seconds.
+`benchmarks/check_validation_performance.py` and
+`benchmarks/check_validation_warnings.py` enforce these acceptance semantics.
 
 ```console
 PYTHONHASHSEED=0 python benchmarks/profile_new_database.py \
@@ -40,9 +64,10 @@ capture. RSS is sampled every 50 ms with `psutil` and cross-checked against
 
 ### Compact InventoryStore pass
 
-The current IMAGE SSP2-M 2050 diagnostic uses
-`inventory_backend="compact"` explicitly and fixes `PYTHONHASHSEED=0`. It
-includes the full all-sector update and compact checkpoint write.
+The IMAGE SSP2-M 2050 diagnostic uses `inventory_backend="compact"`, fixes
+`PYTHONHASHSEED=0`, and includes the full all-sector update and compact
+checkpoint write. The table below is retained as the historical
+compact-versus-legacy migration measurement.
 
 | Metric | Legacy oracle | Compact | Change |
 | --- | ---: | ---: | ---: |

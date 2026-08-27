@@ -36,6 +36,7 @@ from .transformation import (
 )
 from .utils import DATA_DIR
 from .validation import MetalsValidation
+from .validation_framework import record_validation_phase
 
 logger = create_logger("metal")
 
@@ -365,6 +366,9 @@ def _update_metals(scenario, version, system_model):
     replace_scenario_inventory(scenario, metals.database)
     scenario["cache"] = metals.cache
     scenario["index"] = metals.index
+    scenario.setdefault("mapping", {})["metals"] = {
+        "transformed activities": list(metals._validation_targets.values())
+    }
 
     validate = MetalsValidation(
         model=scenario["model"],
@@ -382,7 +386,7 @@ def _update_metals(scenario, version, system_model):
     validate.mining_shares_mapping = mining_shares_mapping
     validate.interpolate_by_year = interpolate_by_year
     validate.metals_list = mining_shares_mapping["Metal"].unique().tolist()
-    validate.run_metals_checks()
+    record_validation_phase(scenario, validate.run_metals_checks())
 
     return scenario
 
@@ -1346,6 +1350,11 @@ class Metals(BaseTransformation):
             index,
         )
 
+        # ``write_log`` is already called at each created, updated, or relinked
+        # activity boundary. Retain those object references as the exact,
+        # incremental validation target set instead of rescanning the graph.
+        self._validation_targets: Dict[int, dict] = {}
+
         self.country_codes = {}
         self.version = version
 
@@ -2305,9 +2314,15 @@ class Metals(BaseTransformation):
             ws.exclude(ws.equals("location", "World")),
         ):
             self.remove_from_index(old_market)
-            assert (
-                self.is_in_index(old_market) is False
-            ), f"Market {(old_market['name'], old_market['reference product'], old_market['location'])} still in index"
+            if self.is_in_index(old_market):
+                key = (
+                    old_market["name"],
+                    old_market["reference product"],
+                    old_market["location"],
+                )
+                raise PostAllocationCorrectionError(
+                    f"Metal market {key!r} remains in the provider index after removal."
+                )
 
         return dataset
 
@@ -2597,6 +2612,8 @@ class Metals(BaseTransformation):
         """
         Write log file.
         """
+
+        self._validation_targets[id(dataset)] = dataset
 
         txt = (
             f"{status}|{self.model}|{self.scenario}|{self.year}|"

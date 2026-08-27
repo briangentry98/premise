@@ -13,6 +13,11 @@ __all__ = (
     "LegacyInventoryStore",
     "CompactInventoryStore",
     "InventoryStoreBuilder",
+    "PremiseValidationError",
+    "ValidationIssue",
+    "ValidationPhaseResult",
+    "ValidationReport",
+    "ValidationRuleResult",
     "clear_cache",
     "clear_inventory_cache",
     "get_regions_definition",
@@ -28,6 +33,13 @@ from premise.inventory_store import (
     InventoryStore,
     InventoryStoreBuilder,
     LegacyInventoryStore,
+)
+from premise.validation_framework import (
+    PremiseValidationError,
+    ValidationIssue,
+    ValidationPhaseResult,
+    ValidationReport,
+    ValidationRuleResult,
 )
 from premise.utils import clear_cache, clear_inventory_cache, get_regions_definition
 import premise.scenario_downloader

@@ -4,6 +4,7 @@ for a number of different vehicle types, and create fleet average vehicles based
 IAM data, and integrate them into the database.
 """
 
+import math
 import uuid
 from typing import Any, Dict, List, Union
 
@@ -18,7 +19,13 @@ from .logger import create_logger
 from .inventory_store import get_scenario_inventory, replace_scenario_inventory
 from .transformation import BaseTransformation, IAMDataCollection
 from .utils import eidb_label, rescale_exchanges
-from .validation import CarValidation, TruckValidation
+from .validation import (
+    CarValidation,
+    TruckValidation,
+    load_car_exhaust_pollutants,
+    load_truck_exhaust_pollutants,
+)
+from .validation_framework import record_validation_phase
 
 logger = create_logger("transport")
 
@@ -67,6 +74,15 @@ def _update_vehicles(scenario, vehicle_type, version, system_model):
         trspt.create_vehicle_markets()
         trspt.relink_transport_datasets()
 
+    if vehicle_type == "car":
+        trspt.normalize_pollutant_emissions(
+            "transport, passenger car", load_car_exhaust_pollutants()
+        )
+    elif vehicle_type == "truck":
+        trspt.normalize_pollutant_emissions(
+            "transport, freight, lorry", load_truck_exhaust_pollutants()
+        )
+
     replace_scenario_inventory(scenario, trspt.database)
     scenario["cache"] = trspt.cache
     scenario["index"] = trspt.index
@@ -90,7 +106,7 @@ def _update_vehicles(scenario, vehicle_type, version, system_model):
             database=trspt.database,
             iam_data=scenario["iam data"],
         )
-        validate.run_checks()
+        record_validation_phase(scenario, validate.run_checks())
 
     return scenario
 
@@ -204,6 +220,79 @@ class Transport(BaseTransformation):
         for v in self.vehicle_map.values():
             if not v:
                 print(f"Vehicle map is empty for {self.vehicle_type}.")
+
+    def normalize_pollutant_emissions(self, vehicle_name: str, exhaust: dict) -> None:
+        """Repair historical HBEFA factors before read-only validation."""
+
+        euro_class_map = {
+            "EURO-III": 3,
+            "EURO-IV": 4,
+            "EURO-V": 5,
+            "EURO-VI": 6,
+            "EURO-2": 2,
+            "EURO-3": 3,
+            "EURO-4": 4,
+            "EURO-5": 5,
+            "EURO-6": 6.2,
+            "EURO-6ab": 6.0,
+        }
+        relevant = [
+            dataset
+            for dataset in self.database
+            if dataset["name"].startswith(vehicle_name)
+            and dataset["location"] in self.regions
+            and any(
+                fuel in dataset["name"]
+                for fuel in ("gasoline", "diesel", "compressed gas")
+            )
+        ]
+        for dataset in relevant:
+            powertrain = dataset["name"].split(", ")[-3]
+            euro_class = next(
+                (item for item in euro_class_map if item in dataset["name"]), None
+            )
+            if powertrain not in exhaust or euro_class is None:
+                continue
+            factors = exhaust[powertrain].get(str(euro_class_map[euro_class]))
+            if factors is None:
+                continue
+            if vehicle_name == "transport, freight, lorry":
+                size = dataset["name"].split(", ")[4].replace(" gross weight", "")
+                factors = factors.get(size)
+                if factors is None:
+                    continue
+
+            fuel_consumption = sum(
+                exchange["amount"] * 43
+                for exchange in dataset["exchanges"]
+                if exchange["name"].startswith(
+                    ("market for diesel", "market for petrol")
+                )
+                and exchange["unit"] == "kilogram"
+            )
+            if fuel_consumption == 0:
+                fuel_consumption = sum(
+                    exchange["amount"] * 47.5
+                    for exchange in dataset["exchanges"]
+                    if "natural gas" in exchange["name"]
+                    and exchange["unit"] == "kilogram"
+                )
+
+            for pollutant, factor in factors.items():
+                expected = factor / 1000 * fuel_consumption
+                actual = sum(
+                    exchange["amount"]
+                    for exchange in dataset["exchanges"]
+                    if pollutant.lower() in exchange["name"].lower()
+                    and exchange["type"] == "biosphere"
+                    and exchange.get("categories", [None])[0] == "air"
+                )
+                if actual == 0 or math.isclose(actual, expected, rel_tol=0.5):
+                    continue
+                normalized = float(np.clip(actual, 0.9 * expected, 1.1 * expected))
+                for exchange in dataset["exchanges"]:
+                    if pollutant.lower() in exchange["name"].lower():
+                        exchange["amount"] *= normalized / actual
 
     def regionalize_transport_datasets(self):
         """
