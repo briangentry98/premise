@@ -34,6 +34,7 @@ from .data_collection import IAMDataCollection
 from .filesystem_constants import DATA_DIR
 from .geomap import Geomap
 from .inventory_store import IndexedInventoryList, compact_exchange_payload
+from .provenance import record_change_event
 from .utils import get_fuel_properties, rescale_exchange
 
 LOG_CONFIG = DATA_DIR / "utils" / "logging" / "logconfig.yaml"
@@ -2339,14 +2340,9 @@ class BaseTransformation:
         return scaling_factor
 
     def write_log(self, dataset, status="created"):
-        """
-        Write log file.
-        """
+        """Record a structured transformation provenance event."""
 
-        logger.info(
-            f"{status}|{self.model}|{self.scenario}|{self.year}|"
-            f"{dataset['name']}|{dataset['location']}|"
-        )
+        record_change_event(self, dataset, status)
 
     def add_new_entry_to_cache(
         self,

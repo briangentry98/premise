@@ -481,8 +481,9 @@ class ValidationReport:
 class PremiseValidationError(ValueError):
     """Raised when a report contains one or more unsuppressed errors."""
 
-    def __init__(self, report: ValidationReport):
+    def __init__(self, report: ValidationReport, report_artifacts: Any = None):
         self.report = report
+        self.report_artifacts = report_artifacts
 
         def describe(issue: ValidationIssue) -> str:
             details = []
@@ -520,10 +521,28 @@ class PremiseValidationError(ValueError):
         counts = ", ".join(
             f"{rule_id}={count}" for rule_id, count in sorted(error_counts.items())
         )
-        super().__init__(
+        message = (
             f"Inventory validation failed with {len(report.errors)} "
             f"unsuppressed error(s) [{counts}]: {preview}{suffix}"
         )
+        workbook_path = getattr(report_artifacts, "workbook_path", None)
+        if workbook_path is not None:
+            message += f" Diagnostic report: {workbook_path}"
+        super().__init__(message)
+
+    @property
+    def artifacts(self) -> Any:
+        """Optional structured artifacts created for the invalid inventory."""
+
+        return self.report_artifacts
+
+    def attach_report_artifacts(self, report_artifacts: Any) -> None:
+        """Attach a diagnostic workbook without replacing the validation error."""
+
+        self.report_artifacts = report_artifacts
+        workbook_path = getattr(report_artifacts, "workbook_path", None)
+        if workbook_path is not None and str(workbook_path) not in str(self):
+            self.args = (f"{self.args[0]} Diagnostic report: {workbook_path}",)
 
 
 @dataclass(frozen=True, slots=True)

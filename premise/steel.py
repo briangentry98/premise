@@ -7,6 +7,7 @@ from collections import defaultdict
 
 from .data_collection import IAMDataCollection
 from .logger import create_logger
+from .provenance import record_change_event
 from .inventory_store import get_scenario_inventory, replace_scenario_inventory
 from .transformation import BaseTransformation, ws
 from .utils import rescale_exchanges
@@ -422,15 +423,6 @@ class Steel(BaseTransformation):
         return dataset
 
     def write_log(self, dataset, status="created"):
-        """
-        Write log file.
-        """
+        """Record a structured steel provenance event."""
 
-        logger.info(
-            f"{status}|{self.model}|{self.scenario}|{self.year}|"
-            f"{dataset['name']}|{dataset['location']}|"
-            f"{dataset.get('log parameters', {}).get('carbon capture rate', '')}|"
-            f"{dataset.get('log parameters', {}).get('thermal efficiency change', '')}|"
-            f"{dataset.get('log parameters', {}).get('primary steel share', '')}|"
-            f"{dataset.get('log parameters', {}).get('secondary steel share', '')}"
-        )
+        record_change_event(self, dataset, status, sector="steel")

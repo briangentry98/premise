@@ -417,7 +417,7 @@ def test_write_db_to_brightway_fast_path_runs_internal_check(monkeypatch):
     assert captured["pickles_deleted"] == 1
 
 
-def test_write_db_to_brightway_fast_path_reports_major_validation_errors(monkeypatch):
+def test_write_db_to_brightway_fast_path_respects_disabled_failure_reports(monkeypatch):
     captured = {"reports": 0}
 
     monkeypatch.setattr(
@@ -467,7 +467,7 @@ def test_write_db_to_brightway_fast_path_reports_major_validation_errors(monkeyp
     ):
         obj.write_db_to_brightway(name="fast-db")
 
-    assert captured["reports"] == 1
+    assert captured["reports"] == 0
 
 
 def test_write_superstructure_to_brightway_requires_registered_biosphere(monkeypatch):

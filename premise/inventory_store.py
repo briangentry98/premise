@@ -4520,6 +4520,9 @@ def _write_scenario_delta_checkpoint(
         validation_certificate = getattr(store, "_validation_certificate_payload", None)
         if validation_certificate is not None:
             manifest["validation_certificate"] = validation_certificate
+        provenance = getattr(store, "_provenance_payload", None)
+        if provenance is not None:
+            manifest["provenance"] = provenance
         try:
             manifest_text = json.dumps(manifest, sort_keys=True, indent=2)
         except TypeError:
@@ -4617,6 +4620,9 @@ def _write_checkpoint(store: _InMemoryInventoryStore, path: Path) -> Path:
         validation_certificate = getattr(store, "_validation_certificate_payload", None)
         if validation_certificate is not None:
             manifest["validation_certificate"] = validation_certificate
+        provenance = getattr(store, "_provenance_payload", None)
+        if provenance is not None:
+            manifest["provenance"] = provenance
         try:
             manifest_text = json.dumps(manifest, sort_keys=True, indent=2)
         except TypeError:
@@ -4861,6 +4867,7 @@ def _open_scenario_delta_checkpoint(
     store._scenario_cache_compatibility = False
     store._shares_source_storage = True
     store._validation_certificate_payload = manifest.get("validation_certificate")
+    store._provenance_payload = manifest.get("provenance")
     return store
 
 
@@ -4976,6 +4983,7 @@ def _open_checkpoint(path: Path) -> InventoryStore:
         store._shared_state = False
         store._scenario_cache_compatibility = False
         store._validation_certificate_payload = manifest.get("validation_certificate")
+        store._provenance_payload = manifest.get("provenance")
         return store
 
     activity_payloads: dict[int, dict[str, Any]] = {}
@@ -5055,6 +5063,7 @@ def _open_checkpoint(path: Path) -> InventoryStore:
         path, store._state.activity_order
     )
     store._validation_certificate_payload = manifest.get("validation_certificate")
+    store._provenance_payload = manifest.get("provenance")
     return store
 
 

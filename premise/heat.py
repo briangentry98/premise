@@ -12,6 +12,7 @@ from .filesystem_constants import VARIABLES_DIR
 from .heat_data import load_heat_mapping
 from .inventory_imports import get_biosphere_code
 from .logger import create_logger
+from .provenance import record_change_event
 from .inventory_store import get_scenario_inventory, replace_scenario_inventory
 from .marginal_mixes import consequential_method
 from .transformation import (
@@ -1044,15 +1045,6 @@ class Heat(BaseTransformation):
             visit(node)
 
     def write_log(self, dataset, status="created"):
-        """
-        Write log file.
-        """
+        """Record a structured heat provenance event."""
 
-        logger.info(
-            f"{status}|{self.model}|{self.scenario}|{self.year}|"
-            f"{dataset['name']}|{dataset['location']}|"
-            f"{dataset.get('log parameters', {}).get('initial amount of fossil CO2')}|"
-            f"{dataset.get('log parameters', {}).get('new amount of fossil CO2')}|"
-            f"{dataset.get('log parameters', {}).get('initial amount of biogenic CO2')}|"
-            f"{dataset.get('log parameters', {}).get('new amount of biogenic CO2')}"
-        )
+        record_change_event(self, dataset, status, sector="heat")

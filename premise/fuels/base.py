@@ -15,6 +15,7 @@ from ..validation_framework import record_validation_phase
 from ..activity_maps import InventorySet
 from ..inventory_imports import get_biosphere_code
 from ..logger import create_logger
+from ..provenance import record_change_event
 from ..inventory_store import get_scenario_inventory, replace_scenario_inventory
 
 logger = create_logger("fuel")
@@ -159,22 +160,6 @@ class Fuels(
                 exchange.pop("premise market technology", None)
 
     def write_log(self, dataset, status="created"):
-        """
-        Write log file.
-        """
+        """Record a structured fuel provenance event."""
 
-        logger.info(
-            f"{status}|{self.model}|{self.scenario}|{self.year}|"
-            f"{dataset['name']}|{dataset['location']}|"
-            f"{dataset.get('log parameters', {}).get('initial amount of fossil CO2', '')}|"
-            f"{dataset.get('log parameters', {}).get('new amount of fossil CO2', '')}|"
-            f"{dataset.get('log parameters', {}).get('new amount of biogenic CO2', '')}|"
-            f"{dataset.get('log parameters', {}).get('initial energy input for hydrogen production', '')}|"
-            f"{dataset.get('log parameters', {}).get('new energy input for hydrogen production', '')}|"
-            f"{dataset.get('log parameters', {}).get('fuel conversion efficiency', '')}|"
-            f"{dataset.get('log parameters', {}).get('land footprint', '')}|"
-            f"{dataset.get('log parameters', {}).get('land use CO2', '')}|"
-            f"{dataset.get('log parameters', {}).get('fossil CO2 per kg fuel', '')}|"
-            f"{dataset.get('log parameters', {}).get('non-fossil CO2 per kg fuel', '')}|"
-            f"{dataset.get('log parameters', {}).get('lower heating value', '')}"
-        )
+        record_change_event(self, dataset, status, sector="fuels")

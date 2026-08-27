@@ -16,6 +16,7 @@ from wurst import searching as ws
 from .activity_maps import InventorySet
 from .filesystem_constants import DATA_DIR, IAM_OUTPUT_DIR
 from .logger import create_logger
+from .provenance import record_change_event
 from .inventory_store import get_scenario_inventory, replace_scenario_inventory
 from .transformation import BaseTransformation, IAMDataCollection
 from .utils import eidb_label, rescale_exchanges
@@ -559,12 +560,6 @@ class Transport(BaseTransformation):
         ds["comment"] += f" Battery size adjusted to {mean_battery_size} kWh."
 
     def write_log(self, dataset, status="created"):
-        """
-        Write log file.
-        """
+        """Record a structured transport provenance event."""
 
-        logger.info(
-            f"{status}|{self.model}|{self.scenario}|{self.year}|"
-            f"{dataset['name']}|{dataset['location']}|"
-            f"{dataset.get('log parameters', {}).get('efficiency change', '')}"
-        )
+        record_change_event(self, dataset, status, sector="transport")

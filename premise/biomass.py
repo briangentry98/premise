@@ -12,6 +12,7 @@ import yaml
 from .export import biosphere_flows_dictionary
 from .filesystem_constants import VARIABLES_DIR, DATA_DIR
 from .logger import create_logger
+from .provenance import record_change_event
 from .inventory_store import get_scenario_inventory, replace_scenario_inventory
 from .transformation import (
     BaseTransformation,
@@ -283,12 +284,6 @@ class Biomass(BaseTransformation):
                     exc["location"] = location
 
     def write_log(self, dataset, status="created"):
-        """
-        Write log file.
-        """
+        """Record a structured biomass provenance event."""
 
-        logger.info(
-            f"{status}|{self.model}|{self.scenario}|{self.year}|"
-            f"{dataset['name']}|{dataset['location']}|"
-            f"{dataset.get('log parameters', {}).get('biomass share', '')}"
-        )
+        record_change_event(self, dataset, status, sector="biomass")

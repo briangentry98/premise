@@ -13,6 +13,7 @@ __all__ = (
     "LegacyInventoryStore",
     "CompactInventoryStore",
     "InventoryStoreBuilder",
+    "ChangeReportArtifacts",
     "PremiseValidationError",
     "ValidationIssue",
     "ValidationPhaseResult",
@@ -26,6 +27,7 @@ __version__ = (3, 0, 0)
 
 
 from premise.new_database import NewDatabase
+from premise.change_report import ChangeReportArtifacts
 from premise.incremental import IncrementalDatabase
 from premise.pathways import PathwaysDataPackage
 from premise.inventory_store import (

@@ -20,6 +20,7 @@ import yaml
 
 from .export import biosphere_flows_dictionary
 from .logger import create_logger
+from .provenance import record_change_event
 from .inventory_store import (
     filter_biosphere_category,
     get_scenario_inventory,
@@ -2609,18 +2610,7 @@ class Metals(BaseTransformation):
         )
 
     def write_log(self, dataset, status="created"):
-        """
-        Write log file.
-        """
+        """Record a structured metals provenance event."""
 
         self._validation_targets[id(dataset)] = dataset
-
-        txt = (
-            f"{status}|{self.model}|{self.scenario}|{self.year}|"
-            f"{dataset['name']}|{dataset['reference product']}|{dataset['location']}|"
-            f"{dataset.get('log parameters', {}).get('post-allocation correction', '')}|"
-            f"{dataset.get('log parameters', {}).get('old amount', '')}|"
-            f"{dataset.get('log parameters', {}).get('new amount', '')}"
-        )
-
-        logger.info(txt)
+        record_change_event(self, dataset, status, sector="metals")

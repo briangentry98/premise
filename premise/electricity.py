@@ -17,6 +17,7 @@ import yaml
 from .export import biosphere_flows_dictionary
 from .filesystem_constants import VARIABLES_DIR
 from .logger import create_logger
+from .provenance import record_change_event
 from .inventory_store import get_scenario_inventory, replace_scenario_inventory
 from .transformation import (
     BaseTransformation,
@@ -2320,26 +2321,6 @@ class Electricity(BaseTransformation):
         self.create_new_markets_low_voltage()
 
     def write_log(self, dataset, status="created"):
-        """
-        Write log file.
-        """
+        """Record a structured electricity provenance event."""
 
-        logger.info(
-            f"{status}|{self.model}|{self.scenario}|{self.year}|"
-            f"{dataset['name']}|{dataset['location']}|"
-            f"{dataset.get('log parameters', {}).get('old efficiency', '')}|"
-            f"{dataset.get('log parameters', {}).get('new efficiency', '')}|"
-            f"{dataset.get('log parameters', {}).get('transformation loss', '')}|"
-            f"{dataset.get('log parameters', {}).get('distribution loss', '')}|"
-            f"{dataset.get('log parameters', {}).get('renewable share', '')}|"
-            f"{dataset.get('log parameters', {}).get('ecoinvent original efficiency', '')}|"
-            f"{dataset.get('log parameters', {}).get('Oberschelp et al. efficiency', '')}|"
-            f"{dataset.get('log parameters', {}).get('efficiency change', '')}|"
-            f"{dataset.get('log parameters', {}).get('CO2 scaling factor', '')}|"
-            f"{dataset.get('log parameters', {}).get('SO2 scaling factor', '')}|"
-            f"{dataset.get('log parameters', {}).get('CH4 scaling factor', '')}|"
-            f"{dataset.get('log parameters', {}).get('NOx scaling factor', '')}|"
-            f"{dataset.get('log parameters', {}).get('PM <2.5 scaling factor', '')}|"
-            f"{dataset.get('log parameters', {}).get('PM 10 - 2.5 scaling factor', '')}|"
-            f"{dataset.get('log parameters', {}).get('PM > 10 scaling factor', '')}"
-        )
+        record_change_event(self, dataset, status, sector="electricity")

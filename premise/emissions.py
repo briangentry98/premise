@@ -18,6 +18,7 @@ from .activity_maps import GAINS_MAPPING, get_mapping
 from .filesystem_constants import DATA_DIR
 from .geomap import Geomap
 from .logger import create_logger
+from .provenance import record_change_event
 from .inventory_store import (
     CompactInventoryStore,
     get_scenario_inventory,
@@ -485,22 +486,6 @@ class Emissions(BaseTransformation):
         return float(sf)
 
     def write_log(self, dataset, status="created"):
-        """
-        Write log file.
-        """
+        """Record a structured emissions provenance event."""
 
-        if "GAINS sector" in dataset.get("log parameters", {}):
-            logger.info(
-                f"{status}|{self.model}|{self.scenario}|{self.year}|"
-                f"{dataset['name']}|{dataset['location']}|"
-                f"{dataset.get('log parameters', {}).get('GAINS sector', '')}|"
-                f"{dataset.get('log parameters', {}).get('CH4', '')}|"
-                f"{dataset.get('log parameters', {}).get('N2O', '')}|"
-                f"{dataset.get('log parameters', {}).get('NH3', '')}|"
-                f"{dataset.get('log parameters', {}).get('NOx', '')}|"
-                f"{dataset.get('log parameters', {}).get('PM1', '')}|"
-                f"{dataset.get('log parameters', {}).get('PM10', '')}|"
-                f"{dataset.get('log parameters', {}).get('PM25', '')}|"
-                f"{dataset.get('log parameters', {}).get('SO2', '')}|"
-                f"{dataset.get('log parameters', {}).get('VOC', '')}"
-            )
+        record_change_event(self, dataset, status, sector="emissions")

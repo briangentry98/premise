@@ -2921,19 +2921,33 @@ For questions related to GAINS modelling, please contact the respective GAINS te
 * GAINS-EU: https://gains.iiasa.ac.at/gains/EUN/index.login
 * GAINS-IAM: https://gains.iiasa.ac.at/gains/IAM/index.login
 
-Logs
-++++
+Structured change reports
++++++++++++++++++++++++++
 
-*premise* generates a spreadsheet report detailing changes made to the database
-for each scenario. The report is saved in the current working directory and
-is automatically generated after database export.
+*premise* compares the normalized source inventory with each certified,
+pre-export scenario. Database exports automatically create a compact Excel
+workbook and an exhaustive Parquet audit when ``generate_reports=True``.
+The workbook contains review-oriented summaries, key numeric changes, market
+and proxy information, and validation findings; raw exchange vectors remain in
+Parquet.
 
-The report lists the datasets added, updated and emptied.
-It also gives a number of indicators relating to efficiency,
-emissions, etc. for each scenario.
+Reports can also be generated immediately after ``update()``, including when
+automatic reports were disabled:
 
-Finally, it also contains a "Validation" tab that lists datasets
-which potentially present erroneous values. These datasets are
-to be checked by the user.
+.. code-block:: python
 
-This report can also be generated manually using the `generate_change_report()` method.
+    ndb = NewDatabase(..., generate_reports=False)
+    ndb.update()
+    artifacts = ndb.generate_change_report(
+        filepath="review/reports",
+        name="ssp2-review.xlsx",
+    )
+    print(artifacts.workbook_path)
+    print(artifacts.details_path)
+
+``generate_change_report()`` returns an immutable ``ChangeReportArtifacts``
+object. Filenames contain a UTC timestamp and the build ID and existing report
+files are never overwritten. The report schema version is ``2``. The former
+pipe-delimited log workbook was removed; historical log files are neither
+imported nor backfilled. See :doc:`structured_change_report` for the workbook
+and Parquet schemas.

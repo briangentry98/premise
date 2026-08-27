@@ -16,6 +16,7 @@ from .transformation import (
 )
 from .utils import DATA_DIR
 from .logger import create_logger
+from .provenance import record_change_event
 from .inventory_store import get_scenario_inventory, replace_scenario_inventory
 from .geomap import Geomap
 from .activity_maps import InventorySet
@@ -274,5 +275,6 @@ class Mining(BaseTransformation):
 
 
 def write_log(self, dataset, status="updated"):
-    txt = f"{status}|{self.model}|{self.scenario}|{self.year}|{dataset['name']}|{dataset.get('reference product', '')}|{dataset['location']}"
-    logger.info(txt)
+    """Record a structured mining provenance event."""
+
+    record_change_event(self, dataset, status, sector="mining")

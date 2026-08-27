@@ -9,6 +9,7 @@ import uuid
 
 from .activity_maps import InventorySet
 from .logger import create_logger
+from .provenance import record_change_event
 from .inventory_store import get_scenario_inventory, replace_scenario_inventory
 from .transformation import BaseTransformation, IAMDataCollection, List, np, ws
 
@@ -141,11 +142,6 @@ class WindTurbine(BaseTransformation):
         return dataset_copy
 
     def write_log(self, dataset, status="created"):
-        """
-        Write log file.
-        """
+        """Record a structured renewable-technology provenance event."""
 
-        logger.info(
-            f"{status}|{self.model}|{self.scenario}|{self.year}|"
-            f"{dataset['name']}|{dataset['location']}"
-        )
+        record_change_event(self, dataset, status, sector="renewable")

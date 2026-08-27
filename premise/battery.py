@@ -8,6 +8,7 @@ import yaml
 
 from .filesystem_constants import DATA_DIR
 from .logger import create_logger
+from .provenance import record_change_event
 from .inventory_store import get_scenario_inventory, replace_scenario_inventory
 from .transformation import BaseTransformation, IAMDataCollection, List, np, ws
 from .validation import BatteryValidation
@@ -317,36 +318,7 @@ class Battery(BaseTransformation):
                 self.write_log(ds, status="modified")
 
     def write_log(self, dataset, status):
-        """
-        Write log file.
-        """
+        """Record a structured battery provenance event."""
 
         self._validation_targets[id(dataset)] = dataset
-
-        log_params = dataset.get("log parameters", {})
-        battery_input = log_params.get("battery input", "")
-        old_battery_mass = log_params.get("old battery mass", "")
-        new_battery_mass = log_params.get("new battery mass", "")
-
-        shares = [
-            log_params.get("NMC111 market share", ""),
-            log_params.get("NMC532 market share", ""),
-            log_params.get("NMC622 market share", ""),
-            log_params.get("NMC811 market share", ""),
-            log_params.get("NMC900-Si market share", ""),
-            log_params.get("LFP market share", ""),
-            log_params.get("NCA market share", ""),
-            log_params.get("LAB market share", ""),
-            log_params.get("LSB market share", ""),
-            log_params.get("SIB market share", ""),
-            log_params.get("VRFB market share", ""),
-            log_params.get("NAS market share", ""),
-            log_params.get("LEAD-ACID market share", ""),
-        ]
-
-        logger.info(
-            f"{status}|{self.model}|{self.scenario}|{self.year}|"
-            f"{dataset['name']}|{dataset['location']}|"
-            f"{battery_input}|{old_battery_mass}|{new_battery_mass}|"
-            f"{'|'.join(map(str, shares))}"
-        )
+        record_change_event(self, dataset, status, sector="battery")

@@ -29,6 +29,13 @@ from .cement import _update_cement
 from .clean_datasets import DatabaseCleaner
 from .data_collection import IAMDataCollection
 from .carbon_dioxide_removal import _update_cdr
+from .change_report import (
+    ChangeReportArtifacts,
+    ChangeReportCacheEntry,
+    ReportScenario,
+    generate_structured_change_report,
+    generate_validation_diagnostic_workbook,
+)
 from .electricity import _update_electricity
 from .emissions import _update_emissions
 from .final_energy import _update_final_energy
@@ -72,7 +79,8 @@ from .inventory_store import (
 )
 from .metals import _update_metals
 from .mining import _update_mining
-from .report import generate_change_report, generate_summary_report
+from .provenance import ProvenanceCollector, record_change_event
+from .report import generate_summary_report
 from .scenario_array import (
     _load_scenario_array_dependencies,
     _write_scenario_array_datapackage,
@@ -84,6 +92,7 @@ from .transport import _update_vehicles
 from .validation_framework import (
     VALIDATION_RULESET_VERSION,
     InventoryGraphValidator,
+    PremiseValidationError,
     ValidationCertificate,
     ValidationIntent,
     ValidationPhaseResult,
@@ -123,12 +132,27 @@ from .renewables import _update_wind_turbines
 logger = logging.getLogger("module")
 
 
-def _normalize_inventory_before_certification(database):
+def _normalize_inventory_before_certification(database, provenance_owner=None):
     """Apply idempotent historical normalizations before baseline capture."""
 
-    normalize_inventory_numeric_types(database)
-    normalize_inventory_uncertainty(database)
-    normalize_exact_deterministic_exchange_duplicates(database)
+    def on_change(dataset, action):
+        if provenance_owner is None:
+            return
+        record_change_event(
+            provenance_owner,
+            dataset,
+            "normalized",
+            sector="normalization",
+            reason_code=f"normalization.{action}",
+            explanation=(
+                "Certification normalization applied the "
+                f"{action.replace('_', ' ')} rule."
+            ),
+        )
+
+    normalize_inventory_numeric_types(database, on_change=on_change)
+    normalize_inventory_uncertainty(database, on_change=on_change)
+    normalize_exact_deterministic_exchange_duplicates(database, on_change=on_change)
     return database
 
 
@@ -676,6 +700,11 @@ class NewDatabase:
         self.keep_source_db_uncertainty = keep_source_db_uncertainty
         self.biosphere_name = biosphere_name
         self.generate_reports = generate_reports
+        self.build_id = uuid.uuid4().hex
+        self._provenance_collector = ProvenanceCollector(self.build_id)
+        self._change_report_cache: ChangeReportCacheEntry | None = None
+        self._last_change_report_artifacts: ChangeReportArtifacts | None = None
+        self._automatic_report_in_progress = False
         if inventory_backend not in {"compact", "legacy"}:
             raise ValueError("inventory_backend must be either 'compact' or 'legacy'.")
         self.inventory_backend = inventory_backend
@@ -1307,9 +1336,30 @@ class NewDatabase:
             external,
         )
 
+    def _get_provenance_collector(self) -> ProvenanceCollector:
+        collector = getattr(self, "_provenance_collector", None)
+        if collector is None:
+            build_id = getattr(self, "build_id", None) or uuid.uuid4().hex
+            self.build_id = build_id
+            collector = self._provenance_collector = ProvenanceCollector(build_id)
+        return collector
+
+    def _restore_scenario_provenance(
+        self, scenario: dict, store: InventoryStore
+    ) -> None:
+        identity = self._scenario_identity(scenario)
+        underlying = getattr(store, "_store", store)
+        payload = scenario.get("_provenance") or getattr(
+            underlying, "_provenance_payload", None
+        )
+        if isinstance(payload, dict):
+            scenario["_provenance"] = payload
+            self._get_provenance_collector().restore(identity, payload)
+
     def _ensure_scenario_store(self, scenario: dict) -> InventoryStore:
         store = scenario.get("_inventory_store")
         if store is not None:
+            self._restore_scenario_provenance(scenario, store)
             return store
 
         checkpoint = scenario.get("_inventory_checkpoint")
@@ -1360,6 +1410,7 @@ class NewDatabase:
             else:
                 store = source_store.fork(scenario_identity)
         scenario["_inventory_store"] = store
+        self._restore_scenario_provenance(scenario, store)
         return store
 
     def get_inventory_store(
@@ -1572,7 +1623,7 @@ class NewDatabase:
                 if intent is not None and intent.baseline_cycles
                 else self._ensure_validation_baseline_cycles()
             ),
-        ).certify(raise_on_error=raise_on_error)
+        ).certify(raise_on_error=False)
         report = certificate.report
         for phase_payload in scenario.get("_validation_phase_results", ()):
             try:
@@ -1580,8 +1631,6 @@ class NewDatabase:
             except (KeyError, TypeError, ValueError):
                 continue
             report = report.with_phase(phase)
-        if raise_on_error:
-            report.raise_for_errors()
         certificate = replace(certificate, report=report)
         underlying = getattr(store, "_store", store)
         underlying._validation_certificate_payload = certificate.to_dict()
@@ -1597,6 +1646,8 @@ class NewDatabase:
         reports[self._scenario_identity(scenario)] = report
         for warning in report.warnings:
             logger.warning("%s: %s", warning.rule_id, warning.message)
+        if raise_on_error:
+            report.raise_for_errors()
         return certificate
 
     def _scenario_validation_intent(
@@ -1740,6 +1791,61 @@ class NewDatabase:
         if report is not None:
             reports[identity] = report.with_phase(phase)
 
+    def _handle_export_validation_error(
+        self,
+        scenario_definition: dict,
+        error: PremiseValidationError,
+        exporter: str,
+        runtime_scenario: dict | None = None,
+    ) -> None:
+        """Attach an exporter phase and diagnose the invalid runtime inventory."""
+
+        identity = self._scenario_identity(scenario_definition)
+        reports = getattr(self, "_validation_reports", None)
+        if reports is None:
+            reports = self._validation_reports = {}
+        report = reports.get(identity)
+        if report is None:
+            stored = scenario_definition.get("_validation_report")
+            if isinstance(stored, dict):
+                report = ValidationReport.from_dict(stored)
+        if report is None:
+            report = error.report
+        for phase in error.report.phase_results:
+            if phase.kind == "export":
+                report = report.with_phase(
+                    replace(phase, phase_id=f"export:{exporter}", kind="export")
+                )
+        reports[identity] = report
+        error.report = report
+        diagnostic_scenario = runtime_scenario or scenario_definition
+        database = diagnostic_scenario.get("database")
+        if database is not None:
+            store = create_inventory_store(
+                database,
+                backend=diagnostic_scenario.get("_inventory_backend")
+                or getattr(self, "inventory_backend", "compact"),
+                scenario_identity=identity,
+                take_ownership=False,
+            )
+        else:
+            store = self._ensure_scenario_store(scenario_definition)
+        self._generate_validation_diagnostic(error, diagnostic_scenario, store)
+
+    def _try_automatic_failed_report(self) -> None:
+        """Best-effort report for a non-framework exporter anomaly."""
+
+        if not getattr(self, "generate_reports", False):
+            return
+        try:
+            self._generate_change_report(status="failed")
+        except Exception as reporting_error:
+            logger.warning(
+                "Failed to generate exporter diagnostic report: %s",
+                reporting_error,
+                exc_info=True,
+            )
+
     def _ensure_semantic_certification(self, scenario: dict) -> ValidationReport | None:
         """Reuse certification or recertify after an inventory mutation."""
 
@@ -1760,10 +1866,21 @@ class NewDatabase:
             if report is not None and (
                 store is None or report.store_generation == store.generation
             ):
-                report.raise_for_errors()
+                try:
+                    report.raise_for_errors()
+                except PremiseValidationError as error:
+                    diagnostic_store = store or self._ensure_scenario_store(scenario)
+                    self._generate_validation_diagnostic(
+                        error, scenario, diagnostic_store
+                    )
+                    raise
                 return report.with_reuse(True)
         store = self._ensure_scenario_store(scenario)
-        certificate = self._certify_scenario_store(scenario, store)
+        try:
+            certificate = self._certify_scenario_store(scenario, store)
+        except PremiseValidationError as error:
+            self._generate_validation_diagnostic(error, scenario, store)
+            raise
         return certificate.report if certificate is not None else None
 
     def get_validation_report(self, scenario: int = 0) -> ValidationReport:
@@ -1931,7 +2048,16 @@ class NewDatabase:
         store = runtime_scenario.pop("_inventory_store", None)
         if store is None:
             database = runtime_scenario.pop("_inventory_working_copy")
-            _normalize_inventory_before_certification(database)
+            collector = self._get_provenance_collector()
+            with collector.session(
+                self._scenario_identity(runtime_scenario), "normalization"
+            ):
+                _normalize_inventory_before_certification(
+                    database, provenance_owner=self
+                )
+            runtime_scenario["_provenance"] = collector.payload_for(
+                self._scenario_identity(runtime_scenario)
+            )
             store = create_inventory_store(
                 database,
                 backend=runtime_scenario.get("_inventory_backend")
@@ -1942,10 +2068,22 @@ class NewDatabase:
             )
         else:
             runtime_scenario.pop("_inventory_working_copy", None)
+        provenance_payload = runtime_scenario.get("_provenance")
+        if not isinstance(provenance_payload, dict):
+            provenance_payload = self._get_provenance_collector().payload_for(
+                self._scenario_identity(runtime_scenario)
+            )
+            runtime_scenario["_provenance"] = provenance_payload
+        underlying = getattr(store, "_store", store)
+        underlying._provenance_payload = provenance_payload
         # Certification deliberately happens before the scenario definition is
         # replaced and before a checkpoint can be written.  Invalid builds
         # therefore leave the last known-good scenario state untouched.
-        self._certify_scenario_store(runtime_scenario, store)
+        try:
+            self._certify_scenario_store(runtime_scenario, store)
+        except PremiseValidationError as error:
+            self._generate_validation_diagnostic(error, runtime_scenario, store)
+            raise
         runtime_scenario.pop("_inventory_backend", None)
         runtime_scenario.pop("_validation_baseline_fingerprints", None)
         runtime_scenario.pop("_validation_baseline_cycles", None)
@@ -2161,9 +2299,19 @@ class NewDatabase:
                     # Prepare the function and arguments
                     update_func = self.sector_update_methods[sector]["func"]
                     fixed_args = self.sector_update_methods[sector]["args"]
+                    collector = self._get_provenance_collector()
+                    collector.restore(
+                        self._scenario_identity(scenario),
+                        scenario.get("_provenance"),
+                    )
                     if sector == "emissions" and "_inventory_store" not in scenario:
                         database = scenario.pop("_inventory_working_copy")
-                        _normalize_inventory_before_certification(database)
+                        with collector.session(
+                            self._scenario_identity(scenario), "normalization"
+                        ):
+                            _normalize_inventory_before_certification(
+                                database, provenance_owner=self
+                            )
                         scenario["_inventory_store"] = create_inventory_store(
                             database,
                             backend=scenario.get("_inventory_backend")
@@ -2172,17 +2320,25 @@ class NewDatabase:
                             take_ownership=True,
                             scenario_cache_compatibility=not persist,
                         )
-                    scenario = update_func(scenario, *fixed_args)
+                    with collector.session(self._scenario_identity(scenario), sector):
+                        scenario = update_func(scenario, *fixed_args)
+                    scenario["_provenance"] = collector.payload_for(
+                        self._scenario_identity(scenario)
+                    )
                     contract_phase = validate_sector_contract(scenario, sector)
                     if contract_phase.errors:
-                        ValidationReport(
-                            scenario_identity=self._scenario_identity(scenario),
-                            store_generation=0,
-                            ruleset_version=VALIDATION_RULESET_VERSION,
-                            certificate_key=f"sector:{sector}:incremental",
-                            rule_results=contract_phase.rule_results,
-                            phase_results=(contract_phase,),
-                        ).raise_for_errors()
+                        try:
+                            ValidationReport(
+                                scenario_identity=self._scenario_identity(scenario),
+                                store_generation=0,
+                                ruleset_version=VALIDATION_RULESET_VERSION,
+                                certificate_key=f"sector:{sector}:incremental",
+                                rule_results=contract_phase.rule_results,
+                                phase_results=(contract_phase,),
+                            ).raise_for_errors()
+                        except PremiseValidationError as error:
+                            self._generate_validation_diagnostic(error, scenario)
+                            raise
 
                     if "applied functions" not in scenario:
                         scenario["applied functions"] = []
@@ -2381,8 +2537,16 @@ class NewDatabase:
                     biosphere_name=self.biosphere_name,
                     version=self.version,
                 )
+            except PremiseValidationError as error:
+                self._handle_export_validation_error(
+                    scenario_definition,
+                    error,
+                    "scenario-array" if scenario_array else "superstructure",
+                    scenario,
+                )
+                raise
             except ValueError:
-                self.generate_change_report()
+                self._try_automatic_failed_report()
                 raise ValueError(
                     "The database is not ready for export: MAJOR anomalies found. Check the change report."
                 )
@@ -2437,13 +2601,25 @@ class NewDatabase:
         if additional_regions:
             tmp_scenario["additional valid regions"] = additional_regions
 
-        self._database = prepare_db_for_export(
-            scenario=tmp_scenario,
-            name=name,
-            original_database=original_database,
-            biosphere_name=self.biosphere_name,
-            version=self.version,
-        )
+        try:
+            self._database = prepare_db_for_export(
+                scenario=tmp_scenario,
+                name=name,
+                original_database=original_database,
+                biosphere_name=self.biosphere_name,
+                version=self.version,
+            )
+        except PremiseValidationError as error:
+            self._handle_export_validation_error(
+                self.scenarios[0],
+                error,
+                "scenario-array-union" if scenario_array else "superstructure-union",
+                tmp_scenario,
+            )
+            raise
+        except ValueError:
+            self._try_automatic_failed_report()
+            raise
 
         return scenario_labels, dataframe
 
@@ -2461,11 +2637,7 @@ class NewDatabase:
     def _finalize_superstructure_export(self) -> None:
         """Generate reports and release scenario export state once."""
 
-        if self.generate_reports:
-            # generate scenario report
-            self.generate_scenario_report()
-            # generate change report from logs
-            self.generate_change_report()
+        self._run_automatic_reports()
 
         for scenario in self.scenarios:
             end_of_process(scenario, preserve_applied_functions=True)
@@ -2525,7 +2697,7 @@ class NewDatabase:
                     original_database=[],
                     load_metadata=True,
                     warning=False,
-                    consume_compact=True,
+                    consume_compact=not self.generate_reports,
                 )
                 try:
                     scenario["database"] = prepare_db_for_fast_export(
@@ -2534,8 +2706,13 @@ class NewDatabase:
                         biosphere_name=self.biosphere_name,
                         version=self.version,
                     )
+                except PremiseValidationError as error:
+                    self._handle_export_validation_error(
+                        self.scenarios[s], error, "brightway", scenario
+                    )
+                    raise
                 except ValueError:
-                    self.generate_change_report()
+                    self._try_automatic_failed_report()
                     raise ValueError(
                         "The database is not ready for export: MAJOR anomalies found. Check the change report."
                     )
@@ -2574,8 +2751,13 @@ class NewDatabase:
                     biosphere_name=self.biosphere_name,
                     version=self.version,
                 )
+            except PremiseValidationError as error:
+                self._handle_export_validation_error(
+                    self.scenarios[s], error, "brightway", scenario
+                )
+                raise
             except ValueError:
-                self.generate_change_report()
+                self._try_automatic_failed_report()
                 raise ValueError(
                     "The database is not ready for export: MAJOR anomalies found. Check the change report."
                 )
@@ -2597,12 +2779,8 @@ class NewDatabase:
 
             end_of_process(scenario)
 
+        self._run_automatic_reports()
         delete_all_pickles()
-        if self.generate_reports:
-            # generate scenario report
-            self.generate_scenario_report()
-            # generate change report from logs
-            self.generate_change_report()
 
     def write_db_to_matrices(self, filepath: str = None):
         """
@@ -2666,8 +2844,13 @@ class NewDatabase:
                     biosphere_name=self.biosphere_name,
                     version=self.version,
                 )
+            except PremiseValidationError as error:
+                self._handle_export_validation_error(
+                    self.scenarios[s], error, "matrices", scenario
+                )
+                raise
             except ValueError:
-                self.generate_change_report()
+                self._try_automatic_failed_report()
                 raise ValueError(
                     "The database is not ready for export: MAJOR anomalies found. Check the change report."
                 )
@@ -2685,13 +2868,8 @@ class NewDatabase:
 
             end_of_process(scenario)
 
+        self._run_automatic_reports()
         delete_all_pickles()
-
-        if self.generate_reports:
-            # generate scenario report
-            self.generate_scenario_report()
-            # generate change report from logs
-            self.generate_change_report()
 
     def write_db_to_simapro(self, filepath: str = None):
         """
@@ -2726,8 +2904,13 @@ class NewDatabase:
                     biosphere_name=self.biosphere_name,
                     version=self.version,
                 )
+            except PremiseValidationError as error:
+                self._handle_export_validation_error(
+                    scenario_definition, error, "simapro", scenario
+                )
+                raise
             except ValueError:
-                self.generate_change_report()
+                self._try_automatic_failed_report()
                 raise ValueError(
                     "The database is not ready for export: MAJOR anomalies found. Check the change report."
                 )
@@ -2747,12 +2930,8 @@ class NewDatabase:
 
             end_of_process(scenario)
 
+        self._run_automatic_reports()
         delete_all_pickles()
-        if self.generate_reports:
-            # generate scenario report
-            self.generate_scenario_report()
-            # generate change report from logs
-            self.generate_change_report()
 
     def write_db_to_olca(self, filepath: str = None):
         """
@@ -2787,8 +2966,13 @@ class NewDatabase:
                     biosphere_name=self.biosphere_name,
                     version=self.version,
                 )
+            except PremiseValidationError as error:
+                self._handle_export_validation_error(
+                    scenario_definition, error, "openlca", scenario
+                )
+                raise
             except ValueError:
-                self.generate_change_report()
+                self._try_automatic_failed_report()
                 raise ValueError(
                     "The database is not ready for export: MAJOR anomalies found. Check the change report."
                 )
@@ -2806,12 +2990,8 @@ class NewDatabase:
 
             end_of_process(scenario)
 
+        self._run_automatic_reports()
         delete_all_pickles()
-        if self.generate_reports:
-            # generate scenario report
-            self.generate_scenario_report()
-            # generate change report from logs
-            self.generate_change_report()
 
     def write_datapackage(
         self,
@@ -2845,8 +3025,13 @@ class NewDatabase:
                     biosphere_name=self.biosphere_name,
                     version=self.version,
                 )
+            except PremiseValidationError as error:
+                self._handle_export_validation_error(
+                    scenario_definition, error, "datapackage", scenario
+                )
+                raise
             except ValueError:
-                self.generate_change_report()
+                self._try_automatic_failed_report()
                 raise ValueError(
                     "The database is not ready for export: MAJOR anomalies found. Check the change report."
                 )
@@ -2881,11 +3066,7 @@ class NewDatabase:
             name=name,
         )
 
-        if self.generate_reports:
-            # generate scenario report
-            self.generate_scenario_report()
-            # generate change report from logs
-            self.generate_change_report()
+        self._run_automatic_reports()
 
     def generate_scenario_report(
         self,
@@ -2915,14 +3096,221 @@ class NewDatabase:
 
         print(f"Report saved under {filepath}.")
 
-    def generate_change_report(self):
-        """
-        Generate a report of the changes between the original database and the scenarios.
+    def _report_source_store(self) -> InventoryStore:
+        store = getattr(self, "_source_inventory_store", None)
+        if store is None:
+            checkpoint = getattr(self, "_compact_source_checkpoint", None)
+            if checkpoint is not None:
+                store = InventoryStore.open(checkpoint)
+        if store is None:
+            try:
+                database = _normalize_inventory_before_certification(
+                    self._load_original_database()
+                )
+            except (AttributeError, OSError, ValueError) as error:
+                raise RuntimeError(
+                    "The normalized source inventory is unavailable."
+                ) from error
+            store = create_inventory_store(
+                database,
+                backend=getattr(self, "inventory_backend", "compact"),
+                scenario_identity="source",
+                take_ownership=True,
+                compute_fingerprints=True,
+            )
+            self._source_inventory_store = store
+        return ReadOnlyInventoryStore(store)
+
+    def _report_scenarios(
+        self,
+        override: tuple[dict, InventoryStore, ValidationReport] | None = None,
+    ) -> tuple[ReportScenario, ...]:
+        override_identity = (
+            self._scenario_identity(override[0]) if override is not None else None
+        )
+        report_scenarios = []
+        for definition in self.scenarios:
+            identity = self._scenario_identity(definition)
+            if override is not None and identity == override_identity:
+                runtime, store, report = override
+                underlying = getattr(store, "_store", store)
+                provenance = runtime.get("_provenance") or getattr(
+                    underlying, "_provenance_payload", None
+                )
+                report_scenarios.append(
+                    ReportScenario(
+                        identity=identity,
+                        store=ReadOnlyInventoryStore(store),
+                        validation_report=report,
+                        provenance_payload=provenance,
+                        definition=runtime,
+                    )
+                )
+                continue
+            if not definition.get("applied functions"):
+                continue
+            report = self._ensure_semantic_certification(definition)
+            cached = getattr(self, "_validation_reports", {}).get(identity)
+            if cached is not None:
+                report = cached
+            store = self._ensure_scenario_store(definition)
+            underlying = getattr(store, "_store", store)
+            provenance = definition.get("_provenance") or getattr(
+                underlying, "_provenance_payload", None
+            )
+            report_scenarios.append(
+                ReportScenario(
+                    identity=identity,
+                    store=ReadOnlyInventoryStore(store),
+                    validation_report=report,
+                    provenance_payload=provenance,
+                    definition=definition,
+                )
+            )
+        return tuple(report_scenarios)
+
+    def _generate_change_report(
+        self,
+        *,
+        filepath: str | Path | None = None,
+        name: str | None = None,
+        status: Literal["passed", "failed"] = "passed",
+        override: tuple[dict, InventoryStore, ValidationReport] | None = None,
+    ) -> ChangeReportArtifacts:
+        scenarios = self._report_scenarios(override=override)
+        if not scenarios:
+            raise RuntimeError(
+                "Cannot generate a change report before any scenario has been updated. "
+                "Call update() first."
+            )
+        build_id = getattr(self, "build_id", None) or uuid.uuid4().hex
+        self.build_id = build_id
+        generated = generate_structured_change_report(
+            source_store=self._report_source_store(),
+            scenarios=scenarios,
+            build_id=build_id,
+            source_fingerprint=self._validation_source_fingerprint(),
+            status=status,
+            filepath=filepath,
+            name=name,
+            source_database=getattr(self, "source", None),
+            source_type=getattr(self, "source_type", None),
+            version=getattr(self, "version", None),
+            system_model=getattr(self, "system_model", None),
+            premise_version=".".join(map(str, __version__)),
+            # An exporter failure is represented by a temporary read-only
+            # store which can legitimately share a generation number with the
+            # certified scenario store. Never reuse or replace the certified
+            # audit cache for that diagnostic graph.
+            cache_entry=(
+                None
+                if override is not None
+                else getattr(self, "_change_report_cache", None)
+            ),
+        )
+        if override is None:
+            self._change_report_cache = generated.cache_entry
+        self._last_change_report_artifacts = generated.artifacts
+        return generated.artifacts
+
+    def _generate_validation_diagnostic(
+        self,
+        error: PremiseValidationError,
+        scenario: dict,
+        store: InventoryStore | None = None,
+    ) -> None:
+        if not getattr(self, "generate_reports", False) or getattr(
+            self, "_automatic_report_in_progress", False
+        ):
+            return
+        try:
+            self._automatic_report_in_progress = True
+            if store is None:
+                store = scenario.get("_inventory_store")
+            if store is None:
+                database = scenario.get("_inventory_working_copy")
+                if database is None:
+                    return
+                store = create_inventory_store(
+                    database,
+                    backend=scenario.get("_inventory_backend")
+                    or getattr(self, "inventory_backend", "compact"),
+                    scenario_identity=self._scenario_identity(scenario),
+                    take_ownership=False,
+                )
+            artifacts = self._generate_change_report(
+                status="failed",
+                override=(scenario, store, error.report),
+            )
+            error.attach_report_artifacts(artifacts)
+        except Exception as reporting_error:  # preserve the validation failure
+            logger.warning(
+                "Failed to generate validation diagnostic report: %s",
+                reporting_error,
+                exc_info=True,
+            )
+            try:
+                underlying = getattr(store, "_store", store)
+                provenance = scenario.get("_provenance") or getattr(
+                    underlying, "_provenance_payload", None
+                )
+                artifacts = generate_validation_diagnostic_workbook(
+                    scenarios=(
+                        ReportScenario(
+                            identity=self._scenario_identity(scenario),
+                            store=ReadOnlyInventoryStore(store),
+                            validation_report=error.report,
+                            provenance_payload=provenance,
+                            definition=scenario,
+                        ),
+                    ),
+                    build_id=getattr(self, "build_id", uuid.uuid4().hex),
+                    source_fingerprint=self._validation_source_fingerprint(),
+                    source_database=getattr(self, "source", None),
+                    source_type=getattr(self, "source_type", None),
+                    version=getattr(self, "version", None),
+                    system_model=getattr(self, "system_model", None),
+                    premise_version=".".join(map(str, __version__)),
+                )
+                error.attach_report_artifacts(artifacts)
+            except Exception as fallback_error:
+                logger.warning(
+                    "Failed to generate validation-only workbook: %s",
+                    fallback_error,
+                    exc_info=True,
+                )
+        finally:
+            self._automatic_report_in_progress = False
+
+    def _run_automatic_reports(self) -> None:
+        if not getattr(self, "generate_reports", False):
+            return
+        try:
+            self.generate_scenario_report()
+        except Exception as error:
+            logger.warning(
+                "Automatic scenario report generation failed: %s", error, exc_info=True
+            )
+        try:
+            self.generate_change_report()
+        except Exception as error:
+            logger.warning(
+                "Automatic change report generation failed: %s", error, exc_info=True
+            )
+
+    def generate_change_report(
+        self,
+        filepath: str | Path | None = None,
+        name: str | None = None,
+    ) -> ChangeReportArtifacts:
+        """Generate a structured V2 workbook and detailed Parquet audit.
+
+        This explicit entry point is available after :meth:`update` regardless
+        of the ``generate_reports`` constructor setting. Reporting errors are
+        intentionally propagated to the caller.
         """
 
         print("Generate change report.")
-        generate_change_report(
-            self.source, self.version, self.source_type, self.system_model
-        )
-        # saved under working directory
-        print(f"Report saved under {os.getcwd()}/export/change reports/.")
+        artifacts = self._generate_change_report(filepath=filepath, name=name)
+        print(f"Report saved under {artifacts.workbook_path}.")
+        return artifacts

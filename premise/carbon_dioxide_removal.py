@@ -11,6 +11,7 @@ import xarray as xr
 
 from .filesystem_constants import DATA_DIR, VARIABLES_DIR
 from .logger import create_logger
+from .provenance import record_change_event
 from .inventory_store import get_scenario_inventory, replace_scenario_inventory
 from .transformation import (
     BaseTransformation,
@@ -723,12 +724,6 @@ class CarbonDioxideRemoval(BaseTransformation):
         return dataset
 
     def write_log(self, dataset, status="created"):
-        """
-        Write log file.
-        """
-        logger.info(
-            f"{status}|{self.model}|{self.scenario}|{self.year}|"
-            f"{dataset['name']}|{dataset['location']}|"
-            f"{dataset.get('log parameters', {}).get('electricity efficiency scaling factor', '')}|"
-            f"{dataset.get('log parameters', {}).get('heat efficiency scaling factor', '')}"
-        )
+        """Record a structured carbon-removal provenance event."""
+
+        record_change_event(self, dataset, status, sector="cdr")

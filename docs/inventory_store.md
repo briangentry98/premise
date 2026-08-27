@@ -110,4 +110,6 @@ only their streaming schema phase.
 The public surface is additive: `NewDatabase.get_validation_report()` and the
 immutable `ValidationIssue`, `ValidationRuleResult`, `ValidationPhaseResult`,
 `ValidationReport`, and `PremiseValidationError` types are exported from
-`premise`. Existing constructor and export signatures remain accepted.
+`premise`. `ChangeReportArtifacts` is likewise exported for the structured V2
+Excel/Parquet report returned by `NewDatabase.generate_change_report()`.
+Existing constructor and export signatures remain accepted.

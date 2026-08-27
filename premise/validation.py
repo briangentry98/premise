@@ -312,7 +312,7 @@ def convert_numpy_generics_to_float(
     return _sanitize(records)
 
 
-def normalize_inventory_numeric_types(database):
+def normalize_inventory_numeric_types(database, on_change=None):
     """Apply the historical scalar numeric conversions before validation.
 
     IAM calculations often produce zero-dimensional or one-element NumPy
@@ -335,12 +335,15 @@ def normalize_inventory_numeric_types(database):
         normalized = normalize_scalar(value)
         if normalized is not value:
             mapping[key] = normalized
+            return True
+        return False
 
     for dataset in database:
+        changed = False
         for value in dataset.values():
             if isinstance(value, dict):
                 for key, item in value.items():
-                    assign_if_converted(value, key, item)
+                    changed = assign_if_converted(value, key, item) or changed
         for exchange in dataset.get("exchanges", ()):
             amount = exchange.get("amount")
             if (
@@ -351,15 +354,19 @@ def normalize_inventory_numeric_types(database):
                 normalized_amount = float(np.asarray(amount).reshape(-1)[0])
                 if type(amount) is not float:
                     exchange["amount"] = normalized_amount
+                    changed = True
             for key, value in tuple(exchange.items()):
-                assign_if_converted(exchange, key, value)
+                changed = assign_if_converted(exchange, key, value) or changed
+        if changed and on_change is not None:
+            on_change(dataset, "numeric_types")
     return database
 
 
-def normalize_inventory_uncertainty(database):
+def normalize_inventory_uncertainty(database, on_change=None):
     """Apply the historical uncertainty repairs before read-only checks."""
 
     for dataset in database:
+        changed = False
         for exchange in dataset.get("exchanges", ()):
             try:
                 uncertainty_type = int(exchange.get("uncertainty type", 0))
@@ -380,27 +387,38 @@ def normalize_inventory_uncertainty(database):
                     # metadata attached to it.
                     exchange["uncertainty type"] = 0
                     exchange["loc"] = 0.0
-                    exchange.pop("negative", None)
+                    if "negative" in exchange:
+                        exchange.pop("negative")
                     for field in ("scale", "minimum", "maximum", "shape"):
                         exchange.pop(field, None)
+                    changed = True
                 else:
                     if "loc" not in exchange:
                         exchange["loc"] = float(math.log(abs(float(amount))))
+                        changed = True
                     negative = bool(amount < 0)
                     if exchange.get("negative") is not negative:
                         exchange["negative"] = negative
+                        changed = True
             elif uncertainty_type == 3 and numeric_amount and "loc" not in exchange:
                 exchange["loc"] = float(amount)
+                changed = True
             elif uncertainty_type == 5 and numeric_amount:
-                exchange.setdefault("loc", float(amount))
+                if "loc" not in exchange:
+                    exchange["loc"] = float(amount)
+                    changed = True
                 if "minimum" in exchange and exchange["minimum"] > exchange["loc"]:
                     exchange["minimum"] = exchange["loc"]
+                    changed = True
                 if "maximum" in exchange and exchange["maximum"] < exchange["loc"]:
                     exchange["maximum"] = exchange["loc"]
+                    changed = True
+        if changed and on_change is not None:
+            on_change(dataset, "uncertainty")
     return database
 
 
-def normalize_exact_deterministic_exchange_duplicates(database):
+def normalize_exact_deterministic_exchange_duplicates(database, on_change=None):
     """Consolidate only byte-equivalent deterministic technosphere rows.
 
     The summed amount preserves the deterministic inventory total. Exchanges
@@ -431,6 +449,8 @@ def normalize_exact_deterministic_exchange_duplicates(database):
                 duplicate_found = True
         if duplicate_found:
             dataset["exchanges"] = normalized
+            if on_change is not None:
+                on_change(dataset, "exact_duplicates")
     return database
 
 
