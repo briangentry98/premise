@@ -1546,6 +1546,41 @@ class _CompactExchangeMapping(MutableMapping[str, Any]):
     def copy(self) -> dict[str, Any]:
         return dict(self.items())
 
+    def _premise_relink_fields(self) -> tuple[Any, Any, Any, Any, Any, Any]:
+        """Return the hot semantic fields used by relinking in one dispatch."""
+
+        extra = self._extra or {}
+        product = (
+            extra["reference product"]
+            if "reference product" in extra
+            else self._product
+        )
+        return (
+            self._type,
+            self._name,
+            product,
+            self._location,
+            self._unit,
+            self._amount,
+        )
+
+    def _premise_export_fields(
+        self,
+    ) -> tuple[Any, Any, Any, Any, Any, Any, Any, Any]:
+        """Return fields needed by fast export normalization and validation."""
+
+        extra = self._extra or {}
+        return (
+            self._type,
+            self._name,
+            self._product,
+            self._location,
+            self._unit,
+            self._amount,
+            extra.get("categories"),
+            extra.get("input"),
+        )
+
     def _premise_fast_export_payload(self) -> dict[str, Any]:
         """Materialize an export row without generic mapping iteration."""
 
@@ -1900,6 +1935,110 @@ class _ColumnarExchangeMapping(MutableMapping[str, Any]):
             if boolean >= 0:
                 return bool(boolean)
         return self._metadata_value(key, default)
+
+    def _premise_relink_fields(self) -> tuple[Any, Any, Any, Any, Any, Any]:
+        """Decode the hot relinking tuple without generic mapping dispatch."""
+
+        storage = self._storage
+        row = self._row
+
+        def string_value(field_name: str) -> Any:
+            changed = self._changed_value(field_name)
+            if changed is _COLUMNAR_DELETED:
+                return None
+            if changed is not _COLUMNAR_MISSING:
+                return changed
+            string_id = int(storage._string_columns[field_name][row])
+            return storage._string_values[string_id] if string_id >= 0 else None
+
+        changed_amount = self._changed_value("amount")
+        if changed_amount is _COLUMNAR_DELETED:
+            amount = None
+        elif changed_amount is not _COLUMNAR_MISSING:
+            amount = changed_amount
+        else:
+            kind = int(storage._numeric_kinds["amount"][row])
+            amount = (
+                _decode_numeric_column(
+                    kind,
+                    storage._numeric_floats["amount"][row],
+                    storage._numeric_ints["amount"][row],
+                )
+                if kind != _NUMERIC_MISSING
+                else None
+            )
+
+        changed_reference_product = self._changed_value("reference product")
+        if changed_reference_product is _COLUMNAR_DELETED:
+            reference_product_present = False
+            reference_product = None
+        elif changed_reference_product is not _COLUMNAR_MISSING:
+            reference_product_present = True
+            reference_product = changed_reference_product
+        else:
+            reference_product_present = False
+            reference_product = None
+            field_bit = _EXCHANGE_HOT_METADATA_BITS["reference product"]
+            metadata_mask = int(storage._metadata_hot_field_masks[row])
+            if metadata_mask < 0 or metadata_mask & field_bit:
+                metadata = storage.metadata(row)
+                if "reference product" in metadata:
+                    reference_product_present = True
+                    reference_product = metadata["reference product"]
+
+        return (
+            string_value("type"),
+            string_value("name"),
+            reference_product if reference_product_present else string_value("product"),
+            string_value("location"),
+            string_value("unit"),
+            amount,
+        )
+
+    def _premise_export_fields(
+        self,
+    ) -> tuple[Any, Any, Any, Any, Any, Any, Any, Any]:
+        """Return fields needed by fast export normalization and validation."""
+
+        storage = self._storage
+        row = self._row
+
+        def string_value(field_name: str) -> Any:
+            changed = self._changed_value(field_name)
+            if changed is _COLUMNAR_DELETED:
+                return None
+            if changed is not _COLUMNAR_MISSING:
+                return changed
+            string_id = int(storage._string_columns[field_name][row])
+            return storage._string_values[string_id] if string_id >= 0 else None
+
+        changed_amount = self._changed_value("amount")
+        if changed_amount is _COLUMNAR_DELETED:
+            amount = None
+        elif changed_amount is not _COLUMNAR_MISSING:
+            amount = changed_amount
+        else:
+            kind = int(storage._numeric_kinds["amount"][row])
+            amount = (
+                _decode_numeric_column(
+                    kind,
+                    storage._numeric_floats["amount"][row],
+                    storage._numeric_ints["amount"][row],
+                )
+                if kind != _NUMERIC_MISSING
+                else None
+            )
+
+        return (
+            string_value("type"),
+            string_value("name"),
+            string_value("product"),
+            string_value("location"),
+            string_value("unit"),
+            amount,
+            self.get("categories"),
+            self.get("input"),
+        )
 
     def __setitem__(self, key: str, value: Any) -> None:
         self._set_change(key, value)

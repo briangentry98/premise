@@ -276,7 +276,7 @@ def test_write_db_to_brightway_requires_registered_biosphere(monkeypatch):
         obj.write_db_to_brightway(name=["test-db"])
 
 
-def test_write_db_to_brightway_fast_path_runs_internal_check(monkeypatch):
+def test_write_db_to_brightway_fast_path_reuses_export_session_check(monkeypatch):
     prepared_database = [{"name": "prepared dataset", "exchanges": []}]
     captured = {
         "loaded": None,
@@ -398,7 +398,7 @@ def test_write_db_to_brightway_fast_path_runs_internal_check(monkeypatch):
     assert captured["written"]["data"] == prepared_database
     assert captured["written"]["name"] == "fast-db"
     assert captured["written"]["fast"] is True
-    assert captured["written"]["check_internal"] is True
+    assert captured["written"]["check_internal"] is False
     assert captured["written"]["metadata"]["iam_model"] == "image"
     assert captured["written"]["metadata"]["pathway"] == "SSP2-Base"
     assert (

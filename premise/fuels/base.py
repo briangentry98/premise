@@ -155,9 +155,7 @@ class Fuels(
     def clear_validation_provenance(self) -> None:
         """Remove transient technology labels after incremental validation."""
 
-        for dataset in self.database:
-            for exchange in dataset.get("exchanges", ()):
-                exchange.pop("premise market technology", None)
+        self.clear_validation_provenance_field("premise market technology")
 
     def write_log(self, dataset, status="created"):
         """Record a structured fuel provenance event."""

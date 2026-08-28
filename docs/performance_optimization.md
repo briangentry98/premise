@@ -44,15 +44,16 @@ Fast Brightway export applies only required database and input identifiers,
 then runs its read-only schema check; it does not repeat scalar normalization,
 parameter cleanup, or uncertainty normalization.
 
-| Matched cProfile metric | Pre-validation | Regressed | Revised | Export optimized |
-| --- | ---: | ---: | ---: | ---: |
-| Constructor, one scenario | 72.78 s | 74.99 s | 78.34 s | 78.33 s |
-| ``update()``, one scenario | 77.30 s | 186.34 s | 82.85 s | 84.20 s |
-| Brightway write, one scenario | 128.17 s | 292.33 s | 117.15 s | 94.60 s |
-| End-to-end, one scenario | 278.26 s | 553.66 s | 278.34 s | 257.13 s |
-| ``update()``, three scenarios | — | 624.59 s | 270.24 s | — |
-| Brightway write, three scenarios | — | 887.52 s | 389.95 s | — |
-| End-to-end, three scenarios | — | 1,596.75 s | 743.97 s | — |
+| Matched cProfile metric | Pre-validation | Regressed | Revised | Export optimized | Five-path follow-up |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Constructor, one scenario | 72.78 s | 74.99 s | 78.34 s | 78.33 s | 38.87 s |
+| ``update()``, one scenario | 77.30 s | 186.34 s | 82.85 s | 84.20 s | 82.01 s |
+| Brightway write, one scenario | 128.17 s | 292.33 s | 117.15 s | 94.60 s | 85.11 s |
+| End-to-end, one scenario | 278.26 s | 553.66 s | 278.34 s | 257.13 s | 205.99 s |
+| Constructor, three scenarios | — | 84.64 s | 83.78 s | — | 44.05 s |
+| ``update()``, three scenarios | — | 624.59 s | 270.24 s | — | 251.01 s |
+| Brightway write, three scenarios | — | 887.52 s | 389.95 s | — | 354.79 s |
+| End-to-end, three scenarios | — | 1,596.75 s | 743.97 s | — | 649.85 s |
 
 The export-optimized one-scenario total is 42.87 seconds below the reviewed
 300-second ceiling and 7.6% faster than the pre-validation total. Compact
@@ -66,13 +67,41 @@ provider resolution, biosphere identifiers, scalar amounts, and finite-value
 checks. Peak RSS fell from 2.394 to 2.161 GB in the matched revised-to-optimized
 run.
 
+The five-path follow-up keeps the one-scenario update effectively flat while
+reducing its end-to-end time by 51.14 seconds (19.9%). The three-scenario
+update is 251.01 seconds, below the reviewed 300-second ceiling, and the full
+workflow is 94.11 seconds (12.7%) faster. Its measured peak RSS was 2.354 GB
+for one scenario and 2.616 GB for three scenarios. The one-scenario Brightway
+write includes 39.46 seconds of SQLite ``executemany`` time, compared with
+38.81 seconds in the earlier export-optimized sample; premise export
+preparation itself fell from 17.23 to 12.63 seconds.
+
+The follow-up implements five bounded changes:
+
+1. Validation cleanup uses transformation-owned activity registries instead of
+   rescanning the complete graph for temporary provenance fields.
+2. Brightway input assignment and exporter schema validation share one provider
+   index and one exchange traversal, while retaining the compatibility path for
+   third-party validator subclasses.
+3. Compact exchanges expose direct semantic field tuples to the combined
+   export session. Relinking keeps its type-first short circuit because using a
+   wide accessor before that check was measurably slower.
+4. Packaged migration JSON descriptors are cached by file signature, and
+   ordered migration and biosphere rules are compiled into shape-aware lookup
+   indexes without changing first-rule precedence.
+5. A single persisted scenario can retain a size-bounded, canonical
+   checkpoint-backed export handoff. Multi-scenario builds reopen checkpoints
+   one at a time, and the handoff is consumed after export. This preserves the
+   established scenario-cache normalization boundary and avoids retaining
+   several complete inventories.
+
 Within the revised update profile, sector contracts plus incremental
 certificate construction take 1.79 seconds, or 2.32% of the matched
 77.30-second pre-validation update. The three-scenario result reduces total
-cProfile time by 53.4% and peak RSS from 2.90 to 2.49 GB; the export-optimized
-three-scenario run has not yet been repeated. cProfile inflates Python-heavy
-absolute timings; these matched figures are used for attribution and
-acceptance, not as uninstrumented user wall times.
+cProfile time by 53.4% and peak RSS from 2.90 to 2.49 GB. The later five-path
+profile provides the repeated export-optimized figures above. cProfile inflates
+Python-heavy absolute timings; these matched figures are used for attribution
+and acceptance, not as uninstrumented user wall times.
 ``benchmarks/check_validation_performance.py`` and
 ``benchmarks/check_validation_warnings.py`` enforce the runtime and warning
 gates.

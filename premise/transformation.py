@@ -744,6 +744,11 @@ class BaseTransformation:
         self.cache[_VALIDATION_ADDED_TARGETS_KEY] = self._validation_added_targets
         if isinstance(self.database, IndexedInventoryList):
             self.database.track_validation_additions(self._validation_added_targets)
+        # Some sector checks need a short-lived exchange label to distinguish
+        # IAM technologies which resolve to the same provider.  Keep the exact
+        # owning activities so cleanup is proportional to the generated
+        # markets, not to the complete ecoinvent graph.
+        self._validation_provenance_targets: dict[str, dict[int, dict]] = {}
         self.ecoinvent_to_iam_loc: Dict[str, str] = {
             loc: self.geo.ecoinvent_to_iam_location(loc)
             for loc in self.get_ecoinvent_locs()
@@ -811,6 +816,23 @@ class BaseTransformation:
             else:
                 provider_semantics[semantic_key] -= 1
             self._invalidate_provider_group_cache(preserve_semantic_index=True)
+
+    def track_validation_provenance(self, dataset: dict, field_name: str) -> None:
+        """Register an activity carrying a transient validation-only field."""
+
+        targets = getattr(self, "_validation_provenance_targets", None)
+        if targets is None:
+            targets = self._validation_provenance_targets = {}
+        targets.setdefault(field_name, {})[id(dataset)] = dataset
+
+    def clear_validation_provenance_field(self, field_name: str) -> None:
+        """Remove one transient field from its registered activities only."""
+
+        registry = getattr(self, "_validation_provenance_targets", {})
+        targets = registry.pop(field_name, {})
+        for dataset in targets.values():
+            for exchange in dataset.get("exchanges", ()):
+                exchange.pop(field_name, None)
 
     def _invalidate_provider_group_cache(
         self, *, preserve_semantic_index: bool = False
@@ -1324,6 +1346,11 @@ class BaseTransformation:
                     # These links are rebuilt at export/relink time.
                     new_exc.pop("input", None)
                     market_dataset["exchanges"].append(new_exc)
+
+            if retain_validation_technology:
+                self.track_validation_provenance(
+                    market_dataset, "premise market technology"
+                )
 
             self.database.append(market_dataset)
             self.add_to_index(market_dataset)

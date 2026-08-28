@@ -516,12 +516,17 @@ def test_new_database_persists_and_exposes_completed_report(
     runtime["_inventory_working_copy"] = copy.deepcopy(valid_inventory)
     monkeypatch.setattr(new_database_module, "DIR_CACHED_FILES", tmp_path)
 
-    database._store_updated_scenario(definition, runtime, persist=True)
+    live_store = database._store_updated_scenario(definition, runtime, persist=True)
     report = database.get_validation_report()
 
     assert report.valid
     assert definition["_validation_report"]["certificate_key"] == report.certificate_key
     checkpoint = definition["_inventory_checkpoint"]
+    handoff = definition["_inventory_export_handoff"]
+    assert handoff is not live_store
+    assert handoff.materialize(restore_metadata=True) == InventoryStore.open(
+        checkpoint
+    ).materialize(restore_metadata=True)
     manifest = (checkpoint / "manifest.json").read_text(encoding="utf-8")
     assert '"validation_certificate"' in manifest
 

@@ -1280,18 +1280,26 @@ def prepare_db_for_fast_export(scenario, name, version, biosphere_name=None):
         version=version,
         extra_regions=scenario.get("additional valid regions"),
     )
-    make_normalizer = getattr(validator, "make_normalizer", None)
-    if make_normalizer is not None:
-        normalizer = make_normalizer()
-        prepare_fast_fields = getattr(normalizer, "prepare_fast_export_fields", None)
-        if prepare_fast_fields is not None:
-            validator.database = prepare_fast_fields()
-    if _has_semantic_certificate(scenario) and hasattr(
-        validator, "run_export_schema_checks"
-    ):
-        report = validator.run_export_schema_checks()
+    run_session = getattr(validator, "run_fast_export_session", None)
+    if run_session is not None:
+        validator.database, report = run_session()
     else:
-        report = validator.run_fast_export_checks()
+        # Compatibility path for third-party validator subclasses which have
+        # not adopted the combined export session protocol.
+        make_normalizer = getattr(validator, "make_normalizer", None)
+        if make_normalizer is not None:
+            normalizer = make_normalizer()
+            prepare_fast_fields = getattr(
+                normalizer, "prepare_fast_export_fields", None
+            )
+            if prepare_fast_fields is not None:
+                validator.database = prepare_fast_fields()
+        if _has_semantic_certificate(scenario) and hasattr(
+            validator, "run_export_schema_checks"
+        ):
+            report = validator.run_export_schema_checks()
+        else:
+            report = validator.run_fast_export_checks()
 
     if isinstance(report, ValidationReport) and report.phase_results:
         scenario["_export_validation_phase"] = report.phase_results[0].to_dict()

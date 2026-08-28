@@ -133,6 +133,10 @@ from .renewables import _update_wind_turbines
 
 logger = logging.getLogger("module")
 
+_EXPORT_HANDOFF_MAX_BYTES = 512 * 1024 * 1024
+_EXPORT_HANDOFF_ACTIVITY_BYTES = 1536
+_EXPORT_HANDOFF_EXCHANGE_BYTES = 192
+
 
 def _normalize_inventory_before_certification(database, provenance_owner=None):
     """Apply idempotent historical normalizations before baseline capture."""
@@ -1364,6 +1368,11 @@ class NewDatabase:
             self._restore_scenario_provenance(scenario, store)
             return store
 
+        # Public inspection and subsequent updates use the durable checkpoint.
+        # The canonical handoff is intentionally private to immediate export
+        # because checking it out transfers ownership and empties the store.
+        scenario.pop("_inventory_export_handoff", None)
+
         checkpoint = scenario.get("_inventory_checkpoint")
         if checkpoint is not None:
             try:
@@ -2076,6 +2085,7 @@ class NewDatabase:
 
         runtime_scenario = scenario.copy()
         runtime_scenario.pop("_inventory_store", None)
+        runtime_scenario.pop("_inventory_export_handoff", None)
         runtime_scenario.pop("_inventory_checkpoint", None)
         self._attach_shared_geography_cache(runtime_scenario)
         store = self._ensure_scenario_store(scenario)
@@ -2157,9 +2167,36 @@ class NewDatabase:
                 scenario_definition["mapping"] = _compact_scenario_mapping(
                     scenario_definition["mapping"], store, checkpoint
                 )
+            if self._can_retain_export_handoff(store):
+                # Open the just-written canonical representation once. The
+                # live overlays can contain false/empty metadata removed by
+                # scenario-cache compatibility rules, so handing those live
+                # objects directly to an exporter would change established
+                # persisted-build semantics.
+                scenario_definition["_inventory_export_handoff"] = InventoryStore.open(
+                    checkpoint
+                )
         else:
             scenario_definition["_inventory_store"] = store
         return store
+
+    def _can_retain_export_handoff(self, store: InventoryStore) -> bool:
+        """Bound the private single-use checkpoint-to-export handoff."""
+
+        if len(getattr(self, "scenarios", ())) != 1 or not isinstance(
+            store, CompactInventoryStore
+        ):
+            return False
+        state = getattr(store, "_state", None)
+        if state is None:
+            return False
+        activity_count = len(getattr(state, "activity_order", ()))
+        exchange_count = len(getattr(state, "exchanges", ()))
+        estimated_bytes = (
+            activity_count * _EXPORT_HANDOFF_ACTIVITY_BYTES
+            + exchange_count * _EXPORT_HANDOFF_EXCHANGE_BYTES
+        )
+        return estimated_bytes <= _EXPORT_HANDOFF_MAX_BYTES
 
     @staticmethod
     def _clear_scenario_runtime_state(scenario: dict) -> None:
@@ -2724,19 +2761,29 @@ class NewDatabase:
             self._ensure_semantic_certification(scenario)
             can_use_fast_export = (
                 scenario.get("_inventory_store") is not None
+                or scenario.get("_inventory_export_handoff") is not None
                 or "_inventory_checkpoint" in scenario
                 or scenario.get("database") is not None
                 or "database filepath" in scenario
             )
 
             if can_use_fast_export:
+                consume_compact = (
+                    "_inventory_checkpoint" in scenario or not self.generate_reports
+                )
                 scenario = load_database(
                     scenario=scenario,
                     original_database=[],
                     load_metadata=True,
                     warning=False,
-                    consume_compact=not self.generate_reports,
+                    consume_compact=consume_compact,
                 )
+                if consume_compact:
+                    # The runtime exporter owns the checked-out graph. Durable
+                    # checkpoints remain available for reports and later
+                    # exporters without retaining an emptied store object.
+                    self.scenarios[s].pop("_inventory_store", None)
+                    self.scenarios[s].pop("_inventory_export_handoff", None)
                 try:
                     scenario["database"] = prepare_db_for_fast_export(
                         scenario=scenario,
@@ -2764,7 +2811,9 @@ class NewDatabase:
                     scenario["database"],
                     name[s],
                     fast=True,
-                    check_internal=True,
+                    # The combined fast-export session has already resolved
+                    # and checked every internal provider in the same pass.
+                    check_internal=False,
                     metadata=scenario_metadata(
                         scenario,
                         version=getattr(self, "version", None),

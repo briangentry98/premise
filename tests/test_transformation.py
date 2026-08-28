@@ -32,6 +32,26 @@ def test_exclude_exchange_objects_does_not_compare_mapping_contents():
     ]
 
 
+def test_transient_validation_cleanup_only_touches_registered_activities():
+    transformation = object.__new__(BaseTransformation)
+    transformation._validation_provenance_targets = {}
+    target = {
+        "exchanges": [
+            {"premise market technology": "diesel"},
+            {"type": "production"},
+        ]
+    }
+    unrelated = {"exchanges": [{"premise market technology": "must remain untouched"}]}
+
+    transformation.track_validation_provenance(target, "premise market technology")
+    transformation.clear_validation_provenance_field("premise market technology")
+
+    assert "premise market technology" not in target["exchanges"][0]
+    assert unrelated["exchanges"][0]["premise market technology"] == (
+        "must remain untouched"
+    )
+
+
 def test_summarize_exchanges_uses_compact_payloads():
     transformation = object.__new__(BaseTransformation)
     exchanges = [

@@ -9,6 +9,7 @@ from wurst import searching as ws
 
 import premise.new_database as new_database_module
 import premise.utils as utils_module
+from premise.brightway25 import _prepare_fast_exchange_payload
 from premise.inventory_store import (
     ActivityKey,
     ActivityQuery,
@@ -33,6 +34,95 @@ from premise.inventory_store import (
 )
 from premise.new_database import NewDatabase
 from premise.transformation import clone_inventory_dataset
+
+
+def test_compact_exchange_protocols_preserve_generic_semantics(tmp_path):
+    exchange = {
+        "name": "provider",
+        "product": "product",
+        "reference product": "legacy product alias",
+        "location": "GLO",
+        "unit": "kilogram",
+        "type": "technosphere",
+        "amount": np.float64(2.5),
+        "uncertainty type": 0,
+        "input": ("db", "provider-code"),
+        "comment": None,
+    }
+    compact = compact_exchange_payload(exchange)
+    expected_fields = (
+        exchange["type"],
+        exchange["name"],
+        exchange["reference product"],
+        exchange["location"],
+        exchange["unit"],
+        exchange["amount"],
+    )
+
+    assert compact._premise_relink_fields() == expected_fields
+    assert _prepare_fast_exchange_payload(compact) == (
+        _prepare_fast_exchange_payload(exchange)
+    )
+
+    store = CompactInventoryStore(
+        [
+            {
+                "name": "provider",
+                "reference product": "product",
+                "location": "GLO",
+                "unit": "kilogram",
+                "code": "provider-code",
+                "database": "db",
+                "exchanges": [exchange],
+            }
+        ]
+    )
+    checkpoint = store.checkpoint(tmp_path / "protocol.inventory-store")
+    reopened = InventoryStore.open(checkpoint)
+    columnar = reopened._checkout_materialized(discard_shared_state=True)[0][
+        "exchanges"
+    ][0]
+
+    assert columnar._premise_relink_fields() == expected_fields
+    assert _prepare_fast_exchange_payload(columnar) == (
+        _prepare_fast_exchange_payload(exchange)
+    )
+
+
+def test_export_load_consumes_private_handoff_without_reopening_checkpoint(
+    inventory, tmp_path, monkeypatch
+):
+    store = CompactInventoryStore(copy.deepcopy(inventory))
+    store._scenario_cache_compatibility = True
+    checkpoint = store.checkpoint(tmp_path / "handoff.inventory-store")
+    handoff = InventoryStore.open(checkpoint)
+    expected = InventoryStore.open(checkpoint).materialize(restore_metadata=True)
+    scenario = {
+        "model": "image",
+        "pathway": "SSP2-Base",
+        "year": 2050,
+        "_inventory_checkpoint": checkpoint,
+        "_inventory_export_handoff": handoff,
+    }
+    monkeypatch.setattr(
+        InventoryStore,
+        "open",
+        classmethod(
+            lambda cls, path: (_ for _ in ()).throw(
+                AssertionError("bounded handoff should avoid reopening the checkpoint")
+            )
+        ),
+    )
+
+    loaded = utils_module.load_database(
+        scenario,
+        original_database=[],
+        load_metadata=True,
+        consume_compact=True,
+    )
+
+    assert loaded["database"] == expected
+    assert len(handoff) == 0
 
 
 @pytest.fixture

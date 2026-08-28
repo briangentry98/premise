@@ -75,6 +75,24 @@ def _export_numeric_scalar(value):
     return value
 
 
+def _exchange_export_fields(exchange):
+    """Return the fields shared by export preparation and schema checks."""
+
+    accessor = getattr(exchange, "_premise_export_fields", None)
+    if accessor is not None:
+        return accessor()
+    return (
+        exchange.get("type"),
+        exchange.get("name"),
+        exchange.get("product"),
+        exchange.get("location"),
+        exchange.get("unit"),
+        exchange.get("amount"),
+        exchange.get("categories"),
+        exchange.get("input"),
+    )
+
+
 def independent_consequential_mix(iam_data, sector, year):
     """Recompute a marginal vector from the pre-transformation IAM market data."""
 
@@ -468,6 +486,253 @@ def normalize_exact_deterministic_exchange_duplicates(database, on_change=None):
             if on_change is not None:
                 on_change(dataset, "exact_duplicates")
     return database
+
+
+class FastExportSession:
+    """Normalize and validate one exporter graph with one shared index/pass."""
+
+    _VALID_EXCHANGE_TYPES = frozenset({"production", "technosphere", "biosphere"})
+    _ACTIVITY_FIELDS = (
+        "name",
+        "reference product",
+        "location",
+        "unit",
+        "code",
+        "database",
+        "exchanges",
+    )
+
+    def __init__(self, validator):
+        self.validator = validator
+        self.database = validator.database
+        self.db_name = validator.db_name
+        self.biosphere_name = validator.biosphere_name
+
+    def _provider_index(self):
+        counts = {}
+        codes = {}
+        for dataset in self.database:
+            key = (
+                dataset.get("name"),
+                dataset.get("reference product"),
+                dataset.get("location"),
+                dataset.get("unit"),
+            )
+            counts[key] = counts.get(key, 0) + 1
+            codes.setdefault(key, set()).add(dataset.get("code"))
+        return counts, codes
+
+    @staticmethod
+    def _valid_input(exchange_input, database_name, provider_codes):
+        return (
+            isinstance(exchange_input, (tuple, list))
+            and len(exchange_input) == 2
+            and exchange_input[0] == database_name
+            and exchange_input[1] in provider_codes
+        )
+
+    def _normalize_provider_input(
+        self,
+        exchange,
+        exchange_input,
+        provider_count,
+        provider_codes,
+    ):
+        normalized_input = None
+        linkable_codes = {code for code in provider_codes if code is not None}
+        if provider_count == 1:
+            provider_code = next(iter(provider_codes))
+            if provider_code is not None:
+                normalized_input = self.db_name, provider_code
+        elif (
+            provider_count > 1
+            and isinstance(exchange_input, (tuple, list))
+            and len(exchange_input) == 2
+            and exchange_input[1] in linkable_codes
+        ):
+            normalized_input = self.db_name, exchange_input[1]
+
+        if normalized_input is None:
+            exchange.pop("input", None)
+        elif exchange_input != normalized_input:
+            exchange["input"] = normalized_input
+        return normalized_input
+
+    def _normalize_biosphere_input(
+        self, exchange, exchange_input, name, unit, categories
+    ):
+        if isinstance(exchange_input, (tuple, list)) and len(exchange_input) == 2:
+            normalized_input = (
+                self.biosphere_name,
+                exchange_input[1],
+            )
+        else:
+            categories = categories or ()
+            compartment = categories[0]
+            subcompartment = categories[1] if len(categories) > 1 else "unspecified"
+            normalized_input = (
+                self.biosphere_name,
+                self.validator.biosphere_codes[
+                    name,
+                    compartment,
+                    subcompartment,
+                    unit,
+                ],
+            )
+        if exchange_input != normalized_input:
+            exchange["input"] = normalized_input
+        return normalized_input
+
+    def run(self):
+        provider_counts, provider_codes = self._provider_index()
+        validator = self.validator
+
+        for dataset in self.database:
+            if dataset.get("database") != self.db_name:
+                dataset["database"] = self.db_name
+
+            missing = [
+                field
+                for field in self._ACTIVITY_FIELDS
+                if field not in dataset or dataset[field] in (None, "")
+            ]
+            if missing:
+                validator.log_issue(
+                    dataset,
+                    "export schema missing activity fields",
+                    f"Activity is missing exporter fields: {missing}.",
+                    issue_type="major",
+                )
+            if dataset.get("database") != self.db_name:
+                validator.log_issue(
+                    dataset,
+                    "export schema database mismatch",
+                    f"Activity database is {dataset.get('database')!r}; expected {self.db_name!r}.",
+                    issue_type="major",
+                )
+
+            for exchange in dataset.get("exchanges", []):
+                (
+                    exchange_type,
+                    exchange_name,
+                    exchange_product,
+                    exchange_location,
+                    exchange_unit,
+                    amount,
+                    categories,
+                    exchange_input,
+                ) = _exchange_export_fields(exchange)
+
+                provider_key = None
+                provider_count = 0
+                candidate_codes = set()
+                if exchange_type in {"production", "technosphere"}:
+                    provider_key = (
+                        exchange_name,
+                        exchange_product,
+                        exchange_location,
+                        exchange_unit,
+                    )
+                    provider_count = provider_counts.get(provider_key, 0)
+                    candidate_codes = provider_codes.get(provider_key, set())
+                    exchange_input = self._normalize_provider_input(
+                        exchange,
+                        exchange_input,
+                        provider_count,
+                        candidate_codes,
+                    )
+                elif exchange_type == "biosphere":
+                    exchange_input = self._normalize_biosphere_input(
+                        exchange,
+                        exchange_input,
+                        exchange_name,
+                        exchange_unit,
+                        categories,
+                    )
+
+                if exchange_type not in self._VALID_EXCHANGE_TYPES:
+                    validator.log_issue(
+                        dataset,
+                        "export schema exchange type",
+                        f"Exchange {exchange_name} has invalid type {exchange_type!r}.",
+                        issue_type="major",
+                    )
+                scalar_amount = _export_numeric_scalar(amount)
+                if scalar_amount is None:
+                    validator.log_issue(
+                        dataset,
+                        "export schema amount",
+                        f"Exchange {exchange_name} has non-numeric amount {amount!r}.",
+                        issue_type="major",
+                    )
+                elif not math.isfinite(scalar_amount):
+                    validator.log_issue(
+                        dataset,
+                        "export schema amount",
+                        f"Exchange {exchange_name} has non-finite amount {amount!r}.",
+                        issue_type="major",
+                    )
+
+                required = {"name", "unit", "type", "amount"}
+                if exchange_type in {"production", "technosphere"}:
+                    required.update({"product", "location", "input"})
+                elif exchange_type == "biosphere":
+                    required.update({"categories", "input"})
+                values = {
+                    "name": exchange_name,
+                    "product": exchange_product,
+                    "location": exchange_location,
+                    "unit": exchange_unit,
+                    "type": exchange_type,
+                    "amount": amount,
+                    "categories": categories,
+                    "input": exchange_input,
+                }
+                missing_exchange = [
+                    field for field in required if values.get(field) is None
+                ]
+                if missing_exchange:
+                    validator.log_issue(
+                        dataset,
+                        "export schema missing exchange fields",
+                        f"Exchange {exchange_name} is missing fields: {missing_exchange}.",
+                        issue_type="major",
+                    )
+
+                if exchange_type in {"production", "technosphere"}:
+                    resolves_provider = self._valid_input(
+                        exchange_input,
+                        self.db_name,
+                        candidate_codes,
+                    )
+                    if provider_count != 1 and not resolves_provider:
+                        validator.log_issue(
+                            dataset,
+                            "export schema provider cardinality",
+                            f"{exchange_type.title()} exchange {provider_key} resolves to {provider_count} providers.",
+                            issue_type="major",
+                        )
+                    elif not resolves_provider:
+                        validator.log_issue(
+                            dataset,
+                            "export schema provider input",
+                            f"{exchange_type.title()} exchange {provider_key} has an invalid input identifier.",
+                            issue_type="major",
+                        )
+                if exchange_type == "biosphere" and self.biosphere_name is not None:
+                    if not (
+                        isinstance(exchange_input, (tuple, list))
+                        and len(exchange_input) == 2
+                        and exchange_input[0] == self.biosphere_name
+                    ):
+                        validator.log_issue(
+                            dataset,
+                            "export schema biosphere input",
+                            f"Biosphere exchange {exchange_name} has an invalid input identifier.",
+                            issue_type="major",
+                        )
+
+        return validator._finalize_logs()
 
 
 class BaseDatasetValidator:
@@ -1111,6 +1376,12 @@ class BaseDatasetValidator:
 
         return self.run_export_schema_checks()
 
+    def run_fast_export_session(self):
+        """Prepare and validate Brightway fields in one indexed traversal."""
+
+        report = FastExportSession(self).run()
+        return self.database, report
+
     def run_export_schema_checks(self):
         """Validate normalized exporter fields in one read-only streaming pass."""
 
@@ -1356,10 +1627,7 @@ class DatasetNormalizer(BaseDatasetValidator):
                         for candidate in candidates
                         if candidate.get("code") is not None
                     }
-                    if (
-                        len(candidates) == 1
-                        and candidates[0].get("code") is not None
-                    ):
+                    if len(candidates) == 1 and candidates[0].get("code") is not None:
                         exchange["input"] = (
                             self.db_name,
                             candidates[0]["code"],

@@ -618,9 +618,7 @@ class Electricity(BaseTransformation):
     def clear_validation_provenance(self) -> None:
         """Remove transient IAM labels after incremental vector validation."""
 
-        for dataset in self.database:
-            for exchange in dataset.get("exchanges", ()):
-                exchange.pop("premise electricity technology", None)
+        self.clear_validation_provenance_field("premise electricity technology")
 
     def create_new_markets_low_voltage(self) -> None:
         """
@@ -911,6 +909,9 @@ class Electricity(BaseTransformation):
             for period in periods
             if region != "World"
         ]
+
+        for dataset in new_datasets:
+            self.track_validation_provenance(dataset, "premise electricity technology")
 
         self.database.extend(new_datasets)
 
@@ -1335,6 +1336,9 @@ class Electricity(BaseTransformation):
             for region in self.regions
             if region != "World"
         ]
+
+        for dataset in new_datasets:
+            self.track_validation_provenance(dataset, "premise electricity technology")
 
         self.database.extend(new_datasets)
 

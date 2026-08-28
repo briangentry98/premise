@@ -1,3 +1,5 @@
+import copy
+
 import numpy as np
 import pytest
 import xarray as xr
@@ -15,6 +17,62 @@ from premise.validation import (
     normalize_inventory_numeric_types,
     normalize_inventory_uncertainty,
 )
+
+
+def test_combined_fast_export_session_matches_sequential_preparation():
+    inventory = [
+        {
+            "name": "market for service",
+            "reference product": "service",
+            "location": "GLO",
+            "unit": "unit",
+            "database": "source-db",
+            "code": "service-code",
+            "exchanges": [
+                {
+                    "name": "market for service",
+                    "product": "service",
+                    "location": "GLO",
+                    "unit": "unit",
+                    "type": "production",
+                    "amount": 1.0,
+                }
+            ],
+        }
+    ]
+
+    expected_validator = BaseDatasetValidator(
+        model="image",
+        scenario="SSP2-Base",
+        year=2050,
+        regions=["World"],
+        database=copy.deepcopy(inventory),
+        original_database=[],
+        db_name="target-db",
+        biosphere_name="biosphere3",
+        version="3.12",
+    )
+    expected_validator.database = (
+        expected_validator.make_normalizer().prepare_fast_export_fields()
+    )
+    expected_report = expected_validator.run_export_schema_checks()
+
+    combined_validator = BaseDatasetValidator(
+        model="image",
+        scenario="SSP2-Base",
+        year=2050,
+        regions=["World"],
+        database=copy.deepcopy(inventory),
+        original_database=[],
+        db_name="target-db",
+        biosphere_name="biosphere3",
+        version="3.12",
+    )
+    combined_database, combined_report = combined_validator.run_fast_export_session()
+
+    assert combined_database == expected_validator.database
+    assert combined_report.rule_results == expected_report.rule_results
+    assert combined_report.phase_results == expected_report.phase_results
 
 
 def test_transport_energy_filters_require_technosphere_exchanges():
@@ -157,9 +215,7 @@ def test_fast_export_preparation_assigns_canonical_provider_input():
         "activity",
     )
 
-    database = DatasetNormalizer.from_validator(
-        validator
-    ).prepare_fast_export_fields()
+    database = DatasetNormalizer.from_validator(validator).prepare_fast_export_fields()
 
     assert database[0]["exchanges"][0]["input"] == (
         "test-db",

@@ -859,6 +859,12 @@ def load_database(
     # Exporters receive a short-lived copy so the active scenario definition
     # continues to contain only private store/checkpoint references.
     store = scenario.get("_inventory_store")
+    export_handoff = scenario.get("_inventory_export_handoff")
+    using_export_handoff = (
+        store is None and consume_compact and export_handoff is not None
+    )
+    if using_export_handoff:
+        store = export_handoff
     checkpoint = scenario.get("_inventory_checkpoint")
     if store is not None or checkpoint is not None:
         if store is None:
@@ -872,6 +878,24 @@ def load_database(
             materialized["database"] = store._checkout_materialized(
                 discard_shared_state=True
             )
+            if using_export_handoff:
+                # A retained checkpoint handoff still contains lazy columnar
+                # activities. Brightway's streaming writer would otherwise
+                # prepare every exchange once for SQL and again for vectors.
+                # Converting only the lightweight activity shells keeps the
+                # exchange mappings private and lets the existing one-pass
+                # compact writer reuse its prepared payload.
+                for position, dataset in enumerate(materialized["database"]):
+                    materialize_dataset = getattr(dataset, "_premise_materialize", None)
+                    if materialize_dataset is None:
+                        continue
+                    payload = materialize_dataset()
+                    exchanges = dataset["exchanges"]
+                    payload["exchanges"] = exchanges
+                    for exchange in exchanges:
+                        if hasattr(exchange, "_validation_owner"):
+                            exchange._validation_owner = payload
+                    list.__setitem__(materialized["database"], position, payload)
         else:
             materialized["database"] = store.materialize(restore_metadata=load_metadata)
         # Match the legacy cache-loading path: source activities can omit
