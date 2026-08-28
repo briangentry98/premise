@@ -10,6 +10,7 @@ from premise.heat import (
     BUILDING_LEGACY_INPUTS,
     BUILDINGS_MARKET,
     Heat,
+    INDUSTRIAL_MARKET,
     _update_heat,
 )
 from premise.inventory_imports import DefaultInventory
@@ -300,6 +301,55 @@ def test_relink_excludes_new_dataset_codes(monkeypatch):
     assert rewritten["location"] == "WEU"
     assert "input" not in rewritten
     assert generated["exchanges"][0] == legacy_exchange
+
+
+def test_relink_sums_legacy_inputs_that_collapse_to_one_heat_market(monkeypatch):
+    consumer = {
+        "name": "consumer",
+        "reference product": "service",
+        "location": "CH",
+        "unit": "unit",
+        "code": "consumer",
+        "exchanges": [
+            {
+                "name": "legacy natural gas heat",
+                "product": "natural gas heat",
+                "location": "CH",
+                "unit": "megajoule",
+                "amount": 2.0,
+                "type": "technosphere",
+            },
+            {
+                "name": "legacy other heat",
+                "product": "other heat",
+                "location": "CH",
+                "unit": "megajoule",
+                "amount": 3.0,
+                "type": "technosphere",
+            },
+        ],
+    }
+    heat = object.__new__(Heat)
+    heat.database = [consumer]
+    heat.created_dataset_codes = set()
+    heat.regions = ["WEU"]
+    heat.ecoinvent_to_iam_loc = {"CH": "WEU"}
+    monkeypatch.setattr(heat, "is_in_index", lambda candidate, location: True)
+
+    heat.relink_heat_markets(
+        [
+            {
+                "name": "legacy natural gas heat",
+                "reference product": "natural gas heat",
+            },
+            {"name": "legacy other heat", "reference product": "other heat"},
+        ],
+        INDUSTRIAL_MARKET,
+    )
+
+    assert len(consumer["exchanges"]) == 1
+    assert consumer["exchanges"][0]["name"] == INDUSTRIAL_MARKET["name"]
+    assert consumer["exchanges"][0]["amount"] == 5.0
 
 
 @pytest.mark.parametrize(

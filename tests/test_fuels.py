@@ -35,6 +35,63 @@ def test_gcam_coal_methane_inventory_is_regionalized():
     assert captured == {"methane, from coal": [coal_methane]}
 
 
+def test_fuel_carbon_update_preserves_ordered_exchange_semantics():
+    fuel_input = {
+        "name": "market for test fuel",
+        "product": "test fuel",
+        "location": "GLO",
+        "unit": "kilogram",
+        "type": "technosphere",
+        "amount": 2.0,
+    }
+    fossil = {
+        "name": "Carbon dioxide, fossil",
+        "unit": "kilogram",
+        "type": "biosphere",
+        "amount": 10.0,
+    }
+    consumer = {
+        "name": "fuel consumer",
+        "location": "R1",
+        "exchanges": [fuel_input, fossil],
+    }
+    market = {
+        "name": "market for test fuel",
+        "location": "R1",
+        "exchanges": [fuel_input.copy(), fossil.copy()],
+    }
+    fuels = object.__new__(Fuels)
+    fuels.database = [consumer, market]
+    fuels.fuel_map = {"biofuel": [], "fossil": []}
+    fuels.iam_data = SimpleNamespace(production_volumes=None)
+    fuels.regions = ["R1"]
+    fuels.ecoinvent_to_iam_loc = {}
+    fuels.biosphere_flows = {
+        ("Carbon dioxide, non-fossil", "air", "unspecified", "kilogram"): "flow"
+    }
+    fuels.is_in_index = lambda exchange, location: location == "R1"
+    fuels.get_technology_and_regional_production_shares = lambda **kwargs: (
+        None,
+        {("biofuel", "R1"): 0.5, ("fossil", "R1"): 0.5},
+        {"R1": 1.0},
+    )
+
+    fuels.update_fuel_carbon_dioxide_emissions(
+        variables=["biofuel", "fossil"],
+        market_names=["market for test fuel"],
+        co2_intensity=1.0,
+        fossil_variables=["fossil"],
+    )
+
+    assert fuel_input["location"] == "R1"
+    assert fossil["amount"] == 9.0
+    assert consumer["exchanges"][-1]["name"] == "Carbon dioxide, non-fossil"
+    assert consumer["exchanges"][-1]["amount"] == 1.0
+    assert len(market["exchanges"]) == 2
+    assert market["exchanges"][0]["location"] == "GLO"
+    assert market["exchanges"][1]["amount"] == 10.0
+
+
 def test_diesel_markets_receive_the_marginal_blend():
     diesel_supplier = {
         "name": "diesel production",
@@ -81,6 +138,7 @@ def test_diesel_markets_receive_the_marginal_blend():
 
     assert len(market_calls) == 4
     assert all(call["technology_shares"] is diesel_blend for call in market_calls)
+    assert all(call["retain_validation_technology"] for call in market_calls)
     assert len(carbon_calls) == 1
     assert carbon_calls[0]["technology_shares"] is diesel_blend
 

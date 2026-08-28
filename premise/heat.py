@@ -12,6 +12,8 @@ from .filesystem_constants import VARIABLES_DIR
 from .heat_data import load_heat_mapping
 from .inventory_imports import get_biosphere_code
 from .logger import create_logger
+from .provenance import record_change_event
+from .inventory_store import get_scenario_inventory, replace_scenario_inventory
 from .marginal_mixes import consequential_method
 from .transformation import (
     BaseTransformation,
@@ -22,6 +24,8 @@ from .transformation import (
     ws,
 )
 from .validation import HeatValidation
+from .validation_framework import record_validation_phase
+from .utils import rescale_exchanges
 
 logger = create_logger("heat")
 
@@ -113,6 +117,103 @@ INDUSTRIAL_LEGACY_INPUTS = [
 ]
 
 
+def normalize_cogeneration_heat_efficiency(database, regions) -> None:
+    """Apply the historical cogeneration repair before read-only validation."""
+
+    for dataset in database:
+        if not (
+            "heat" in dataset["name"]
+            and dataset["unit"] == "megajoule"
+            and "co-generation" in dataset["name"]
+            and dataset["location"] in regions
+            and not any(
+                token in dataset["name"]
+                for token in (
+                    "heat pump",
+                    "heat recovery",
+                    "heat storage",
+                    "treatment of",
+                    "market for",
+                    "market group for",
+                    "frozen legacy mix",
+                    "nuclear cogeneration",
+                )
+            )
+        ):
+            continue
+
+        exchanges = dataset["exchanges"]
+        energy_input = sum(
+            exchange["amount"]
+            for exchange in exchanges
+            if exchange["unit"] == "megajoule" and exchange["type"] == "technosphere"
+        )
+        energy_input += sum(
+            exchange["amount"]
+            for exchange in exchanges
+            if exchange["unit"] == "megajoule"
+            and exchange["type"] == "biosphere"
+            and exchange["name"].startswith("Energy")
+        )
+        energy_input += sum(
+            exchange["amount"] * 26.4
+            for exchange in exchanges
+            if "hard coal" in exchange["name"]
+            and exchange["type"] == "technosphere"
+            and exchange["unit"] == "kilogram"
+        )
+        energy_input += sum(
+            exchange["amount"]
+            for exchange in exchanges
+            if "briquettes" in exchange["name"]
+            and exchange["type"] == "technosphere"
+            and exchange["unit"] == "megajoule"
+        )
+        for token in ("natural gas", "liquefied petroleum gas", "methane"):
+            energy_input += sum(
+                exchange["amount"] * (36 if exchange["unit"] == "cubic meter" else 47.5)
+                for exchange in exchanges
+                if token in exchange["name"]
+                and exchange["type"] == "technosphere"
+                and exchange["unit"] in {"cubic meter", "kilogram"}
+            )
+        for token, heating_value in (
+            ("diesel", 42.6),
+            ("light fuel oil", 42.6),
+            ("heavy fuel oil", 38.5),
+            ("biogas", 22.7),
+            ("hydrogen", 120),
+            ("methanol", 20),
+        ):
+            unit = "cubic meter" if token == "biogas" else "kilogram"
+            energy_input += sum(
+                exchange["amount"] * heating_value
+                for exchange in exchanges
+                if token in exchange["name"]
+                and exchange["type"] == "technosphere"
+                and exchange["unit"] == unit
+            )
+        energy_input += sum(
+            exchange["amount"] * 16.2
+            for exchange in exchanges
+            if any(token in exchange["name"] for token in ("biomass", "wood", "timber"))
+            and "ethanol" not in exchange["name"]
+            and exchange["type"] == "technosphere"
+            and exchange["unit"] == "kilogram"
+        )
+        energy_input += sum(
+            exchange["amount"] * 3.6
+            for exchange in exchanges
+            if "electricity" in exchange["name"]
+            and exchange["type"] == "technosphere"
+            and exchange["unit"] == "kilowatt hour"
+        )
+        if energy_input > 0:
+            efficiency = 1 / energy_input
+            if efficiency > 3.0:
+                rescale_exchanges(dataset, efficiency / 3.0)
+
+
 def _update_heat(scenario, version, system_model):
 
     heat_layers = (
@@ -128,7 +229,7 @@ def _update_heat(scenario, version, system_model):
         return scenario
 
     heat = Heat(
-        database=scenario["database"],
+        database=get_scenario_inventory(scenario),
         iam_data=scenario["iam data"],
         model=scenario["model"],
         pathway=scenario["pathway"],
@@ -150,6 +251,7 @@ def _update_heat(scenario, version, system_model):
     # targeted legacy-link rewrite above excludes their dataset codes.
     heat.relink_datasets(excludes_datasets=["heat supply, frozen legacy mix"])
     heat.assert_no_heat_cycles()
+    normalize_cogeneration_heat_efficiency(heat.database, scenario["iam data"].regions)
 
     validate = HeatValidation(
         model=scenario["model"],
@@ -160,9 +262,9 @@ def _update_heat(scenario, version, system_model):
         iam_data=scenario["iam data"],
     )
 
-    validate.run_heat_checks()
+    record_validation_phase(scenario, validate.run_heat_checks())
 
-    scenario["database"] = heat.database
+    replace_scenario_inventory(scenario, heat.database)
     scenario["cache"] = heat.cache
     scenario["index"] = heat.index
     scenario["heat diagnostics"] = heat.diagnostics
@@ -878,6 +980,7 @@ class Heat(BaseTransformation):
             target_location = self._target_location(dataset, new_input)
             if target_location is None:
                 continue
+            changed = False
             for exchange in ws.technosphere(dataset):
                 if (
                     exchange.get("name") not in names
@@ -888,6 +991,11 @@ class Heat(BaseTransformation):
                 exchange["product"] = new_input["reference product"]
                 exchange["location"] = target_location
                 exchange.pop("input", None)
+                changed = True
+            if changed:
+                dataset["exchanges"] = self.summarize_market_exchanges(
+                    dataset["exchanges"]
+                )
 
     def assert_no_heat_cycles(self) -> None:
         """Reject direct or indirect links among generated heat datasets."""
@@ -937,15 +1045,6 @@ class Heat(BaseTransformation):
             visit(node)
 
     def write_log(self, dataset, status="created"):
-        """
-        Write log file.
-        """
+        """Record a structured heat provenance event."""
 
-        logger.info(
-            f"{status}|{self.model}|{self.scenario}|{self.year}|"
-            f"{dataset['name']}|{dataset['location']}|"
-            f"{dataset.get('log parameters', {}).get('initial amount of fossil CO2')}|"
-            f"{dataset.get('log parameters', {}).get('new amount of fossil CO2')}|"
-            f"{dataset.get('log parameters', {}).get('initial amount of biogenic CO2')}|"
-            f"{dataset.get('log parameters', {}).get('new amount of biogenic CO2')}"
-        )
+        record_change_event(self, dataset, status, sector="heat")
