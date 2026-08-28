@@ -29,25 +29,53 @@ plaintext IAM file does not.
 
 ## Validation certification acceptance
 
-The 27 August 2026 warm IMAGE SSP2-M 2050 cutoff run compared the completed
-validator with the frozen pre-change validator on the same Python environment,
-source database, IAM input, compact backend, and fixed hash seed. The full graph
-pass took 8.140 seconds in isolation, but it replaces previous end-of-update
-validation and checkpoint work; the acceptance gate therefore compares total
-`update()` time.
+The first certification implementation did not satisfy its runtime constraint
+in a matched source-to-Brightway workflow. A 28 August 2026 cProfile A/B on one
+ecoinvent 3.12 cutoff REMIND scenario measured 553.66 seconds after validation,
+versus 278.26 seconds immediately before validation. The regression came from
+exhaustive end-of-update certification, whole-inventory normalization, and a
+second normalization and cleanup sequence before fast Brightway export.
 
-| Metric | Pre-change | Certified | Change / budget |
-| --- | ---: | ---: | ---: |
-| `update()` | 94.547 s | 90.922 s | -3.8% (maximum +3%) |
-| Incremental sector contracts | — | 0.626 s | 0.66% (maximum 1%) |
-| Certificate reuse | — | 0.032 s | below 0.1 s |
-| Sampled peak RSS | 1.926 GB | 1.696 GB | -11.9% (maximum +3%) |
+Production certification now combines the contracts evaluated while each
+sector still owns its target activities. Exhaustive graph validation remains
+available with ``get_validation_report(exhaustive=True)`` and is forced after
+any post-certificate store mutation or when an update has no sector coverage.
+Fast Brightway export applies only required database and input identifiers,
+then runs its read-only schema check; it does not repeat scalar normalization,
+parameter cleanup, or uncertainty normalization.
 
-The certified result had zero errors, 130 reviewed warnings, and 237 documented
-baseline-cycle suppressions. A separate ecoinvent 3.12 consequential IMAGE run
-also completed with zero errors and reused its certificate in 0.026 seconds.
-`benchmarks/check_validation_performance.py` and
-`benchmarks/check_validation_warnings.py` enforce these acceptance semantics.
+| Matched cProfile metric | Pre-validation | Regressed | Revised | Export optimized |
+| --- | ---: | ---: | ---: | ---: |
+| Constructor, one scenario | 72.78 s | 74.99 s | 78.34 s | 78.33 s |
+| ``update()``, one scenario | 77.30 s | 186.34 s | 82.85 s | 84.20 s |
+| Brightway write, one scenario | 128.17 s | 292.33 s | 117.15 s | 94.60 s |
+| End-to-end, one scenario | 278.26 s | 553.66 s | 278.34 s | 257.13 s |
+| ``update()``, three scenarios | — | 624.59 s | 270.24 s | — |
+| Brightway write, three scenarios | — | 887.52 s | 389.95 s | — |
+| End-to-end, three scenarios | — | 1,596.75 s | 743.97 s | — |
+
+The export-optimized one-scenario total is 42.87 seconds below the reviewed
+300-second ceiling and 7.6% faster than the pre-validation total. Compact
+exchange views now assemble their typed export payload directly from columns
+and perform one sidecar lookup, instead of repeatedly dispatching through the
+generic mapping interface. Canonical provider inputs are assigned during the
+validated export-preparation pass, eliminating the subsequent whole-inventory
+Wurst relink. Exchange compaction fell from 44.30 to 17.29 seconds while the
+schema pass retained activity codes, units, provider identities, duplicate
+provider resolution, biosphere identifiers, scalar amounts, and finite-value
+checks. Peak RSS fell from 2.394 to 2.161 GB in the matched revised-to-optimized
+run.
+
+Within the revised update profile, sector contracts plus incremental
+certificate construction take 1.79 seconds, or 2.32% of the matched
+77.30-second pre-validation update. The three-scenario result reduces total
+cProfile time by 53.4% and peak RSS from 2.90 to 2.49 GB; the export-optimized
+three-scenario run has not yet been repeated. cProfile inflates Python-heavy
+absolute timings; these matched figures are used for attribution and
+acceptance, not as uninstrumented user wall times.
+``benchmarks/check_validation_performance.py`` and
+``benchmarks/check_validation_warnings.py`` enforce the runtime and warning
+gates.
 
 ```console
 PYTHONHASHSEED=0 python benchmarks/profile_new_database.py \

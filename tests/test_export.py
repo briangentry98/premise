@@ -147,6 +147,17 @@ def test_prepare_db_for_fast_export_runs_core_checks(monkeypatch):
         def run_fast_export_checks(self):
             captured["run_fast_export_checks"] = True
 
+        def make_normalizer(self):
+            class DummyNormalizer:
+                def prepare_fast_export_fields(inner_self):
+                    captured["prepare_fast_export_fields"] = True
+                    return prepared_database
+
+                def normalize_database(inner_self):
+                    raise AssertionError("fast export must not fully normalize")
+
+            return DummyNormalizer()
+
     monkeypatch.setattr("premise.export.BaseDatasetValidator", DummyValidator)
 
     scenario = {
@@ -177,6 +188,7 @@ def test_prepare_db_for_fast_export_runs_core_checks(monkeypatch):
         "extra_regions": None,
     }
     assert captured["run_fast_export_checks"] is True
+    assert captured["prepare_fast_export_fields"] is True
     assert result == prepared_database
 
 

@@ -59,6 +59,22 @@ __all__ = [
 logger = create_logger("validation")
 
 
+def _export_numeric_scalar(value):
+    """Return the scalar the fast writer can serialize, or ``None``."""
+
+    if isinstance(value, (bool, np.bool_)):
+        return None
+    if isinstance(value, np.ndarray):
+        if value.size != 1:
+            return None
+        value = value.reshape(-1)[0]
+    if isinstance(value, np.generic):
+        value = value.item()
+    if not isinstance(value, (int, float)):
+        return None
+    return value
+
+
 def independent_consequential_mix(iam_data, sector, year):
     """Recompute a marginal vector from the pre-transformation IAM market data."""
 
@@ -1106,6 +1122,7 @@ class BaseDatasetValidator:
                 dataset.get("name"),
                 dataset.get("reference product"),
                 dataset.get("location"),
+                dataset.get("unit"),
             )
             providers[key] = providers.get(key, 0) + 1
             provider_codes.setdefault(key, set()).add(dataset.get("code"))
@@ -1117,6 +1134,7 @@ class BaseDatasetValidator:
                     "reference product",
                     "location",
                     "unit",
+                    "code",
                     "database",
                     "exchanges",
                 )
@@ -1146,16 +1164,15 @@ class BaseDatasetValidator:
                         issue_type="major",
                     )
                 amount = exchange.get("amount")
-                if not isinstance(amount, (int, float, np.number)) or isinstance(
-                    amount, (bool, np.ndarray)
-                ):
+                scalar_amount = _export_numeric_scalar(amount)
+                if scalar_amount is None:
                     self.log_issue(
                         dataset,
                         "export schema amount",
                         f"Exchange {exchange.get('name')} has non-numeric amount {amount!r}.",
                         issue_type="major",
                     )
-                elif not np.isfinite(amount):
+                elif not math.isfinite(scalar_amount):
                     self.log_issue(
                         dataset,
                         "export schema amount",
@@ -1164,7 +1181,7 @@ class BaseDatasetValidator:
                     )
                 required = {"name", "unit", "type", "amount"}
                 if exchange_type in {"production", "technosphere"}:
-                    required.update({"product", "location"})
+                    required.update({"product", "location", "input"})
                 elif exchange_type == "biosphere":
                     required.update({"categories", "input"})
                 missing_exchange = [
@@ -1177,26 +1194,34 @@ class BaseDatasetValidator:
                         f"Exchange {exchange.get('name')} is missing fields: {missing_exchange}.",
                         issue_type="major",
                     )
-                if exchange_type == "technosphere":
+                if exchange_type in {"production", "technosphere"}:
                     provider_key = (
                         exchange.get("name"),
                         exchange.get("product"),
                         exchange.get("location"),
+                        exchange.get("unit"),
                     )
                     provider_count = providers.get(provider_key, 0)
                     exchange_input = exchange.get("input")
-                    resolves_duplicate = (
-                        provider_count > 1
+                    resolves_provider = (
+                        provider_count > 0
                         and isinstance(exchange_input, (tuple, list))
                         and len(exchange_input) == 2
                         and exchange_input[0] == self.db_name
                         and exchange_input[1] in provider_codes[provider_key]
                     )
-                    if provider_count != 1 and not resolves_duplicate:
+                    if provider_count != 1 and not resolves_provider:
                         self.log_issue(
                             dataset,
                             "export schema provider cardinality",
-                            f"Technosphere exchange {provider_key} resolves to {provider_count} providers.",
+                            f"{exchange_type.title()} exchange {provider_key} resolves to {provider_count} providers.",
+                            issue_type="major",
+                        )
+                    elif not resolves_provider:
+                        self.log_issue(
+                            dataset,
+                            "export schema provider input",
+                            f"{exchange_type.title()} exchange {provider_key} has an invalid input identifier.",
                             issue_type="major",
                         )
                 if exchange_type == "biosphere" and self.biosphere_name is not None:
@@ -1310,19 +1335,19 @@ class DatasetNormalizer(BaseDatasetValidator):
                 dataset.get("name"),
                 dataset.get("reference product"),
                 dataset.get("location"),
+                dataset.get("unit"),
             )
             providers.setdefault(key, []).append(dataset)
         for dataset in self.database:
             dataset["database"] = self.db_name
             for exchange in dataset.get("exchanges", []):
                 exchange_type = exchange.get("type")
-                if exchange_type == "production":
-                    exchange.pop("input", None)
-                elif exchange_type == "technosphere":
+                if exchange_type in {"production", "technosphere"}:
                     provider_key = (
                         exchange.get("name"),
                         exchange.get("product"),
                         exchange.get("location"),
+                        exchange.get("unit"),
                     )
                     candidates = providers.get(provider_key, ())
                     exchange_input = exchange.get("input")
@@ -1332,6 +1357,14 @@ class DatasetNormalizer(BaseDatasetValidator):
                         if candidate.get("code") is not None
                     }
                     if (
+                        len(candidates) == 1
+                        and candidates[0].get("code") is not None
+                    ):
+                        exchange["input"] = (
+                            self.db_name,
+                            candidates[0]["code"],
+                        )
+                    elif (
                         len(candidates) > 1
                         and isinstance(exchange_input, (tuple, list))
                         and len(exchange_input) == 2
@@ -1371,6 +1404,12 @@ class DatasetNormalizer(BaseDatasetValidator):
         """Preserve the historical uncertainty-repair order before checking."""
 
         normalize_inventory_uncertainty(self.database)
+
+    def prepare_fast_export_fields(self):
+        """Apply only the identifiers required by the fast Brightway writer."""
+
+        self.assign_database_and_inputs()
+        return self.database
 
     def normalize_database(self):
         """Apply historical export normalization without semantic validation."""

@@ -389,11 +389,13 @@ def _normalize_no_uncertainty_exchange(exchange: dict) -> dict:
 
 
 def _prepare_fast_exchange_payload(exchange: dict) -> dict:
-    exchange_type = exchange.get("type")
+    fast_payload = getattr(exchange, "_premise_fast_export_payload", None)
+    source = fast_payload() if fast_payload is not None else exchange
+    exchange_type = source.get("type")
     forbidden_fields = FAST_EXCHANGE_FORBIDDEN_FIELDS.get(exchange_type, set())
     compact_exchange = {
         field: (float(value) if isinstance(value, (np.generic, np.ndarray)) else value)
-        for field, value in exchange.items()
+        for field, value in source.items()
         if field not in forbidden_fields and _keep_fast_export_value(value)
     }
 
@@ -401,12 +403,12 @@ def _prepare_fast_exchange_payload(exchange: dict) -> dict:
         if (
             field not in forbidden_fields
             and field not in compact_exchange
-            and field in exchange
+            and field in source
         ):
-            if field in FAST_STRING_FIELDS and exchange[field] is None:
+            if field in FAST_STRING_FIELDS and source[field] is None:
                 compact_exchange[field] = ""
             else:
-                compact_exchange[field] = exchange[field]
+                compact_exchange[field] = source[field]
 
     _normalize_no_uncertainty_exchange(compact_exchange)
 
@@ -834,9 +836,10 @@ def write_brightway_database(
         for exchange in dataset.get("exchanges", [])
     )
 
-    # Restore parameters to Brightway2 format
-    # which allows for uncertainty and comments
-    change_db_name(data, name)
+    # Export preparation normally assigned the final database already. Avoid
+    # rescanning every exchange merely to replace an identifier with itself.
+    if any(dataset.get("database") != name for dataset in data):
+        change_db_name(data, name)
     if needs_relink:
         link_internal(data)
     if check_internal:

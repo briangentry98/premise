@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import pickle
+import time
 import uuid
 from dataclasses import replace
 from datetime import datetime
@@ -97,6 +98,7 @@ from .validation_framework import (
     ValidationIntent,
     ValidationPhaseResult,
     ValidationReport,
+    ValidationRuleResult,
     inventory_baseline_snapshot,
 )
 from .validation import (
@@ -1603,14 +1605,33 @@ class NewDatabase:
         *,
         intent: ValidationIntent | None = None,
         raise_on_error: bool = True,
+        exhaustive: bool = False,
     ) -> ValidationCertificate | None:
-        """Certify one exact store generation and attach its immutable report."""
+        """Certify one exact store generation and attach its immutable report.
+
+        Production updates combine the low-cost sector contracts recorded while
+        transformations still own their targets.  A complete graph traversal is
+        reserved for explicit diagnostics, inventories without sector coverage,
+        and stores mutated after their production certificate was issued.
+        """
 
         if not getattr(self, "_validation_enabled", False):
             return None
+        started = time.perf_counter()
+        sector_phases = []
+        for phase_payload in scenario.get("_validation_phase_results", ()):
+            try:
+                phase = ValidationPhaseResult.from_dict(phase_payload)
+            except (KeyError, TypeError, ValueError):
+                continue
+            if phase.kind == "sector":
+                sector_phases.append(phase)
+        incremental = bool(sector_phases) and not exhaustive
         if intent is None:
-            intent = self._scenario_validation_intent(scenario, store=store)
-        certificate = InventoryGraphValidator(
+            intent = self._scenario_validation_intent(
+                scenario, store=None if incremental else store
+            )
+        validator = InventoryGraphValidator(
             store,
             scenario_identity=self._scenario_identity(scenario),
             source_fingerprint=self._validation_source_fingerprint(),
@@ -1619,19 +1640,67 @@ class NewDatabase:
             version=getattr(self, "version", "unknown"),
             intent=intent,
             baseline_cycles=(
-                intent.baseline_cycles
-                if intent is not None and intent.baseline_cycles
-                else self._ensure_validation_baseline_cycles()
+                ()
+                if incremental
+                else (
+                    intent.baseline_cycles
+                    if intent is not None and intent.baseline_cycles
+                    else self._ensure_validation_baseline_cycles()
+                )
             ),
-        ).certify(raise_on_error=False)
-        report = certificate.report
-        for phase_payload in scenario.get("_validation_phase_results", ()):
-            try:
-                phase = ValidationPhaseResult.from_dict(phase_payload)
-            except (KeyError, TypeError, ValueError):
-                continue
-            report = report.with_phase(phase)
-        certificate = replace(certificate, report=report)
+        )
+
+        if not incremental:
+            certificate = validator.certify(raise_on_error=False)
+            report = certificate.report
+            for phase in sector_phases:
+                report = report.with_phase(phase)
+            certificate = replace(certificate, report=report)
+        else:
+            checked = sum(
+                result.checked_object_count
+                for phase in sector_phases
+                for result in phase.rule_results
+            )
+            coverage = ValidationRuleResult(
+                rule_id="GRAPH.INCREMENTAL_SCOPE",
+                severity="error",
+                applicability="applicable",
+                checked_object_count=checked,
+                expected="all applied sector contracts pass",
+                actual={
+                    "mode": "incremental",
+                    "sector_phases": [phase.phase_id for phase in sector_phases],
+                },
+            )
+            graph_phase = ValidationPhaseResult(
+                phase_id="graph:incremental",
+                kind="graph",
+                rule_results=(coverage,),
+                elapsed_seconds=time.perf_counter() - started,
+            )
+            incremental_key = hashlib.sha256(
+                f"{validator.cache_key}:incremental-v1".encode("utf-8")
+            ).hexdigest()
+            report = ValidationReport(
+                scenario_identity=self._scenario_identity(scenario),
+                store_generation=store.generation,
+                ruleset_version=VALIDATION_RULESET_VERSION,
+                certificate_key=incremental_key,
+                rule_results=(coverage,),
+                phase_results=(graph_phase, *sector_phases),
+            )
+            certificate = ValidationCertificate(
+                cache_key=incremental_key,
+                store_generation=store.generation,
+                ruleset_version=VALIDATION_RULESET_VERSION,
+                scenario_identity=self._scenario_identity(scenario),
+                source_fingerprint=validator.source_fingerprint,
+                iam_fingerprint=validator.iam_fingerprint,
+                system_model=validator.system_model,
+                version=validator.version,
+                report=report,
+            )
         underlying = getattr(store, "_store", store)
         underlying._validation_certificate_payload = certificate.to_dict()
         scenario["_validation_report"] = report.to_dict()
@@ -1853,6 +1922,7 @@ class NewDatabase:
             return None
         stored_report = scenario.get("_validation_report")
         store = scenario.get("_inventory_store")
+        report = None
         if isinstance(stored_report, dict):
             try:
                 report = ValidationReport.from_dict(stored_report)
@@ -1876,20 +1946,25 @@ class NewDatabase:
                     raise
                 return report.with_reuse(True)
         store = self._ensure_scenario_store(scenario)
+        exhaustive = report is not None and report.store_generation != store.generation
         try:
-            certificate = self._certify_scenario_store(scenario, store)
+            certificate = self._certify_scenario_store(
+                scenario, store, exhaustive=exhaustive
+            )
         except PremiseValidationError as error:
             self._generate_validation_diagnostic(error, scenario, store)
             raise
         return certificate.report if certificate is not None else None
 
-    def get_validation_report(self, scenario: int = 0) -> ValidationReport:
+    def get_validation_report(
+        self, scenario: int = 0, *, exhaustive: bool = False
+    ) -> ValidationReport:
         """Return the completed immutable report for a scenario.
 
         If a writable store has changed since its last certificate, this method
-        performs a new read-only pass and returns the resulting report without
-        suppressing its errors.  Build and export entry points raise those
-        errors through :class:`PremiseValidationError`.
+        performs a complete new read-only pass.  Set ``exhaustive=True`` to run
+        that full graph pass explicitly for diagnostics; ordinary production
+        updates return the incremental sector certificate required by exports.
         """
 
         if not isinstance(scenario, int):
@@ -1899,7 +1974,14 @@ class NewDatabase:
                 f"scenario position {scenario} is outside 0..{len(self.scenarios) - 1}."
             )
         definition = self.scenarios[scenario]
-        report = self._ensure_semantic_certification(definition)
+        if exhaustive:
+            store = self._ensure_scenario_store(definition)
+            certificate = self._certify_scenario_store(
+                definition, store, exhaustive=True
+            )
+            report = certificate.report if certificate is not None else None
+        else:
+            report = self._ensure_semantic_certification(definition)
         if report is None:
             # The accessor never creates a public validation-off switch.
             store = self._ensure_scenario_store(definition)
@@ -1997,19 +2079,6 @@ class NewDatabase:
         runtime_scenario.pop("_inventory_checkpoint", None)
         self._attach_shared_geography_cache(runtime_scenario)
         store = self._ensure_scenario_store(scenario)
-        if getattr(self, "_validation_enabled", False):
-            if runtime_scenario.get("applied functions"):
-                baseline_fingerprints, baseline_cycles = inventory_baseline_snapshot(
-                    store
-                )
-            else:
-                baseline_fingerprints, baseline_cycles = (
-                    self._ensure_validation_baseline_snapshot()
-                )
-            runtime_scenario["_validation_baseline_fingerprints"] = dict(
-                baseline_fingerprints
-            )
-            runtime_scenario["_validation_baseline_cycles"] = baseline_cycles
         can_transfer_source = self._can_reload_original_database()
         has_mapping = bool(runtime_scenario.get("mapping"))
         activity_ids = tuple(store.iter_activity_ids()) if has_mapping else ()
@@ -2048,16 +2117,6 @@ class NewDatabase:
         store = runtime_scenario.pop("_inventory_store", None)
         if store is None:
             database = runtime_scenario.pop("_inventory_working_copy")
-            collector = self._get_provenance_collector()
-            with collector.session(
-                self._scenario_identity(runtime_scenario), "normalization"
-            ):
-                _normalize_inventory_before_certification(
-                    database, provenance_owner=self
-                )
-            runtime_scenario["_provenance"] = collector.payload_for(
-                self._scenario_identity(runtime_scenario)
-            )
             store = create_inventory_store(
                 database,
                 backend=runtime_scenario.get("_inventory_backend")
@@ -2068,12 +2127,10 @@ class NewDatabase:
             )
         else:
             runtime_scenario.pop("_inventory_working_copy", None)
-        provenance_payload = runtime_scenario.get("_provenance")
-        if not isinstance(provenance_payload, dict):
-            provenance_payload = self._get_provenance_collector().payload_for(
-                self._scenario_identity(runtime_scenario)
-            )
-            runtime_scenario["_provenance"] = provenance_payload
+        provenance_payload = self._get_provenance_collector().payload_for(
+            self._scenario_identity(runtime_scenario)
+        )
+        runtime_scenario["_provenance"] = provenance_payload
         underlying = getattr(store, "_store", store)
         underlying._provenance_payload = provenance_payload
         # Certification deliberately happens before the scenario definition is
@@ -2267,17 +2324,12 @@ class NewDatabase:
         if unknown_sectors:
             raise ValueError(f"Unknown resource name(s): {unknown_sectors}")
 
-        if getattr(self, "_validation_enabled", False):
-            # The source store can be transferred and released while the first
-            # compact scenario is constructed, so baseline cycles are captured
-            # once before scenario processing starts.
-            self._ensure_validation_baseline_cycles()
-
         with tqdm(total=len(self.scenarios), desc=description, ncols=70) as pbar_outer:
             for position, scenario_definition in enumerate(self.scenarios):
                 scenario = self._load_scenario_database_for_update(
                     scenario=scenario_definition, scenario_position=position
                 )
+                collector = self._get_provenance_collector()
 
                 for sector in sectors:
                     if sector in scenario.get("applied functions", []):
@@ -2299,19 +2351,8 @@ class NewDatabase:
                     # Prepare the function and arguments
                     update_func = self.sector_update_methods[sector]["func"]
                     fixed_args = self.sector_update_methods[sector]["args"]
-                    collector = self._get_provenance_collector()
-                    collector.restore(
-                        self._scenario_identity(scenario),
-                        scenario.get("_provenance"),
-                    )
                     if sector == "emissions" and "_inventory_store" not in scenario:
                         database = scenario.pop("_inventory_working_copy")
-                        with collector.session(
-                            self._scenario_identity(scenario), "normalization"
-                        ):
-                            _normalize_inventory_before_certification(
-                                database, provenance_owner=self
-                            )
                         scenario["_inventory_store"] = create_inventory_store(
                             database,
                             backend=scenario.get("_inventory_backend")
@@ -2322,9 +2363,6 @@ class NewDatabase:
                         )
                     with collector.session(self._scenario_identity(scenario), sector):
                         scenario = update_func(scenario, *fixed_args)
-                    scenario["_provenance"] = collector.payload_for(
-                        self._scenario_identity(scenario)
-                    )
                     contract_phase = validate_sector_contract(scenario, sector)
                     if contract_phase.errors:
                         try:

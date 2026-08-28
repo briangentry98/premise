@@ -1282,7 +1282,10 @@ def prepare_db_for_fast_export(scenario, name, version, biosphere_name=None):
     )
     make_normalizer = getattr(validator, "make_normalizer", None)
     if make_normalizer is not None:
-        validator.database = make_normalizer().normalize_database()
+        normalizer = make_normalizer()
+        prepare_fast_fields = getattr(normalizer, "prepare_fast_export_fields", None)
+        if prepare_fast_fields is not None:
+            validator.database = prepare_fast_fields()
     if _has_semantic_certificate(scenario) and hasattr(
         validator, "run_export_schema_checks"
     ):

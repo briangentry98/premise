@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 import xarray as xr
 from types import SimpleNamespace
 
@@ -8,6 +9,7 @@ from premise.inventory_imports import canonicalize_classification_key
 from premise.validation import (
     BaseDatasetValidator,
     DatasetNormalizer,
+    PremiseValidationError,
     TransportValidation,
     normalize_exact_deterministic_exchange_duplicates,
     normalize_inventory_numeric_types,
@@ -96,6 +98,99 @@ def test_consequential_validation_recomputes_and_caches_an_independent_mix(
     assert first.sel(variables="technology B").sum().item() == 2.0
     assert iam_data._validation_market_inputs["electricity"].identical(raw)
     assert not first.identical(iam_data.electricity_mix)
+
+
+def _export_validator(amount):
+    validator = object.__new__(BaseDatasetValidator)
+    validator.database = [
+        {
+            "name": "activity",
+            "reference product": "product",
+            "location": "GLO",
+            "unit": "kilogram",
+            "database": "test-db",
+            "code": "activity",
+            "exchanges": [
+                {
+                    "name": "activity",
+                    "product": "product",
+                    "location": "GLO",
+                    "unit": "kilogram",
+                    "type": "production",
+                    "amount": amount,
+                    "input": ("test-db", "activity"),
+                }
+            ],
+        }
+    ]
+    validator.db_name = "test-db"
+    validator.biosphere_name = "biosphere3"
+    validator.model = "image"
+    validator.scenario = "path"
+    validator.year = 2050
+    validator.major_issues_log = []
+    validator.minor_issues_log = []
+    validator.validation_issues = []
+    return validator
+
+
+def test_fast_export_schema_accepts_writer_compatible_numpy_scalar():
+    report = _export_validator(np.array([1.0])).run_export_schema_checks()
+
+    assert report.valid
+
+
+def test_fast_export_preparation_preserves_writer_compatible_numpy_scalar():
+    validator = _export_validator(np.array([1.0]))
+    normalizer = DatasetNormalizer.from_validator(validator)
+
+    database = normalizer.prepare_fast_export_fields()
+
+    assert database[0]["database"] == "test-db"
+    assert isinstance(database[0]["exchanges"][0]["amount"], np.ndarray)
+
+
+def test_fast_export_preparation_assigns_canonical_provider_input():
+    validator = _export_validator(1.0)
+    validator.database[0]["exchanges"][0]["input"] = (
+        "source-db",
+        "activity",
+    )
+
+    database = DatasetNormalizer.from_validator(
+        validator
+    ).prepare_fast_export_fields()
+
+    assert database[0]["exchanges"][0]["input"] == (
+        "test-db",
+        "activity",
+    )
+
+
+def test_fast_export_schema_rejects_wrong_provider_input():
+    validator = _export_validator(1.0)
+    validator.database[0]["exchanges"][0]["input"] = (
+        "wrong-db",
+        "activity",
+    )
+
+    with pytest.raises(PremiseValidationError) as error:
+        validator.run_export_schema_checks()
+
+    assert any(
+        issue.rule_id == "LEGACY.EXPORT_SCHEMA_PROVIDER_INPUT"
+        for issue in error.value.report.errors
+    )
+
+
+def test_fast_export_schema_rejects_non_scalar_numpy_array():
+    with pytest.raises(PremiseValidationError) as error:
+        _export_validator(np.array([1.0, 2.0])).run_export_schema_checks()
+
+    assert any(
+        issue.rule_id == "LEGACY.EXPORT_SCHEMA_AMOUNT"
+        for issue in error.value.report.errors
+    )
 
 
 def _validator_for_locations(database_locations, regions=None, extra_regions=None):

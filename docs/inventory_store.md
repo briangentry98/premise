@@ -71,13 +71,16 @@ acceptance and integration runs use `"compact"` explicitly.
 ## Validation reports
 
 Every completed scenario update receives one cached semantic certificate.
-Incremental sector phases and the full graph phase are persisted with the
-scenario checkpoint; exporter schema phases are held only in memory so exports
-cannot rewrite a certified checkpoint.
+Incremental sector phases and their production coverage phase are persisted
+with the scenario checkpoint; exporter schema phases are held only in memory so
+exports cannot rewrite a certified checkpoint.
 
 ```python
 report = ndb.get_validation_report(scenario=0)
 report.raise_for_errors()
+
+# Run the complete graph diagnostic explicitly when needed.
+exhaustive = ndb.get_validation_report(scenario=0, exhaustive=True)
 
 for phase in report.phase_results:
     checked = sum(result.checked_object_count for result in phase.rule_results)
@@ -88,22 +91,31 @@ Validation is read-only and cannot be disabled through the public API.
 Unsuppressed errors stop an update before checkpointing or export; warnings and
 narrow, versioned suppressions remain visible in the immutable report.
 
-The semantic certificate combines targeted sector contracts with one compact
-full-graph pass. It covers required fields and exchange types, finite amounts
-and uncertainty, reference production, provider identity and product/unit
-agreement, geographic fallback, market shares, exact duplicate supplier rows,
-stale links, declared transformation scope, target cardinality, and newly
-introduced cycles. Electricity and fuel contracts independently recompute
-consequential marginal mixes; heat, steel, cement, biomass, metals, transport,
-batteries, renewables, mining, carbon removal, final energy, emissions, and
-external scenarios add sector-specific coverage, composition, linking, and
-physical-bound checks.
+The production certificate combines targeted sector contracts evaluated while
+the transformation still owns direct references to its changed activities.
+They check coverage, finite physical values, reference production, market
+composition, and sector-specific methodological expectations. Electricity and
+fuel contracts independently recompute consequential marginal mixes; heat,
+steel, cement, biomass, metals, transport, batteries, renewables, mining,
+carbon removal, final energy, emissions, and external scenarios add their
+specific coverage, composition, linking, and physical-bound checks.
 
-Normalization is a separate mutating step which runs before certification.
-Validation itself only reads compact columns and indexes. A certificate key
-includes the store generation, scenario, source and IAM identities, system
-model, ecoinvent version, and validation ruleset version. Changing the store or
-ruleset therefore forces recertification. Brightway, SimaPro, openLCA,
+The exhaustive diagnostic additionally covers every activity and exchange:
+required fields and exchange types, uncertainty, provider identity and
+product/unit agreement, geographic fallback, exact duplicate suppliers, stale
+links, declared transformation scope, target cardinality, and newly introduced
+cycles. It runs automatically when sector coverage is unavailable or a
+certified store generation changes, and explicitly when
+``get_validation_report(exhaustive=True)`` is requested.
+
+Source normalization happens once when its compact checkpoint is created.
+Fast Brightway export assigns only required database and input identifiers and
+lets the bounded writer serialize compatible NumPy scalars. Other exporters
+retain their format-specific normalization. Validation itself is read-only. A
+certificate key includes the store generation, scenario, source and IAM
+identities, system model, ecoinvent version, and validation ruleset version.
+Changing the store or ruleset therefore forces recertification. Brightway,
+SimaPro, openLCA,
 datapackage, and superstructure exports reuse the semantic certificate and add
 only their streaming schema phase.
 

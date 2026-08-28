@@ -1546,6 +1546,19 @@ class _CompactExchangeMapping(MutableMapping[str, Any]):
     def copy(self) -> dict[str, Any]:
         return dict(self.items())
 
+    def _premise_fast_export_payload(self) -> dict[str, Any]:
+        """Materialize an export row without generic mapping iteration."""
+
+        payload = {}
+        for field_name in _COMPACT_EXCHANGE_FIELDS:
+            if self._present & _COMPACT_EXCHANGE_FIELD_BITS[field_name]:
+                payload[field_name] = getattr(
+                    self, _COMPACT_EXCHANGE_FIELD_ATTRIBUTES[field_name]
+                )
+        if self._extra is not None:
+            payload.update(self._extra)
+        return payload
+
     def _premise_materialize(self) -> dict[str, Any]:
         return self.copy()
 
@@ -1933,6 +1946,51 @@ class _ColumnarExchangeMapping(MutableMapping[str, Any]):
                 value = copy.deepcopy(value)
                 self._set_change(key, value)
             payload[key] = value
+        for key, value in self._iter_changes():
+            if value is _COLUMNAR_DELETED:
+                payload.pop(key, None)
+            else:
+                payload[key] = value
+        return payload
+
+    def _premise_fast_export_payload(self) -> dict[str, Any]:
+        """Return the effective row with one sidecar lookup.
+
+        Export payloads are serialized immediately and never mutate nested
+        metadata. Avoiding ``MutableMapping.items`` here removes repeated
+        column and sidecar lookups for every field of every exchange.
+        """
+
+        storage = self._storage
+        row = self._row
+        payload = {}
+        string_columns = storage._string_columns
+        string_values = storage._string_values
+        for field_name in _EXCHANGE_STRING_FIELDS:
+            string_id = int(string_columns[field_name][row])
+            if string_id >= 0:
+                payload[field_name] = string_values[string_id]
+
+        first = int(string_columns["categories__0"][row])
+        second = int(string_columns["categories__1"][row])
+        if first >= 0 and second >= 0:
+            payload["categories"] = string_values[first], string_values[second]
+
+        for field_name in _EXCHANGE_NUMERIC_FIELDS:
+            kind = int(storage._numeric_kinds[field_name][row])
+            if kind != _NUMERIC_MISSING:
+                payload[field_name] = _decode_numeric_column(
+                    kind,
+                    storage._numeric_floats[field_name][row],
+                    storage._numeric_ints[field_name][row],
+                )
+
+        for field_name in _EXCHANGE_BOOLEAN_FIELDS:
+            value = int(storage._boolean_columns[field_name][row])
+            if value >= 0:
+                payload[field_name] = bool(value)
+
+        payload.update(storage.metadata(row))
         for key, value in self._iter_changes():
             if value is _COLUMNAR_DELETED:
                 payload.pop(key, None)

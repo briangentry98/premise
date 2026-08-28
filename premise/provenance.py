@@ -147,6 +147,7 @@ class ProvenanceCollector:
     def __init__(self, build_id: str) -> None:
         self.build_id = str(build_id)
         self._events: dict[tuple[Any, ...], list[ProvenanceEvent]] = {}
+        self._restored_payloads: dict[tuple[Any, ...], tuple[int, int, str | None]] = {}
         self._lock = threading.RLock()
 
     @contextmanager
@@ -218,12 +219,20 @@ class ProvenanceCollector:
             return tuple(self._events.get(tuple(scenario_identity), ()))
 
     def payload_for(self, scenario_identity: Iterable[Any]) -> dict[str, Any]:
-        events = self.events_for(scenario_identity)
-        return {
+        identity = tuple(scenario_identity)
+        events = self.events_for(identity)
+        payload = {
             "schema_version": self.schema_version,
             "build_id": self.build_id,
             "events": [event.to_dict() for event in events],
         }
+        with self._lock:
+            self._restored_payloads[identity] = (
+                id(payload),
+                len(events),
+                self.build_id,
+            )
+        return payload
 
     def restore(
         self, scenario_identity: Iterable[Any], payload: Mapping[str, Any] | None
@@ -233,6 +242,14 @@ class ProvenanceCollector:
         if int(payload.get("schema_version", -1)) != self.schema_version:
             return
         identity = tuple(scenario_identity)
+        token = (
+            id(payload),
+            len(payload.get("events", ())),
+            payload.get("build_id"),
+        )
+        with self._lock:
+            if self._restored_payloads.get(identity) == token:
+                return
         restored = []
         for item in payload.get("events", ()):
             try:
@@ -254,6 +271,7 @@ class ProvenanceCollector:
                 if signature not in signatures:
                     existing.append(event)
                     signatures.add(signature)
+            self._restored_payloads[identity] = token
 
 
 def record_change_event(

@@ -83,7 +83,7 @@ def test_write_brightway25_database_fast_prints_completion_message(monkeypatch, 
         check_internal=True,
     )
 
-    assert calls["change_db_name"] == (data, "fast-db")
+    assert calls["change_db_name"] is None
     assert calls["check_internal"] == 1
     assert calls["compact"] == (data, "fast-db")
     assert calls["write"] == (
@@ -707,3 +707,25 @@ def test_brightway25_fast_compaction_streams_columnar_exchange_views(tmp_path):
     assert brightway25_module._prepare_fast_exchange_payload(
         exchange
     ) == brightway25_module._prepare_fast_exchange_payload(data[0]["exchanges"][0])
+
+
+def test_brightway25_fast_exchange_payload_uses_materialization_protocol():
+    class LazyExchange(dict):
+        def _premise_fast_export_payload(self):
+            return {
+                "name": "supplier",
+                "product": "product",
+                "unit": "kilogram",
+                "location": "CH",
+                "amount": 1.0,
+                "type": "technosphere",
+                "input": ("fast-db", "supplier"),
+            }
+
+        def items(self):
+            raise AssertionError("generic mapping iteration should not be used")
+
+    payload = brightway25_module._prepare_fast_exchange_payload(LazyExchange())
+
+    assert payload["input"] == ("fast-db", "supplier")
+    assert payload["amount"] == 1.0

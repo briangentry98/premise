@@ -526,6 +526,87 @@ def test_new_database_persists_and_exposes_completed_report(
     assert '"validation_certificate"' in manifest
 
 
+def test_covered_update_uses_incremental_certificate_without_graph_scan(
+    valid_inventory, monkeypatch
+):
+    database = configured_new_database(valid_inventory)
+    definition = {"model": "image", "pathway": "path", "year": 2050}
+    database.scenarios = [definition]
+    phase = ValidationPhaseResult(
+        phase_id="sector:electricity:contract",
+        kind="sector",
+        rule_results=(
+            ValidationRuleResult(
+                rule_id="METHOD.ELECTRICITY.TARGET_COVERAGE",
+                severity="error",
+                applicability="applicable",
+                checked_object_count=1,
+            ),
+        ),
+    )
+    runtime = definition.copy()
+    runtime["_inventory_working_copy"] = copy.deepcopy(valid_inventory)
+    runtime["_validation_phase_results"] = [phase.to_dict()]
+
+    monkeypatch.setattr(
+        InventoryGraphValidator,
+        "validate",
+        lambda self: pytest.fail("covered updates must not run a full graph scan"),
+    )
+
+    database._store_updated_scenario(definition, runtime, persist=False)
+
+    report = database.get_validation_report()
+    assert report.valid
+    assert report.get_phase("graph:incremental") is not None
+    assert report.get_phase("sector:electricity:contract") == phase
+
+
+def test_mutating_incrementally_certified_store_forces_exhaustive_validation(
+    valid_inventory,
+):
+    database = configured_new_database(valid_inventory)
+    definition = {"model": "image", "pathway": "path", "year": 2050}
+    database.scenarios = [definition]
+    phase = ValidationPhaseResult(
+        phase_id="sector:electricity:contract",
+        kind="sector",
+        rule_results=(),
+    )
+    runtime = definition.copy()
+    runtime["_inventory_working_copy"] = copy.deepcopy(valid_inventory)
+    runtime["_validation_phase_results"] = [phase.to_dict()]
+    store = database._store_updated_scenario(definition, runtime, persist=False)
+
+    with store.transaction("custom invalid mutation") as transaction:
+        transaction.patch_exchange(0, {"amount": math.nan})
+
+    with pytest.raises(PremiseValidationError):
+        database.get_validation_report()
+
+
+def test_exhaustive_report_is_available_after_incremental_update(valid_inventory):
+    database = configured_new_database(valid_inventory)
+    definition = {"model": "image", "pathway": "path", "year": 2050}
+    database.scenarios = [definition]
+    phase = ValidationPhaseResult(
+        phase_id="sector:electricity:contract",
+        kind="sector",
+        rule_results=(),
+    )
+    runtime = definition.copy()
+    runtime["_inventory_working_copy"] = copy.deepcopy(valid_inventory)
+    runtime["_validation_phase_results"] = [phase.to_dict()]
+    database._store_updated_scenario(definition, runtime, persist=False)
+
+    report = database.get_validation_report(exhaustive=True)
+
+    assert report.valid
+    assert report.get_phase("graph:full") is not None
+    assert report.get_phase("graph:incremental") is None
+    assert report.get_phase("sector:electricity:contract") == phase
+
+
 def test_invalid_build_fails_before_replacing_or_checkpointing_scenario(
     valid_inventory, tmp_path, monkeypatch
 ):
