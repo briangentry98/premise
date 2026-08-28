@@ -8,6 +8,7 @@ import pytest
 from wurst import searching as ws
 
 import premise.new_database as new_database_module
+import premise.inventory_store as inventory_store_module
 import premise.utils as utils_module
 from premise.brightway25 import _prepare_fast_exchange_payload
 from premise.inventory_store import (
@@ -845,15 +846,14 @@ def test_scenario_delta_checkpoint_roundtrip_preserves_order_and_compatibility(
     checkout = restored_store._checkout_materialized()
     checkout[2]["exchanges"][0]["input"] = ("export-db", "provider")
 
-    assert manifest["columnar_format"] == "scenario-delta-v1"
+    assert manifest["columnar_format"] == "scenario-delta-v2"
     assert set(path.name for path in checkpoint.iterdir()) == {
         "manifest.json",
-        "scenario-delta.pkl",
+        "scenario-activities.arrow",
+        "scenario-segments.arrow",
         "activity-fingerprints.pkl",
         "checksums.json",
     }
-    with (checkpoint / "scenario-delta.pkl").open("rb") as stream:
-        assert pickle.load(stream) == ("scenario-delta-stream-v1", len(expected))
     assert restored == expected
     assert checkout[2]["exchanges"][0]["input"] == ("export-db", "provider")
     assert type(restored[2]["exchanges"][0]["amount"]) is np.float32
@@ -863,6 +863,15 @@ def test_scenario_delta_checkpoint_roundtrip_preserves_order_and_compatibility(
         consume_compact=True,
     )
     assert loaded["database"] == expected
+
+    # The independent V1 dispatcher remains readable after V2 becomes the
+    # default writer.
+    v1_checkpoint = inventory_store_module._write_scenario_delta_checkpoint_v1(
+        scenario_store,
+        tmp_path / "scenario-v1.inventory-store",
+        inventory_store_module._scenario_delta_base_storage(scenario_store),
+    )
+    assert InventoryStore.open(v1_checkpoint).materialize() == expected
 
     source.rename(tmp_path / "moved-source.inventory-store")
     with pytest.raises(InventoryStoreCorruptionError, match="base checkpoint"):

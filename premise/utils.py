@@ -465,6 +465,7 @@ def clear_runtime_caches() -> None:
     from .external import ExternalScenario
     from .inventory_imports import BaseInventoryImport
     from .metals import Metals
+    from .runtime_cache import clear_constructor_caches
     from .transformation import BaseTransformation
 
     cached_functions = (
@@ -485,6 +486,7 @@ def clear_runtime_caches() -> None:
             cache_clear()
 
     exc_codes.clear()
+    clear_constructor_caches()
 
 
 def print_version():

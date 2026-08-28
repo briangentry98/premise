@@ -274,6 +274,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--pstats", type=Path)
     parser.add_argument(
+        "--write-database-prefix",
+        help=(
+            "Also time the fast Brightway write using one deterministic database "
+            "name per scenario. Existing names are overwritten."
+        ),
+    )
+    parser.add_argument(
         "--profile-sector",
         choices=tuple(UPDATE_FUNCTION_LABELS.values())
         + ("car", "two-wheeler", "truck", "ship", "bus", "train"),
@@ -402,6 +409,14 @@ def main() -> None:
             ),
             "certificate_reused": report.reused,
         }
+        written_database_names = None
+        if args.write_database_prefix:
+            written_database_names = [
+                f"{args.write_database_prefix}-{position + 1}"
+                for position in range(len(scenarios))
+            ]
+            with recorder.phase("brightway-write-total"):
+                ndb.write_db_to_brightway(written_database_names)
     finally:
         if profiler is not None:
             profiler.disable()
@@ -425,6 +440,7 @@ def main() -> None:
             "keep_imports_uncertainty": args.keep_imports_uncertainty,
             "use_cached_database": args.use_cached_database,
             "use_cached_inventories": args.use_cached_inventories,
+            "written_database_names": written_database_names,
         },
         "environment": {
             "python": sys.version,

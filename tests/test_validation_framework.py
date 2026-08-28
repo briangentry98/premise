@@ -523,7 +523,7 @@ def test_new_database_persists_and_exposes_completed_report(
     assert definition["_validation_report"]["certificate_key"] == report.certificate_key
     checkpoint = definition["_inventory_checkpoint"]
     handoff = definition["_inventory_export_handoff"]
-    assert handoff is not live_store
+    assert handoff is live_store
     assert handoff.materialize(restore_metadata=True) == InventoryStore.open(
         checkpoint
     ).materialize(restore_metadata=True)

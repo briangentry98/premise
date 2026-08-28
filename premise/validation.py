@@ -11,6 +11,10 @@ import pandas as pd
 import yaml
 
 from .filesystem_constants import DATA_DIR
+from .export_payload import (
+    mark_prepared_export_inventory,
+    prepare_fast_exchange_payload,
+)
 from .geomap import Geomap
 from .logger import create_logger
 from .inventory_imports import (
@@ -611,6 +615,7 @@ class FastExportSession:
                     issue_type="major",
                 )
 
+            prepared_exchanges = []
             for exchange in dataset.get("exchanges", []):
                 (
                     exchange_type,
@@ -649,6 +654,20 @@ class FastExportSession:
                         exchange_unit,
                         categories,
                     )
+
+                prepared_exchange = prepare_fast_exchange_payload(
+                    exchange,
+                    input_override=exchange_input,
+                )
+                prepared_exchanges.append(prepared_exchange)
+                exchange_type = prepared_exchange.get("type")
+                exchange_name = prepared_exchange.get("name")
+                exchange_product = prepared_exchange.get("product")
+                exchange_location = prepared_exchange.get("location")
+                exchange_unit = prepared_exchange.get("unit")
+                amount = prepared_exchange.get("amount")
+                categories = prepared_exchange.get("categories")
+                exchange_input = prepared_exchange.get("input")
 
                 if exchange_type not in self._VALID_EXCHANGE_TYPES:
                     validator.log_issue(
@@ -732,6 +751,10 @@ class FastExportSession:
                             issue_type="major",
                         )
 
+            dataset["exchanges"] = prepared_exchanges
+
+        self.database = mark_prepared_export_inventory(self.database)
+        validator.database = self.database
         return validator._finalize_logs()
 
 

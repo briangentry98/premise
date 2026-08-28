@@ -55,6 +55,11 @@ def test_combined_fast_export_session_matches_sequential_preparation():
     expected_validator.database = (
         expected_validator.make_normalizer().prepare_fast_export_fields()
     )
+    for dataset in expected_validator.database:
+        dataset["exchanges"] = [
+            validation_module.prepare_fast_exchange_payload(exchange)
+            for exchange in dataset["exchanges"]
+        ]
     expected_report = expected_validator.run_export_schema_checks()
 
     combined_validator = BaseDatasetValidator(

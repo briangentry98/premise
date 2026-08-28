@@ -1,10 +1,74 @@
 from copy import deepcopy
+import sqlite3
 
 import numpy as np
+import pytest
 
 import premise.brightway2 as brightway2_module
 import premise.brightway25 as brightway25_module
+from premise._fast_sqlite import fast_sqlite_settings
 from premise.inventory_store import CompactInventoryStore, InventoryStore
+
+
+class _SQLiteAdapter:
+    def __init__(self, connection):
+        self.connection = connection
+
+    def execute_sql(self, statement):
+        return self.connection.execute(statement)
+
+
+def test_fast_sqlite_settings_apply_and_restore_all_pragmas(tmp_path):
+    connection = sqlite3.connect(tmp_path / "fast-settings.sqlite")
+    database = _SQLiteAdapter(connection)
+    original = {
+        name: connection.execute(f"PRAGMA {name};").fetchone()[0]
+        for name in (
+            "journal_mode",
+            "synchronous",
+            "temp_store",
+            "cache_size",
+            "foreign_keys",
+        )
+    }
+
+    with fast_sqlite_settings(database, cache_mib=16):
+        assert connection.execute("PRAGMA journal_mode;").fetchone()[0] == "memory"
+        assert connection.execute("PRAGMA synchronous;").fetchone()[0] == 0
+        assert connection.execute("PRAGMA temp_store;").fetchone()[0] == 2
+        assert connection.execute("PRAGMA cache_size;").fetchone()[0] == -(16 * 1024)
+        assert connection.execute("PRAGMA foreign_keys;").fetchone()[0] == 0
+
+    restored = {
+        name: connection.execute(f"PRAGMA {name};").fetchone()[0] for name in original
+    }
+    connection.close()
+    assert restored == original
+
+
+def test_fast_writer_preserves_primary_exception_when_cleanup_fails(monkeypatch):
+    primary = RuntimeError("row insertion failed")
+
+    monkeypatch.setattr(
+        brightway25_module,
+        "fast_sqlite_settings",
+        lambda database: __import__("contextlib").nullcontext(),
+    )
+    monkeypatch.setattr(
+        brightway25_module,
+        "_write_processed_database_fast_impl",
+        lambda *args, **kwargs: (_ for _ in ()).throw(primary),
+    )
+    monkeypatch.setattr(
+        brightway25_module,
+        "_cleanup_failed_fast_database",
+        lambda name: (_ for _ in ()).throw(RuntimeError("cleanup failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="row insertion failed") as error:
+        brightway25_module._write_processed_database_fast([], "failed-db")
+
+    assert error.value is primary
 
 
 def test_collect_fast_export_geography_discards_unknown_geocollections():

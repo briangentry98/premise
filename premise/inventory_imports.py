@@ -959,6 +959,7 @@ class BaseInventoryImport:
         path: Union[str, Path],
         system_model: str,
         keep_uncertainty_data: bool = False,
+        preloaded_importer=None,
     ) -> None:
         """Create a :class:`BaseInventoryImport` instance."""
         self.database = database
@@ -992,7 +993,11 @@ class BaseInventoryImport:
                 )
 
         self.path = Path(path) if isinstance(path, str) else path
-        self.import_db = self.load_inventory()
+        self.import_db = (
+            preloaded_importer
+            if preloaded_importer is not None
+            else self.load_inventory()
+        )
 
     def _build_database_product_index(self) -> dict:
         """Build product lookup tables for the source database."""
@@ -1809,9 +1814,16 @@ class DefaultInventory(BaseInventoryImport):
         path,
         system_model,
         keep_uncertainty_data,
+        preloaded_importer=None,
     ):
         super().__init__(
-            database, version_in, version_out, path, system_model, keep_uncertainty_data
+            database,
+            version_in,
+            version_out,
+            path,
+            system_model,
+            keep_uncertainty_data,
+            preloaded_importer,
         )
 
     def load_inventory(self) -> bw2io.ExcelImporter:

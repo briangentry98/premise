@@ -4,26 +4,30 @@ This module contains functions to write a Brightway 2.5 database.
 
 from contextlib import contextmanager
 import datetime
-import math
+import logging
 import pickle
 import shutil
 
-import numpy as np
 from bw2data import Database, databases
 from bw2io.importers.base_lci import LCIImporter
 from tqdm import tqdm
 from wurst.linking import change_db_name, check_internal_linking, link_internal
 
-FAST_EXCHANGE_REQUIRED_FIELDS = {
-    "input",
-    "amount",
-    "type",
-    "name",
-    "product",
-    "unit",
-    "location",
-    "output",
-}
+from .export_payload import (
+    FAST_EXCHANGE_FORBIDDEN_FIELDS,
+    FAST_EXCHANGE_REQUIRED_FIELDS,
+    FAST_STRING_FIELDS,
+    is_prepared_export_inventory,
+    keep_fast_export_value as _keep_fast_export_value,
+    normalize_no_uncertainty_exchange as _normalize_no_uncertainty_exchange,
+    prepare_fast_exchange_payload as _prepare_fast_exchange_payload,
+)
+from ._fast_sqlite import (
+    FAST_SQLITE_EXCHANGE_BATCH_SIZE,
+    fast_sqlite_settings,
+)
+
+logger = logging.getLogger(__name__)
 
 FAST_DATASET_REQUIRED_FIELDS = {
     "database",
@@ -33,19 +37,6 @@ FAST_DATASET_REQUIRED_FIELDS = {
     "unit",
     "location",
     "type",
-}
-
-FAST_STRING_FIELDS = {
-    "name",
-    "reference product",
-    "product",
-    "unit",
-    "location",
-}
-
-FAST_EXCHANGE_FORBIDDEN_FIELDS = {
-    "biosphere": {"location", "product"},
-    "technosphere": {"categories"},
 }
 
 
@@ -143,7 +134,6 @@ def _fast_sqlite_writes(enabled: bool):
     original_base_checks = None
     original_substitutable_vacuum = None
     original_efficient_write_many_data = None
-    db_settings = {}
 
     try:
         from bw2data.backends import base as bw_base
@@ -177,19 +167,6 @@ def _fast_sqlite_writes(enabled: bool):
     if not unique_dbs:
         yield
         return
-
-    try:
-        for db in unique_dbs:
-            db_settings[db] = {
-                "synchronous": db.db.execute_sql("PRAGMA synchronous;").fetchone()[0],
-                "journal_mode": db.db.execute_sql("PRAGMA journal_mode;").fetchone()[0],
-                "temp_store": db.db.execute_sql("PRAGMA temp_store;").fetchone()[0],
-            }
-            db.db.execute_sql("PRAGMA synchronous = OFF;")
-            db.db.execute_sql("PRAGMA journal_mode = MEMORY;")
-            db.db.execute_sql("PRAGMA temp_store = MEMORY;")
-    except Exception:
-        pass
 
     def _noop_vacuum(*_args, **_kwargs):
         return None
@@ -246,7 +223,7 @@ def _fast_sqlite_writes(enabled: bool):
         activity_batch = []
         exchange_batch = []
         activity_batch_size = 250
-        exchange_batch_size = 2_000
+        exchange_batch_size = FAST_SQLITE_EXCHANGE_BATCH_SIZE
         connection = sqlite3_lci_db.db.connection()
 
         sqlite3_lci_db.db.autocommit = False
@@ -328,10 +305,6 @@ def _fast_sqlite_writes(enabled: bool):
             if original_substitutable_vacuum is not None:
                 bw_sqlite.SubstitutableDatabase.vacuum = original_substitutable_vacuum
 
-            for db, settings in db_settings.items():
-                db.db.execute_sql(f"PRAGMA synchronous = {settings['synchronous']};")
-                db.db.execute_sql(f"PRAGMA journal_mode = {settings['journal_mode']};")
-                db.db.execute_sql(f"PRAGMA temp_store = {settings['temp_store']};")
             if original_efficient_write_many_data is not None:
                 bw_base.SQLiteBackend._efficient_write_many_data = (
                     original_efficient_write_many_data
@@ -351,68 +324,6 @@ def _fast_sqlite_writes(enabled: bool):
                 ]
         except Exception:
             pass
-
-
-def _keep_fast_export_value(value) -> bool:
-    if value is None:
-        return False
-
-    if isinstance(value, str) and value in {"", "None", "nan"}:
-        return False
-
-    if isinstance(value, (list, tuple, dict, set)):
-        return True
-
-    try:
-        return not math.isnan(value)
-    except (TypeError, ValueError):
-        return True
-
-
-def _normalize_no_uncertainty_exchange(exchange: dict) -> dict:
-    uncertainty_type = exchange.get(
-        "uncertainty type", exchange.get("uncertainty_type", 0)
-    )
-    try:
-        uncertainty_type = int(uncertainty_type)
-    except (TypeError, ValueError):
-        return exchange
-
-    if uncertainty_type not in {0, 1} or "amount" not in exchange:
-        return exchange
-
-    exchange["loc"] = exchange["amount"]
-    for field in ("scale", "shape", "minimum", "maximum"):
-        exchange.pop(field, None)
-
-    return exchange
-
-
-def _prepare_fast_exchange_payload(exchange: dict) -> dict:
-    fast_payload = getattr(exchange, "_premise_fast_export_payload", None)
-    source = fast_payload() if fast_payload is not None else exchange
-    exchange_type = source.get("type")
-    forbidden_fields = FAST_EXCHANGE_FORBIDDEN_FIELDS.get(exchange_type, set())
-    compact_exchange = {
-        field: (float(value) if isinstance(value, (np.generic, np.ndarray)) else value)
-        for field, value in source.items()
-        if field not in forbidden_fields and _keep_fast_export_value(value)
-    }
-
-    for field in FAST_EXCHANGE_REQUIRED_FIELDS:
-        if (
-            field not in forbidden_fields
-            and field not in compact_exchange
-            and field in source
-        ):
-            if field in FAST_STRING_FIELDS and source[field] is None:
-                compact_exchange[field] = ""
-            else:
-                compact_exchange[field] = source[field]
-
-    _normalize_no_uncertainty_exchange(compact_exchange)
-
-    return compact_exchange
 
 
 def _prepare_fast_dataset_payload(dataset: dict) -> dict:
@@ -435,7 +346,8 @@ def _prepare_fast_dataset_payload(dataset: dict) -> dict:
 def _compact_payload_for_fast_write(data: list, name: str) -> list:
     from bw2data.utils import set_correct_process_type
 
-    streaming = any(
+    exchange_payloads_prepared = is_prepared_export_inventory(data)
+    streaming = not exchange_payloads_prepared and any(
         getattr(dataset, "_premise_materialize", None) is not None for dataset in data
     )
     progress = _progress(
@@ -456,9 +368,13 @@ def _compact_payload_for_fast_write(data: list, name: str) -> list:
             exchanges = dataset.get("exchanges", [])
             compact_dataset = _prepare_fast_dataset_payload(dataset)
 
-            compact_dataset["exchanges"] = [
-                _prepare_fast_exchange_payload(exchange) for exchange in exchanges
-            ]
+            compact_dataset["exchanges"] = (
+                exchanges
+                if exchange_payloads_prepared
+                else [
+                    _prepare_fast_exchange_payload(exchange) for exchange in exchanges
+                ]
+            )
             dataset.clear()
             dataset.update(compact_dataset)
             progress.update(1)
@@ -520,7 +436,7 @@ def _write_search_index_fast(database_filename: str, data: list, name: str) -> N
     index.close()
 
 
-def _write_processed_database_fast(
+def _write_processed_database_fast_impl(
     data: list,
     name: str,
     *,
@@ -570,7 +486,7 @@ def _write_processed_database_fast(
     activity_rows = []
     exchange_rows = []
     activity_row_batch_size = 1_000
-    exchange_row_batch_size = 5_000
+    exchange_row_batch_size = FAST_SQLITE_EXCHANGE_BATCH_SIZE
     activity_ids = {}
     connection = sqlite3_lci_db.db.connection()
     total_datasets = len(data)
@@ -812,6 +728,45 @@ def _write_processed_database_fast(
     _write_search_index_fast(db.filename, data, name)
 
 
+def _cleanup_failed_fast_database(name: str) -> None:
+    """Remove registration and generated files for an incomplete fast export."""
+
+    if name not in databases:
+        return
+    _cleanup_legacy_fast_export_sidecars(name)
+    database = Database(name)
+    database.delete(warn=False, vacuum=False)
+    if name in databases:
+        del databases[name]
+
+
+def _write_processed_database_fast(
+    data: list,
+    name: str,
+    *,
+    exchange_payloads_prepared: bool = False,
+) -> None:
+    """Write all fast-export artifacts under one scoped SQLite policy."""
+
+    from bw2data.backends import sqlite3_lci_db
+
+    try:
+        with fast_sqlite_settings(sqlite3_lci_db):
+            _write_processed_database_fast_impl(
+                data,
+                name,
+                exchange_payloads_prepared=exchange_payloads_prepared,
+            )
+    except BaseException:
+        try:
+            _cleanup_failed_fast_database(name)
+        except Exception:
+            logger.exception(
+                "Could not completely clean failed Brightway export %r", name
+            )
+        raise
+
+
 def _store_database_metadata(name: str, metadata: dict = None) -> None:
     """Attach scenario metadata to a registered Brightway database."""
     if not metadata or name not in databases:
@@ -847,15 +802,11 @@ def write_brightway_database(
     if fast:
         if name in databases:
             _print_database_overwrite(name)
-        exchange_payloads_prepared = not any(
-            getattr(dataset, "_premise_materialize", None) is not None
-            for dataset in data
-        )
         _compact_payload_for_fast_write(data, name)
         _write_processed_database_fast(
             data,
             name,
-            exchange_payloads_prepared=exchange_payloads_prepared,
+            exchange_payloads_prepared=True,
         )
         _store_database_metadata(name, metadata)
         _print_database_written(name)

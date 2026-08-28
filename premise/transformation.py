@@ -68,6 +68,58 @@ def _exclude_exchange_objects(exchanges, excluded):
     return [exchange for exchange in exchanges if id(exchange) not in excluded_ids]
 
 
+def _exchange_type_for_relinking(exchange):
+    """Read only the exchange type before decoding other relinking fields."""
+
+    accessor = getattr(exchange, "_premise_exchange_type", None)
+    return accessor() if accessor is not None else exchange["type"]
+
+
+def _technosphere_relink_fields(exchange):
+    """Return name, effective product, location, unit, and amount once."""
+
+    accessor = getattr(exchange, "_premise_relink_technosphere_fields", None)
+    if accessor is not None:
+        return accessor()
+    product = (
+        exchange["reference product"]
+        if "reference product" in exchange
+        else exchange["product"]
+    )
+    return (
+        exchange["name"],
+        product,
+        exchange["location"],
+        exchange["unit"],
+        exchange["amount"],
+    )
+
+
+def _iter_generic_relink_candidates(exchanges, provider_semantics):
+    """Yield generic candidates while decoding technosphere fields once."""
+
+    for exchange in exchanges:
+        if _exchange_type_for_relinking(exchange) != "technosphere":
+            continue
+        fields = _technosphere_relink_fields(exchange)
+        name, effective_product, location, unit, amount = fields
+        if (
+            name,
+            effective_product,
+            location,
+        ) not in provider_semantics and amount != 0:
+            # Match the established two-step semantics: reference-product
+            # precedence decides eligibility, while relinking itself groups by
+            # the concrete product field.
+            yield exchange, (
+                name,
+                exchange["product"],
+                location,
+                unit,
+                amount,
+            )
+
+
 @dataclass(frozen=True, slots=True, eq=False)
 class _ProviderRecord(Mapping[str, Any]):
     """Compact mapping-compatible provider snapshot used by activity indexes."""
@@ -1965,77 +2017,65 @@ class BaseTransformation:
         for act in ws.get_many(
             self.database, ws.doesnt_contain_any("name", excludes_datasets)
         ):
-            # Filter out exchanges to relink
-            excs_to_relink = [
-                e
-                for e in act["exchanges"]
-                if e["type"] == "technosphere"
-                and (
-                    e["name"],
-                    (
-                        e["reference product"]
-                        if "reference product" in e
-                        else e["product"]
-                    ),
-                    e["location"],
+            # Filter out exchanges to relink. Compact inventories can decode
+            # unchanged typed columns and sparse overlays without generic
+            # mapping dispatch; generic/third-party inventories retain the
+            # established ordered loop.
+            candidate_iterator = getattr(
+                self.database, "_premise_relink_candidates", None
+            )
+            candidates = (
+                candidate_iterator(act, provider_semantics)
+                if candidate_iterator is not None
+                else None
+            )
+            if candidates is None:
+                candidates = _iter_generic_relink_candidates(
+                    act["exchanges"], provider_semantics
                 )
-                not in provider_semantics
-                and e["amount"] != 0
-            ]
+            selected_candidates = list(candidates)
+            excs_to_relink = [exchange for exchange, _ in selected_candidates]
 
             if len(excs_to_relink) == 0:
                 continue
 
             old_uncertainty = {}
 
-            for exc in excs_to_relink:
-                if exc["type"] == "technosphere":
-                    if exc.get("uncertainty type", 0) != 0:
-                        old_uncertainty[
-                            (exc["name"], exc.get("product"), exc["unit"])
-                        ] = {
-                            "uncertainty type": exc.get("uncertainty type", 0),
-                            "amount": exc["amount"],
-                            "loc": exc.get("loc"),
-                            "scale": exc.get("scale"),
-                            "minimum": exc.get("minimum", 0),
-                            "maximum": exc.get("maximum", 0),
-                        }
+            for exc, fields in selected_candidates:
+                name, effective_product, _location, unit, amount = fields
+                if exc.get("uncertainty type", 0) != 0:
+                    old_uncertainty[(name, effective_product, unit)] = {
+                        "uncertainty type": exc.get("uncertainty type", 0),
+                        "amount": amount,
+                        "loc": exc.get("loc"),
+                        "scale": exc.get("scale"),
+                        "minimum": exc.get("minimum", 0),
+                        "maximum": exc.get("maximum", 0),
+                    }
 
             # make a dictionary with the names and amounts
             # of the technosphere exchanges to relink
             # to compare with the new exchanges
             excs_to_relink_dict = defaultdict(float)
             relink_amounts = defaultdict(float)
-            for exc in excs_to_relink:
-                try:
-                    excs_to_relink_dict[exc["product"]] += exc["amount"]
-                    relink_amounts[
-                        (
-                            exc["name"],
-                            exc["product"],
-                            exc["location"],
-                            exc["unit"],
-                        )
-                    ] += exc["amount"]
-                except:
-                    print(exc)
-                    raise
+            for _, fields in selected_candidates:
+                name, effective_product, location, unit, amount = fields
+                excs_to_relink_dict[effective_product] += amount
+                relink_amounts[(name, effective_product, location, unit)] += amount
 
             # Create a set of unique exchanges to relink
             # turn this into a list of dictionaries
             unique_excs_to_relink = [
-                {
-                    "name": exc["name"],
-                    "product": exc["product"],
-                    "location": exc["location"],
-                    "unit": exc["unit"],
+                dict(items)
+                for items in {
+                    (
+                        ("name", fields[0]),
+                        ("product", fields[1]),
+                        ("location", fields[2]),
+                        ("unit", fields[3]),
+                    )
+                    for _, fields in selected_candidates
                 }
-                for exc in excs_to_relink
-            ]
-            # remove duplicates items in the list
-            unique_excs_to_relink = [
-                dict(t) for t in {tuple(d.items()) for d in unique_excs_to_relink}
             ]
 
             # Process exchanges to relink

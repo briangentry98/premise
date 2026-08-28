@@ -13,6 +13,7 @@ import os
 import pickle
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -20,6 +21,7 @@ from typing import List, Literal, Union
 
 import bw2data
 import datapackage
+from bw2io import ExcelImporter
 from packaging.version import Version
 from tqdm import tqdm
 
@@ -132,10 +134,6 @@ from .utils import (
 from .renewables import _update_wind_turbines
 
 logger = logging.getLogger("module")
-
-_EXPORT_HANDOFF_MAX_BYTES = 512 * 1024 * 1024
-_EXPORT_HANDOFF_ACTIVITY_BYTES = 1536
-_EXPORT_HANDOFF_EXCHANGE_BYTES = 192
 
 
 def _normalize_inventory_before_certification(database, provenance_owner=None):
@@ -621,6 +619,18 @@ def check_presence_biosphere_database(biosphere_name: str) -> str:
         )
 
     return biosphere_name
+
+
+def _extract_default_inventory_importers(filepaths):
+    """Extract workbook payloads concurrently while retaining input order."""
+
+    with ThreadPoolExecutor(max_workers=min(4, len(filepaths) or 1)) as executor:
+        return list(
+            executor.map(
+                ExcelImporter,
+                (filepath for filepath, _ in filepaths),
+            )
+        )
 
 
 class NewDatabase:
@@ -1253,6 +1263,7 @@ class NewDatabase:
             # that premise can migrate them backwards when building with 3.11.
             filepaths.append((FILEPATH_AFFORESTATION_INVENTORIES, "3.12"))
 
+        selected_filepaths = []
         for filepath in filepaths:
             # make an exception for FILEPATH_OIL_GAS_INVENTORIES
             # ecoinvent version is 3.9
@@ -1268,6 +1279,16 @@ class NewDatabase:
             ] and self.version in ["3.11", "3.12"]:
                 continue
 
+            selected_filepaths.append(filepath)
+
+        # Excel extraction is independent and read-only. All migrations,
+        # linking, duplicate checks, and merges below remain sequential in the
+        # original workbook order.
+        preloaded_importers = _extract_default_inventory_importers(selected_filepaths)
+
+        for filepath, preloaded_importer in zip(
+            selected_filepaths, preloaded_importers
+        ):
             inventory = DefaultInventory(
                 database=self._database,
                 version_in=filepath[1],
@@ -1275,6 +1296,7 @@ class NewDatabase:
                 path=filepath[0],
                 system_model=self.system_model,
                 keep_uncertainty_data=self.keep_imports_uncertainty,
+                preloaded_importer=preloaded_importer,
             )
             datasets = inventory.merge_inventory()
             if collect_data:
@@ -2137,6 +2159,8 @@ class NewDatabase:
             )
         else:
             runtime_scenario.pop("_inventory_working_copy", None)
+        if persist:
+            store._scenario_cache_compatibility = True
         provenance_payload = self._get_provenance_collector().payload_for(
             self._scenario_identity(runtime_scenario)
         )
@@ -2157,7 +2181,6 @@ class NewDatabase:
         scenario_definition.clear()
         scenario_definition.update(runtime_scenario)
         if persist:
-            store._scenario_cache_compatibility = True
             checkpoint = DIR_CACHED_FILES / f"{uuid.uuid4().hex}.inventory-store"
             checkpoint = store.checkpoint(checkpoint)
             scenario_definition["_inventory_checkpoint"] = checkpoint
@@ -2168,35 +2191,22 @@ class NewDatabase:
                     scenario_definition["mapping"], store, checkpoint
                 )
             if self._can_retain_export_handoff(store):
-                # Open the just-written canonical representation once. The
-                # live overlays can contain false/empty metadata removed by
-                # scenario-cache compatibility rules, so handing those live
-                # objects directly to an exporter would change established
-                # persisted-build semantics.
-                scenario_definition["_inventory_export_handoff"] = InventoryStore.open(
-                    checkpoint
-                )
+                # The private store was canonicalized before certification and
+                # checkpointing, so it is the exact single-use export handoff.
+                for scenario in self.scenarios:
+                    if scenario is not scenario_definition:
+                        scenario.pop("_inventory_export_handoff", None)
+                scenario_definition["_inventory_export_handoff"] = store
         else:
             scenario_definition["_inventory_store"] = store
         return store
 
     def _can_retain_export_handoff(self, store: InventoryStore) -> bool:
-        """Bound the private single-use checkpoint-to-export handoff."""
+        """Allow one private single-use checkpoint-to-export handoff."""
 
-        if len(getattr(self, "scenarios", ())) != 1 or not isinstance(
-            store, CompactInventoryStore
-        ):
+        if not isinstance(store, CompactInventoryStore):
             return False
-        state = getattr(store, "_state", None)
-        if state is None:
-            return False
-        activity_count = len(getattr(state, "activity_order", ()))
-        exchange_count = len(getattr(state, "exchanges", ()))
-        estimated_bytes = (
-            activity_count * _EXPORT_HANDOFF_ACTIVITY_BYTES
-            + exchange_count * _EXPORT_HANDOFF_EXCHANGE_BYTES
-        )
-        return estimated_bytes <= _EXPORT_HANDOFF_MAX_BYTES
+        return getattr(store, "_state", None) is not None
 
     @staticmethod
     def _clear_scenario_runtime_state(scenario: dict) -> None:
@@ -2363,6 +2373,13 @@ class NewDatabase:
 
         with tqdm(total=len(self.scenarios), desc=description, ncols=70) as pbar_outer:
             for position, scenario_definition in enumerate(self.scenarios):
+                # Once another scenario starts updating, the previous scenario
+                # remains checkpoint-backed and must not keep a second complete
+                # store resident alongside the new working graph.
+                for other_scenario in self.scenarios:
+                    if other_scenario is not scenario_definition:
+                        other_scenario.pop("_inventory_export_handoff", None)
+                gc.collect()
                 scenario = self._load_scenario_database_for_update(
                     scenario=scenario_definition, scenario_position=position
                 )
