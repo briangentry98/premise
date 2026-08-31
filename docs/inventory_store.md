@@ -1,6 +1,6 @@
-# InventoryStore API (premise 3.0)
+# InventoryStore API (premise 2.5)
 
-Premise 3.0 owns inventories through `InventoryStore`. Mutable inventory lists
+Premise 2.5 owns inventories through `InventoryStore`. Mutable inventory lists
 are no longer exposed on `NewDatabase` or retained in active scenario
 dictionaries.
 
@@ -119,9 +119,11 @@ SimaPro, openLCA,
 datapackage, and superstructure exports reuse the semantic certificate and add
 only their streaming schema phase.
 
-The public surface is additive: `NewDatabase.get_validation_report()` and the
-immutable `ValidationIssue`, `ValidationRuleResult`, `ValidationPhaseResult`,
-`ValidationReport`, and `PremiseValidationError` types are exported from
-`premise`. `ChangeReportArtifacts` is likewise exported for the structured V2
+`NewDatabase.get_validation_report()` and the immutable `ValidationIssue`,
+`ValidationRuleResult`, `ValidationPhaseResult`, `ValidationReport`, and
+`PremiseValidationError` types are exported from `premise`.
+`ChangeReportArtifacts` is likewise exported for the structured V2
 Excel/Parquet report returned by `NewDatabase.generate_change_report()`.
-Existing constructor and export signatures remain accepted.
+Existing constructor and export signatures remain accepted, but integrations
+that read or mutate `NewDatabase.database` must migrate to the store API or
+explicit materialization described above.

@@ -24,7 +24,7 @@ copyright = (
 author = "Romain Sacchi, Alois Dirnaichner, Chris Mutel"
 
 # The full version, including alpha/beta/rc tags
-release = "2.4.9.2"
+release = "2.5.0"
 
 # -- General configuration ---------------------------------------------------
 
@@ -37,6 +37,13 @@ extensions = [
     "sphinx_rtd_theme",
 ]
 autosummary_generate = True  # Turn on sphinx.ext.autosummary
+suppress_warnings = [
+    # Dependencies are intentionally mocked so the user guide can build in a
+    # lightweight documentation environment.
+    "autodoc.mocked_object",
+    # The tailings reference list is also printed verbatim in a data table.
+    "ref.footnote",
+]
 
 master_doc = "index"
 

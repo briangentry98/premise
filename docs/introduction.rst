@@ -962,13 +962,11 @@ and GMST increase by 2100.
      -
      -
      -
-     -
    * - **SSP1**
      - 1.35°C
      - Very low forcing
      -
      - SSP1-VLLO
-     -
      -
      -
      -
@@ -996,12 +994,10 @@ and GMST increase by 2100.
      -
      -
      -
-     -
    * - **SSP1**
      - 2.13°C
      - NPI (nat. policies implemented)
      - SSP1-NPi
-     -
      -
      -
      -
@@ -1014,13 +1010,11 @@ and GMST increase by 2100.
      -
      -
      -
-     -
    * - **SSP2**
      - 1.42°C
      - Very low/high forcing (IMAGE VLHO)
      -
      - SSP2-VLHO
-     -
      -
      -
      -
@@ -1036,7 +1030,6 @@ and GMST increase by 2100.
      - 1.50–1.9°C
      - Paris-consistent (peak budget)
      - SSP2-PkBudg650, SSP2-PkBudg1000
-     -
      -
      -
      -
@@ -1089,7 +1082,6 @@ and GMST increase by 2100.
      -
      -
      -
-     -
    * - **SSP2**
      - 2.80°C
      - Medium forcing
@@ -1110,7 +1102,6 @@ and GMST increase by 2100.
      - 3.0°C
      - NPI (nat. policies implemented)
      - SSP2-NPi
-     -
      -
      -
      -
@@ -1139,12 +1130,10 @@ and GMST increase by 2100.
      -
      -
      -
-     -
    * - **SSP3**
      - 3.75°C
      - Rollback
      - SSP3-rollBack
-     -
      -
      -
      -
@@ -1170,7 +1159,6 @@ and GMST increase by 2100.
      - High forcing
      -
      - SSP5-H
-     -
      -
      -
      -

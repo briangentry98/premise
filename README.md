@@ -66,6 +66,35 @@ Changelog
 ---------
 Release notes are maintained in [`CHANGELOG.md`](CHANGELOG.md).
 
+What's new in 2.5.0
+-------------------
+
+Version 2.5.0 introduces controlled inventory storage, built-in methodological
+validation, and structured audit reports. The main changes are:
+
+- immutable inventory inspection and atomic mutations through
+  `NewDatabase.get_inventory_store()`;
+- compact, checkpoint-backed scenario storage and faster Brightway export;
+- validation certificates for scenario updates and every supported exporter;
+- structured Excel summaries plus exhaustive Parquet change records; and
+- 12 self-contained example notebooks organized as a learning path.
+
+The mutable `NewDatabase.database` attribute is no longer available after
+initialization. Most users do not need to replace it. Integrations that inspect
+inventories should use the store, while code that strictly requires a
+`list[dict]` can materialize one explicitly:
+
+```python
+store = ndb.get_inventory_store()  # read-only view
+activities = store.find({"location": "CH"})
+
+# Use only at integration boundaries; this duplicates the inventory in memory.
+database = ndb.materialize_inventory()
+```
+
+See the [2.5 migration and release guide](https://premise.readthedocs.io/en/latest/release_2_5.html)
+and the [full 2.5.0 changelog](CHANGELOG.md#250) for details.
+
 
 Documentation
 -------------

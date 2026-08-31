@@ -15,10 +15,10 @@ maintainers = [
 ]
 description = "Coupling IAM output to ecoinvent LCA database ecoinvent for prospective LCA"
 readme = "README.md"
+license = "BSD-3-Clause"
 dynamic = ["dependencies", "version"]
 classifiers = [
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: BSD License",
     "Natural Language :: English",
     "Programming Language :: Python :: 3",
     "Operating System :: OS Independent",

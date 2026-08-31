@@ -14,6 +14,7 @@ This user guide will help you navigate the inner workings of *premise*.
    :caption: Contents
 
    introduction
+   release_2_5
    extract
    transform
    structured_change_report
@@ -23,3 +24,4 @@ This user guide will help you navigate the inner workings of *premise*.
    consequential
    fuel_market_system_models
    faq
+   code

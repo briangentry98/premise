@@ -1,6 +1,6 @@
 # Runtime and resident-memory optimization
 
-> **Premise 3.0 InventoryStore status (27 August 2026):** The store contract,
+> **Premise 2.5 InventoryStore status (27 August 2026):** The store contract,
 > immutable records, atomic transactions, copy-on-write forks, ordered indexes,
 > Arrow checkpoints, private scenario ownership, and explicit materialization
 > API are implemented. Compact storage is the production and performance path;
