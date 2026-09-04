@@ -337,17 +337,24 @@ collection, are provided in `SI_2_Material_requirements.xlsx <https://github.com
 From this database, `metals_db.csv <https://github.com/polca/premise/blob/master/premise/data/metals/metals_db.csv>`_ is created,
 which *premise* uses to update the material intensities for each technology.
 
-The mapping file that associate metal intensities to datasets to be
-updated can be found in `activity_mapping.yml <https://github.com/polca/premise/blob/master/premise/data/metals/activities_mapping.yml>`_.
+The mapping file that associates metal intensities with datasets to be
+updated can be found in `activities_mapping.yml <https://github.com/polca/premise/blob/master/premise/data/metals/activities_mapping.yml>`_.
 
 To convert the units in `metals_db.csv <https://github.com/polca/premise/blob/master/premise/data/metals/metals_db.csv>`_
 to the units used in ecoinvent (e.g., converting [kg metal/kW] to [kg metal/kg battery]), *premise* uses
-the conversion factors found in `conversion_factors.csv <https://github.com/polca/premise/blob/master/premise/data/metals/conversion_factors.xlsx>`_.
+the conversion factors in `technology_conversion_factors.yaml <https://github.com/polca/premise/blob/master/premise/data/metals/technology_conversion_factors.yaml>`_.
 
-Finally, *premise* uses the data under `metal_products.csv <https://github.com/polca/premise/blob/master/premise/data/metals/metal_product.xlsx>`_
-to refine the activity in ecoinvent to be updated, select the specific metal
-product (e.g., boric oxide for boron used in wind turbine magnets)
-and convert the intensities to the relevant compound (e.g., 1kg of Boron is converted to 86.19 kg of B2O3).
+Finally, *premise* uses `metal_products.yaml <https://github.com/polca/premise/blob/master/premise/data/metals/metal_products.yaml>`_
+to select the target activity, metal product and compound conversion. Each rule
+has a stable identifier which is included in the structured change report.
+
+The ``set_direct_amount`` operation sets a configured direct technosphere
+input. It does not claim to set the total metal content of the complete supply
+chain. An activity policy preserves the original material structure of
+``EPR construction`` because this inventory already contains material-intensive
+components. Full supply-chain metal demand can help screen for overlaps, but it
+also includes energy, transport, mining and infrastructure and must not be
+subtracted automatically.
 
 
 Inventories

@@ -20,6 +20,16 @@ import yaml
 
 from .export import biosphere_flows_dictionary
 from .logger import create_logger
+from .metals_rules import (
+    MATERIAL_RULES_PATH,
+    ActivityPolicy,
+    MaterialRule,
+    MetalsConfigError,
+    conversion_factors_as_dataframe_records,
+    load_material_rules,
+    load_technology_conversions,
+    material_rules_as_dataframe_records,
+)
 from .provenance import record_change_event
 from .inventory_store import (
     filter_biosphere_category,
@@ -368,7 +378,9 @@ def _update_metals(scenario, version, system_model):
     scenario["cache"] = metals.cache
     scenario["index"] = metals.index
     scenario.setdefault("mapping", {})["metals"] = {
-        "transformed activities": list(metals._validation_targets.values())
+        "transformed activities": list(metals._validation_targets.values()),
+        "material decisions": list(metals.material_decisions),
+        "material update metrics": dict(metals.material_update_metrics),
     }
 
     validate = MetalsValidation(
@@ -387,6 +399,9 @@ def _update_metals(scenario, version, system_model):
     validate.mining_shares_mapping = mining_shares_mapping
     validate.interpolate_by_year = interpolate_by_year
     validate.metals_list = mining_shares_mapping["Metal"].unique().tolist()
+    validate.material_update_diagnostics = metals.material_update_diagnostics
+    validate.material_decisions = metals.material_decisions
+    validate.material_update_metrics = metals.material_update_metrics
     record_validation_phase(scenario, validate.run_metals_checks())
 
     return scenario
@@ -494,11 +509,8 @@ def load_activities_mapping():
     where filter was set to yes are considered.
     """
 
-    filepath = DATA_DIR / "metals" / "metal_products.xlsx"
-    df = pd.read_excel(filepath, sheet_name="activities_mapping")
-    df = df.loc[(df["filter"] == "Yes") | (df["filter"] == "yes")]
-
-    return df
+    df = pd.DataFrame(material_rules_as_dataframe_records())
+    return df.loc[df["filter"].str.lower() == "yes"].copy()
 
 
 # Define a function to replicate rows based on the generated activity sets
@@ -571,9 +583,7 @@ def load_conversion_factors():
     Load dataframe with conversion factors for metals
     """
 
-    filepath = DATA_DIR / "metals" / "conversion_factors.xlsx"
-    df = pd.read_excel(filepath, sheet_name="Conversion factors")
-    return df
+    return pd.DataFrame(conversion_factors_as_dataframe_records())
 
 
 def update_exchanges(
@@ -606,7 +616,11 @@ def update_exchanges(
     activity["exchanges"] = [
         e
         for e in activity["exchanges"]
-        if e.get("product", "").lower() != new_provider["reference product"].lower()
+        if not (
+            e.get("type") == "technosphere"
+            and e.get("product", "").lower()
+            == new_provider["reference product"].lower()
+        )
     ]
 
     new_exchange = {
@@ -1371,34 +1385,24 @@ class Metals(BaseTransformation):
                 year=clamped_year, method="linear"
             )
 
-        self.activities_mapping = load_activities_mapping()  # 4
+        self.material_rules_config = load_material_rules()
+        self.material_rules = self.material_rules_config.enabled_rules
+        self.material_policies = self.material_rules_config.policies
+        self.material_rules_by_technology: Dict[str, List[MaterialRule]] = defaultdict(
+            list
+        )
+        for rule in self.material_rules:
+            self.material_rules_by_technology[rule.technology].append(rule)
 
-        self.conversion_factors = load_conversion_factors()  # 3
-        # Precompute conversion factors as a dictionary for faster lookups
-        self.conversion_factors_dict = self.conversion_factors.set_index("Activity")[
-            "Conversion_factor"
-        ].to_dict()
+        self.technology_conversions = load_technology_conversions()
+        self.conversion_factors_dict = {
+            item.activity_name: item.factor for item in self.technology_conversions
+        }
 
         inv = InventorySet(self.database, self.version)
 
         self.activities_metals_map: Dict[str, Set] = (  # 2
             inv.generate_metals_activities_map()
-        )
-
-        self.rev_activities_metals_map: Dict[str, str] = rev_metals_map(
-            self.activities_metals_map
-        )
-
-        self.extended_dataframe = extend_dataframe(
-            self.activities_mapping, self.activities_metals_map
-        )
-        self.extended_dataframe["final_technology"] = self.extended_dataframe.apply(
-            lambda row: (
-                row["demanding_process"]
-                if pd.notna(row["demanding_process"]) and row["demanding_process"] != ""
-                else row["ecoinvent_technology"]
-            ),
-            axis=1,
         )
 
         self.metals_transport = load_metals_transport()
@@ -1446,42 +1450,118 @@ class Metals(BaseTransformation):
         }
 
         self.build_db_indexes()
+        self.material_update_diagnostics: List[dict] = []
+        self.material_decisions: List[dict] = []
+        self.material_update_plan = self._compile_material_update_plan()
+        self.material_update_metrics = {
+            "compiled pairs": len(self.material_update_plan),
+            "executed pairs": 0,
+            "provider index lookups": 0,
+        }
 
         self.transport_lookup = build_transport_lookup(self.metals_transport)
 
         self.prim_sec_split = load_primary_secondary_split()
 
     def update_metals_use_in_database(self):
-        """
-        Update the database with metals use factors.
-        """
+        """Apply every compiled material rule to its target exactly once."""
 
-        for dataset in self.database:
-            if dataset["name"] in self.rev_activities_metals_map:
-                origin_var = self.rev_activities_metals_map[dataset["name"]]
-                self.update_metal_use(dataset, origin_var)
+        for item in self.material_update_plan:
+            self.material_update_metrics["executed pairs"] += 1
+            self._apply_material_rule(
+                dataset=item["dataset"],
+                technology=item["technology"],
+                rule=item["rule"],
+                conversion_factor=item["conversion_factor"],
+            )
+
+    def _compile_material_update_plan(self) -> List[dict]:
+        """Compile unique dataset/rule work items before mutating the database."""
+
+        plan: List[dict] = []
+        seen: Dict[tuple[int, str], float] = {}
+        for technology, mapped_datasets in self.activities_metals_map.items():
+            rules = self.material_rules_by_technology.get(technology, ())
+            if not rules:
+                continue
+            for rule in rules:
+                for mapped_dataset in mapped_datasets:
+                    conversion_factor = self.conversion_factors_dict.get(
+                        mapped_dataset.get("name"), 1.0
+                    )
+                    if rule.target.kind == "mapped_activity":
+                        targets = (mapped_dataset,)
+                    else:
+                        targets = tuple(
+                            self.db_index.get(rule.target.name, {}).get(
+                                rule.target.reference_product, ()
+                            )
+                        )
+                    for target in targets:
+                        key = (id(target), rule.id)
+                        previous_factor = seen.get(key)
+                        if previous_factor is not None:
+                            if not np.isclose(
+                                previous_factor,
+                                conversion_factor,
+                                rtol=0.0,
+                                atol=0.0,
+                            ):
+                                raise MetalsConfigError(
+                                    f"Rule {rule.id!r} reaches "
+                                    f"{target.get('name')!r} through mapped activities "
+                                    "with different conversion factors."
+                                )
+                            continue
+                        seen[key] = conversion_factor
+                        plan.append(
+                            {
+                                "dataset": target,
+                                "technology": technology,
+                                "rule": rule,
+                                "conversion_factor": conversion_factor,
+                            }
+                        )
+        return plan
 
     @lru_cache()
-    def get_metal_market_dataset(self, metal_activity_name: str):
-        if pd.notna(metal_activity_name) and isinstance(metal_activity_name, str):
-            metal_markets = list(
-                ws.get_many(
-                    self.database,
-                    ws.equals("name", metal_activity_name),
-                    ws.either(
-                        *[ws.equals("location", loc) for loc in ["World", "GLO", "RoW"]]
-                    ),
-                )
-            )
-            metal_markets = [ds for ds in metal_markets if self.is_in_index(ds)]
-            if metal_markets:
-                return metal_markets[0]
-            else:
-                raise ws.NoResults(
-                    f"Could not find dataset for metal market {metal_activity_name}"
-                )
-        else:
+    def get_metal_market_dataset(
+        self, metal_activity_name: str, reference_product: str | None = None
+    ):
+        """Return one exact provider using a deterministic location preference."""
+
+        if not isinstance(metal_activity_name, str) or not metal_activity_name:
             raise ValueError(f"Invalid metal activity name: {metal_activity_name}")
+        metrics = getattr(self, "material_update_metrics", None)
+        if metrics is not None:
+            metrics["provider index lookups"] += 1
+        if not isinstance(reference_product, str) or not reference_product:
+            candidates = self.db_index_by_name.get(metal_activity_name, ())
+        else:
+            candidates = self.db_index.get(metal_activity_name, {}).get(
+                reference_product, ()
+            )
+        candidates = [
+            dataset
+            for dataset in candidates
+            if dataset.get("location") in {"World", "GLO", "RoW"}
+            and self.is_in_index(dataset)
+        ]
+        for location in ("World", "GLO", "RoW"):
+            matches = [
+                dataset for dataset in candidates if dataset.get("location") == location
+            ]
+            if len(matches) > 1:
+                raise ValueError(
+                    f"Ambiguous metal provider {metal_activity_name!r} / "
+                    f"{reference_product!r} in {location!r}."
+                )
+            if matches:
+                return matches[0]
+        raise ws.NoResults(
+            f"Could not find metal provider {metal_activity_name!r} / "
+            f"{reference_product!r}."
+        )
 
     def update_metal_use(
         self,
@@ -1495,119 +1575,209 @@ class Metals(BaseTransformation):
         :return: Does not return anything. Modified in place.
         """
 
-        # Pre-fetch relevant data to minimize DataFrame operations
-        tech_rows = self.extended_dataframe.loc[
-            self.extended_dataframe["ecoinvent_technology"] == dataset["name"]
-        ]
-
-        if tech_rows.empty:
-            logger.warning(
-                f"No matching rows for {dataset['name']}, {dataset['location']}."
-            )
-            return
-
-        conversion_factor = self.conversion_factors_dict.get(
-            tech_rows["ecoinvent_technology"].iloc[0], None
-        )
-        available_metals = (
-            self.precomputed_medians.sel(origin_var=technology)
-            .dropna(dim="metal", how="all")["metal"]
-            .values
-        )
-
-        unique_final_technologies = tech_rows["final_technology"].unique()
-
-        for final_technology in unique_final_technologies:
-
-            demanding_process_rows = tech_rows[
-                (tech_rows["final_technology"] == final_technology)
-                & tech_rows["demanding_process"].notna()
-            ]
-
-            if not demanding_process_rows.empty:
-                for index, row in demanding_process_rows.iterrows():
-                    self.process_metal_update(
-                        metal_row=row,
-                        dataset=dataset,
-                        conversion_factor=conversion_factor,
-                        final_technology=final_technology,
-                        technology=technology,
-                    )
-            else:
-                tech_specific_rows = tech_rows[
-                    tech_rows["final_technology"] == final_technology
-                ]
-                for metal in available_metals:
-                    if metal in tech_specific_rows["Element"].values:
-                        match = tech_specific_rows[
-                            tech_specific_rows["Element"] == metal
-                        ]
-                        if not match.empty:
-                            metal_row = match.iloc[0]
-                            self.process_metal_update(
-                                metal_row=metal_row,
-                                dataset=dataset,
-                                conversion_factor=conversion_factor,
-                                final_technology=final_technology,
-                                technology=technology,
-                            )
+        conversion_factor = self.conversion_factors_dict.get(dataset["name"], 1.0)
+        for rule in self.material_rules_by_technology.get(technology, ()):
+            if rule.target.kind == "mapped_activity":
+                self._apply_material_rule(
+                    dataset=dataset,
+                    technology=technology,
+                    rule=rule,
+                    conversion_factor=conversion_factor,
+                )
 
     def process_metal_update(
         self, metal_row, dataset, final_technology, technology, conversion_factor
     ):
-        """
-        Process the update for a given metal and technology.
-        """
-        conversion_factor = conversion_factor or 1
-        unit_converter = metal_row.get("unit_convertor")
-        metal_activity_name = metal_row["Activity"]
+        """Compatibility wrapper around the typed material-rule implementation."""
 
-        if pd.notna(unit_converter) and pd.notna(metal_activity_name):
+        matching_rules = [
+            rule
+            for rule in self.material_rules_by_technology.get(technology, ())
+            if rule.element == metal_row.get("Element")
+            and rule.provider is not None
+            and rule.provider.name == metal_row.get("Activity")
+            and rule.target.name in {None, final_technology}
+        ]
+        for rule in matching_rules:
+            self._apply_material_rule(
+                dataset=dataset,
+                technology=technology,
+                rule=rule,
+                conversion_factor=conversion_factor or 1.0,
+            )
+
+    def _material_policy_for(
+        self, dataset: dict, technology: str
+    ) -> ActivityPolicy | None:
+        for policy in self.material_policies:
+            if policy.matches(dataset, technology):
+                return policy
+        return None
+
+    @staticmethod
+    def _direct_material_amount(dataset: dict, reference_product: str) -> float:
+        return sum(
+            exchange.get("amount", 0.0)
+            for exchange in dataset.get("exchanges", ())
+            if exchange.get("type") == "technosphere"
+            and exchange.get("product", "").lower() == reference_product.lower()
+        )
+
+    def _record_material_decision(
+        self,
+        dataset: dict,
+        rule: MaterialRule,
+        *,
+        status: str,
+        reason_code: str,
+        explanation: str,
+        values: dict,
+    ) -> None:
+        self._validation_targets[id(dataset)] = dataset
+        self.material_decisions.append(
+            {
+                "activity": {
+                    "code": dataset.get("code"),
+                    "name": dataset.get("name"),
+                    "reference product": dataset.get("reference product"),
+                    "location": dataset.get("location"),
+                    "unit": dataset.get("unit"),
+                },
+                "status": status,
+                "reason code": reason_code,
+                "explanation": explanation,
+                **values,
+            }
+        )
+        record_change_event(
+            self,
+            dataset,
+            status,
+            sector="metals",
+            reason_code=reason_code,
+            explanation=explanation,
+            iam_variable=rule.technology,
+            algorithm=rule.application,
+            configuration_reference=(
+                f"premise/data/metals/{MATERIAL_RULES_PATH.name}#{rule.id}"
+            ),
+            computed_target_values=values,
+        )
+
+    def _apply_material_rule(
+        self,
+        *,
+        dataset: dict,
+        technology: str,
+        rule: MaterialRule,
+        conversion_factor: float,
+    ) -> None:
+        """Calculate and apply, preserve, or diagnose one material rule."""
+
+        if rule.provider is None or rule.element is None:
+            return
+        try:
             use_factors = self.precomputed_medians.sel(
-                metal=metal_row["Element"], origin_var=technology
+                metal=rule.element, origin_var=technology
             )
-            median_value = (
-                use_factors.sel(variable="median").item()
-                * unit_converter
-                * conversion_factor
-            )
+        except (KeyError, ValueError):
+            return
 
-            min_value = (
-                use_factors.sel(variable="min").item()
-                * unit_converter
-                * conversion_factor
-            )
-            max_value = (
-                use_factors.sel(variable="max").item()
-                * unit_converter
-                * conversion_factor
-            )
+        exchange_factor = rule.exchange_amount_factor or 1.0
+        median_value = (
+            use_factors.sel(variable="median").item()
+            * exchange_factor
+            * conversion_factor
+        )
+        min_value = (
+            use_factors.sel(variable="min").item() * exchange_factor * conversion_factor
+        )
+        max_value = (
+            use_factors.sel(variable="max").item() * exchange_factor * conversion_factor
+        )
+        if median_value == 0 or np.isnan(median_value):
+            return
 
-            if median_value != 0 and not np.isnan(median_value):
-                try:
-                    dataset_metal = self.get_metal_market_dataset(metal_activity_name)
-                except ws.NoResults:
-                    return
+        old_amount = self._direct_material_amount(
+            dataset, rule.provider.reference_product
+        )
+        values = {
+            "material rule id": rule.id,
+            "technology": technology,
+            "element": rule.element,
+            "provider name": rule.provider.name,
+            "provider product": rule.provider.reference_product,
+            "intensity median": use_factors.sel(variable="median").item(),
+            "intensity minimum": use_factors.sel(variable="min").item(),
+            "intensity maximum": use_factors.sel(variable="max").item(),
+            "technology conversion factor": conversion_factor,
+            "exchange amount factor": exchange_factor,
+            "old direct amount": old_amount,
+            "target direct amount": median_value,
+        }
 
-                metal_users = self.db_index_by_name.get(final_technology, [])
-                for metal_user in metal_users:
-                    update_exchanges(
-                        activity=metal_user,
-                        new_amount=median_value,
-                        new_provider=dataset_metal,
-                        metal=metal_row["Element"],
-                        min_value=min_value,
-                        max_value=max_value,
-                    )
-                    self.write_log(metal_user, "updated")
-        else:
-            print(
-                f"Warning: Missing data for {metal_row['Element']} for {dataset['name']}:"
+        policy = self._material_policy_for(dataset, technology)
+        if policy is not None:
+            values["activity policy id"] = policy.id
+            self._record_material_decision(
+                dataset,
+                rule,
+                status="skipped",
+                reason_code="metals.material_rule.preserved_source",
+                explanation=(
+                    f"Preserved {dataset['name']!r} for material rule {rule.id!r}: "
+                    f"{policy.reason}"
+                ),
+                values=values,
             )
-            if pd.isna(unit_converter):
-                print("- unit converter")
-            if pd.isna(metal_activity_name):
-                print("- activity name")
+            return
+
+        try:
+            provider = self.get_metal_market_dataset(
+                rule.provider.name, rule.provider.reference_product
+            )
+        except ws.NoResults as error:
+            diagnostic = {
+                **values,
+                "activity name": dataset.get("name"),
+                "location": dataset.get("location"),
+                "error": str(error),
+            }
+            self.material_update_diagnostics.append(diagnostic)
+            logger.warning(str(error))
+            self._record_material_decision(
+                dataset,
+                rule,
+                status="skipped",
+                reason_code="metals.material_rule.provider_missing",
+                explanation=str(error),
+                values=diagnostic,
+            )
+            return
+
+        values["provider location"] = provider.get("location")
+        values["provider fallback rank"] = ("World", "GLO", "RoW").index(
+            provider.get("location")
+        )
+        update_exchanges(
+            activity=dataset,
+            new_amount=median_value,
+            new_provider=provider,
+            metal=rule.element,
+            min_value=min_value,
+            max_value=max_value,
+        )
+        self._record_material_decision(
+            dataset,
+            rule,
+            status="updated",
+            reason_code="metals.material_rule.applied",
+            explanation=(
+                f"Set the direct {rule.provider.reference_product!r} input using "
+                f"material rule {rule.id!r}."
+            ),
+            values=values,
+        )
 
     def post_allocation_correction(self):
         """
@@ -1647,13 +1817,52 @@ class Metals(BaseTransformation):
                     inferred_flow_name, resource_flow_names
                 )
 
-            correct_metal_resource_exchanges(
+            resource_exchanges = self._get_in_ground_resource_exchanges(ds)
+            before = {
+                (
+                    exchange.get("name"),
+                    tuple(exchange.get("categories", ())),
+                    exchange.get("unit"),
+                ): exchange.get("amount")
+                for exchange in resource_exchanges
+            }
+            corrected = correct_metal_resource_exchanges(
                 ds,
                 strict=id(ds) in strict_dataset_ids,
                 add_missing_target_resource=id(ds) in missing_target_dataset_ids,
                 target_resource_flow_name=target_resource_flow_name,
-                resource_exchanges=self._get_in_ground_resource_exchanges(ds),
+                resource_exchanges=resource_exchanges,
             )
+            after = {
+                (
+                    exchange.get("name"),
+                    tuple(exchange.get("categories", ())),
+                    exchange.get("unit"),
+                ): exchange.get("amount")
+                for exchange in get_in_ground_resource_exchanges(ds)
+            }
+            if corrected and before != after:
+                self._validation_targets[id(ds)] = ds
+                record_change_event(
+                    self,
+                    ds,
+                    "updated",
+                    sector="metals",
+                    reason_code="metals.post_allocation_resource_correction",
+                    explanation=(
+                        "Corrected in-ground metal resource flows after economic "
+                        "allocation."
+                    ),
+                    algorithm="post-allocation resource-flow correction",
+                    computed_target_values={
+                        "old resource amounts": {
+                            str(key): value for key, value in before.items()
+                        },
+                        "new resource amounts": {
+                            str(key): value for key, value in after.items()
+                        },
+                    },
+                )
 
     def build_in_ground_resource_exchange_index(self) -> None:
         """Index qualifying in-ground exchanges once for the correction pass."""

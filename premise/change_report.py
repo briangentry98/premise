@@ -1333,7 +1333,7 @@ def _collect_event_summaries(
     payload = scenario.provenance_payload or {}
     fallback_counts: Counter = Counter()
     fallback_payloads = {}
-    methodology: dict[tuple[Any, ...], str] = {}
+    methodology: dict[tuple[Any, ...], tuple[str, str | None]] = {}
     for item in payload.get("events", ()) if isinstance(payload, Mapping) else ():
         try:
             event = ProvenanceEvent.from_dict(item)
@@ -1349,6 +1349,11 @@ def _collect_event_summaries(
             )
             fallback_counts[key] += 1
             fallback_payloads[key] = event
+        computed_target_values = None
+        if event.reason_code.startswith(
+            "metals.material_rule"
+        ) or event.reason_code == ("metals.post_allocation_resource_correction"):
+            computed_target_values = _canonical_json(event.computed_target_values)
         methodology.setdefault(
             (
                 event.sector,
@@ -1358,7 +1363,7 @@ def _collect_event_summaries(
                 event.configuration_reference,
                 event.reason_code,
             ),
-            event.explanation,
+            (event.explanation, computed_target_values),
         )
     for key, count in sorted(fallback_counts.items(), key=lambda item: str(item[0])):
         summary.add_fallback(
@@ -1372,7 +1377,8 @@ def _collect_event_summaries(
                 "affected activity count": count,
             }
         )
-    for row, explanation in sorted(methodology.items(), key=lambda item: str(item[0])):
+    for row, values in sorted(methodology.items(), key=lambda item: str(item[0])):
+        explanation, computed_target_values = values
         summary.methodology_rows.append(
             {
                 "scenario": scenario_label,
@@ -1383,6 +1389,7 @@ def _collect_event_summaries(
                 "configuration reference": row[4],
                 "reason code": row[5],
                 "explanation": explanation,
+                "computed target values": computed_target_values,
             }
         )
 
@@ -1973,6 +1980,7 @@ def _write_workbook(
         "configuration reference",
         "reason code",
         "explanation",
+        "computed target values",
     ]
     _write_table_sheet(
         workbook, "Methodology", methodology_rows, methodology_headers, 8
