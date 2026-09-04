@@ -53,7 +53,8 @@ The workbook is a review surface, not a row-level dump. It contains:
 * **Validation Findings** and **Validation Coverage** -- unsuppressed findings,
   successful rules, applicability, and documented suppressions.
 * **Methodology** -- transformation algorithms, IAM/configuration references,
-  normalization actions, provenance reasons, and certificate keys.
+  normalization actions, provenance reasons, certificate keys, and the
+  rule-specific target values used by material updates or preserve decisions.
 
 Every tabular sheet uses an Excel table with filters, frozen headers, wrapped
 text, and appropriate numeric and severity formatting. Full exchange vectors

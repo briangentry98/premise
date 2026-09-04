@@ -2,6 +2,32 @@
 
 All notable changes to this project are documented in this file.
 
+## [2.5.1]
+
+### Changed
+- Moved the runtime material-product rules and technology conversion factors
+  from Excel to versioned, validated YAML files.
+- Compiled material updates by exact activity and rule, removing repeated
+  regional processing and making provider selection deterministic.
+- Preserved the component-based material structure of `EPR construction`
+  instead of adding plant-level material overlays whose system boundary can
+  overlap with EPR components.
+
+### Fixed
+- Applied all configured product rules for a material, including both cast and
+  wrought aluminium for eligible nuclear-power datasets.
+- Restricted material replacement to technosphere exchanges so similarly named
+  biosphere exchanges are not removed.
+- Added rule-specific provenance for applied, skipped, and unavailable-provider
+  decisions and for post-allocation metal-resource corrections.
+
+### Validation
+- Added a dataset-wise direct-metal comparison and an upstream path-screening
+  tool. The IMAGE SSP2-L 2020 ecoinvent 3.11 cutoff comparison contains no
+  unexplained before/after metal-input differences.
+- The compiled update reduces the measured median metals-sector runtime versus
+  the pre-fix implementation.
+
 ## [2.4.9.2]
 
 ### Added

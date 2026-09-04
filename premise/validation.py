@@ -4,6 +4,7 @@ This module contains classes for validating datasets after they have been transf
 
 import csv
 import math
+from collections import defaultdict
 from functools import lru_cache
 
 import numpy as np
@@ -3994,7 +3995,61 @@ class MetalsValidation(BaseDatasetValidator):
         self.check_split_yaml_consistency()
         self.check_interpolation()
         self.check_excel_shares_preserved()
+        self.check_material_rule_applications()
         return self._finalize_logs()
+
+    def check_material_rule_applications(self):
+        """Report missing providers and reject repeated dataset/rule decisions."""
+
+        metrics = getattr(self, "material_update_metrics", {})
+        if metrics.get("executed pairs") != metrics.get("compiled pairs"):
+            self.log_issue(
+                {"name": "metals material update"},
+                "metal material execution incomplete",
+                "The number of executed material-rule pairs differs from the "
+                "compiled execution plan.",
+                issue_type="major",
+            )
+
+        for diagnostic in getattr(self, "material_update_diagnostics", ()):
+            self.log_issue(
+                {
+                    "name": diagnostic.get("activity name"),
+                    "location": diagnostic.get("location"),
+                },
+                "metal material provider unavailable",
+                diagnostic.get("error", "A configured metal provider is unavailable."),
+                issue_type="minor",
+            )
+
+        decisions = getattr(self, "material_decisions", ())
+        counts = defaultdict(int)
+        examples = {}
+        for decision in decisions:
+            activity = decision.get("activity", {})
+            key = (
+                activity.get("code")
+                or (
+                    activity.get("name"),
+                    activity.get("reference product"),
+                    activity.get("location"),
+                    activity.get("unit"),
+                ),
+                decision.get("material rule id"),
+            )
+            counts[key] += 1
+            examples[key] = decision
+        for key, count in counts.items():
+            if count <= 1:
+                continue
+            decision = examples[key]
+            self.log_issue(
+                decision.get("activity", {}),
+                "metal material rule applied repeatedly",
+                f"Rule {decision.get('material rule id')!r} produced {count} "
+                "decisions for one activity.",
+                issue_type="major",
+            )
 
     def check_market_balance(self):
         """

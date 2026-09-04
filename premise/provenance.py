@@ -287,6 +287,7 @@ def record_change_event(
     configuration_reference: str | None = None,
     proxy: str | None = None,
     fallback_rank: int | None = None,
+    computed_target_values: Mapping[str, Any] | None = None,
 ) -> ProvenanceEvent | None:
     """Record a historical ``write_log`` call in the active build session.
 
@@ -299,7 +300,11 @@ def record_change_event(
     if active is None:
         return None
 
-    parameters = _plain(dataset.get("log parameters", {}))
+    parameters = _plain(
+        dataset.get("log parameters", {})
+        if computed_target_values is None
+        else computed_target_values
+    )
     if isinstance(parameters, Mapping):
         iam_variable = (
             iam_variable
