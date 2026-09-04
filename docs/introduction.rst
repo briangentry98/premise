@@ -962,13 +962,11 @@ and GMST increase by 2100.
      -
      -
      -
-     -
    * - **SSP1**
      - 1.35°C
      - Very low forcing
      -
      - SSP1-VLLO
-     -
      -
      -
      -
@@ -996,12 +994,10 @@ and GMST increase by 2100.
      -
      -
      -
-     -
    * - **SSP1**
      - 2.13°C
      - NPI (nat. policies implemented)
      - SSP1-NPi
-     -
      -
      -
      -
@@ -1014,13 +1010,11 @@ and GMST increase by 2100.
      -
      -
      -
-     -
    * - **SSP2**
      - 1.42°C
      - Very low/high forcing (IMAGE VLHO)
      -
      - SSP2-VLHO
-     -
      -
      -
      -
@@ -1036,7 +1030,6 @@ and GMST increase by 2100.
      - 1.50–1.9°C
      - Paris-consistent (peak budget)
      - SSP2-PkBudg650, SSP2-PkBudg1000
-     -
      -
      -
      -
@@ -1089,7 +1082,6 @@ and GMST increase by 2100.
      -
      -
      -
-     -
    * - **SSP2**
      - 2.80°C
      - Medium forcing
@@ -1110,7 +1102,6 @@ and GMST increase by 2100.
      - 3.0°C
      - NPI (nat. policies implemented)
      - SSP2-NPi
-     -
      -
      -
      -
@@ -1139,12 +1130,10 @@ and GMST increase by 2100.
      -
      -
      -
-     -
    * - **SSP3**
      - 3.75°C
      - Rollback
      - SSP3-rollBack
-     -
      -
      -
      -
@@ -1173,7 +1162,6 @@ and GMST increase by 2100.
      -
      -
      -
-     -
    * - **SSP5**
      - 3.79°C
      - High Emissions
@@ -1193,7 +1181,7 @@ and TIAM-UCL and GCAM use *Representative Concentration Pathways* (RCPs) to deno
 (e.g., RCP 1.9, 2.6, 4.5 and Base).
 
 
-Additionally, we provided a summary of the main characteristics of each scenario `here <https://premisedash-6f5a0259c487.herokuapp.com/>`_.
+Additionally, we provided a summary of the main characteristics of each scenario in the `scenario dashboard <https://premisedash-6f5a0259c487.herokuapp.com/>`_.
 
 
 .. _CarbonBrief: https://www.carbonbrief.org/explainer-how-shared-socioeconomic-pathways-explore-future-climate-change
@@ -1287,7 +1275,7 @@ ScenarioLink plugin
 *******************
 There now exists a plugin for Activity Browser, called ScenarioLink, which allows you to
 directly download IAM scenario-based premise databases from the browser, without the use of premise.
-You can find it `here <https://github.com/polca/ScenarioLink>`_.
+You can find it in the `ScenarioLink repository <https://github.com/polca/ScenarioLink>`_.
 
 Active contributors
 -------------------

@@ -61,7 +61,7 @@ IAM models
 ----------
 
 I use a different IAM than REMIND, IMAGE, MESSAGE, GCAM or TIAM-UCL ... Can I still use ``premise``?
-_____________________________________________________________________________________
+_________________________________________________________________________________________________________
 
 There is a MAPPING section in the documentation
 that explains how to link to a new IAM. The YAML files under ````premise``/iam_variables_mapping``

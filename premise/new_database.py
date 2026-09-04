@@ -945,7 +945,7 @@ class NewDatabase:
         if not getattr(self, "_inventory_api_active", False):
             return getattr(self, "_database", None)
         raise AttributeError(
-            "NewDatabase.database was removed in premise 3.0. Use "
+            "NewDatabase.database was removed in premise 2.5.0. Use "
             "get_inventory_store() for immutable access or "
             "materialize_inventory() when a real list[dict] is unavoidable "
             "(materialization has a substantial memory cost)."
@@ -954,10 +954,10 @@ class NewDatabase:
     @database.setter
     def database(self, value):
         # A compatibility hook for narrowly constructed internal/test objects.
-        # Fully initialised premise 3.0 instances reject both reads and writes.
+        # Fully initialised premise 2.5.0 instances reject both reads and writes.
         if getattr(self, "_inventory_api_active", False):
             raise AttributeError(
-                "NewDatabase.database was removed in premise 3.0; inventory "
+                "NewDatabase.database was removed in premise 2.5.0; inventory "
                 "mutation must use get_inventory_store(writable=True)."
             )
         self._database = value

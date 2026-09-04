@@ -24,7 +24,7 @@ For a detailed description of the models and scenarios available, see the Introd
     There is also an `online dashboard <https://premisedash-6f5a0259c487.herokuapp.com/>`_.
     You can also generate it manually:
 
-.. python::
+.. code-block:: python
 
     ndb = NewDatabase(...)
     ndb.generate_scenario_report()
@@ -618,7 +618,6 @@ in 2020 and 2050.
 | hydrogen production, gaseous, 1 bar, from SOEC electrolysis, from grid electricity                                | electricity | kWh |   42.3   |41.2–43.4 |  40.6    |40.0–41.2 | 40.0  |RER  | Gerloff_ 2021 [LCI_electrolysis_]  |
 +-------------------------------------------------------------------------------------------------------------------+-------------+-----+----------+----------+----------+----------+-------+-----+------------------------------------+
 | hydrogen production, gaseous, 1 bar, from SOEC electrolysis, with steam input, from grid electricity              | electricity | kWh |  42.3*   |41.2–43.4 |  40.6    |40.0–41.2 | 40.0  |RER  | Gerloff_ 2021 [LCI_electrolysis_]  |
-| (same performance as SOEC, no separate data)                                                                                                                                                                                         |
 +-------------------------------------------------------------------------------------------------------------------+-------------+-----+----------+----------+----------+----------+-------+-----+------------------------------------+
 | hydrogen production, gaseous, 25 bar, from thermochemical water splitting, at solar tower                         | solar       | MJ  |   N/A    |   N/A    |   N/A    |   N/A    | 180   |RER  | Zhang2_ 2022                       |
 +-------------------------------------------------------------------------------------------------------------------+-------------+-----+----------+----------+----------+----------+-------+-----+------------------------------------+
@@ -626,6 +625,8 @@ in 2020 and 2050.
 +-------------------------------------------------------------------------------------------------------------------+-------------+-----+----------+----------+----------+----------+-------+-----+------------------------------------+
 
 Future efficiencies for electrolyzers are based on Studie IndWEDe_ (see p.176).
+The SOEC inventory with a steam input uses the same performance assumptions as
+the standard SOEC inventory because no separate performance data are available.
 
 .. _Antonini: https://pubs.rsc.org/en/content/articlelanding/2020/se/d0se00222d
 .. _Antonini2: https://pubs.rsc.org/en/Content/ArticleLanding/2021/SE/D0SE01637C
@@ -1003,10 +1004,10 @@ the fuel production process.
 If the CO2 originates from:
 
 * a gasification process without CCS, a negative carbon correction is added to
-reflect the fact that part of the CO2 has not been emitted but has ended in the fuel instead.
+  reflect the fact that part of the CO2 has not been emitted but has ended in the fuel instead.
 * the gasification process with CCS, no carbon correction is necessary, because the CO2 is stored
-in the fuel instead of being stored underground, which from a carbon accounting standpoint is
-similar.
+  in the fuel instead of being stored underground, which from a carbon accounting standpoint is
+  similar.
 
 Carbon Capture
 --------------
@@ -1461,7 +1462,7 @@ Buses
 
 The following datasets for city and coach buses are imported.
 
-  =================================================================================================================== ==================
+ =================================================================================================================== ==================
   Bus datasets                                                                                                        location
  =================================================================================================================== ==================
   transport, passenger bus, battery electric - overnight charging 9m midibus                                          all IAM regions
@@ -1596,7 +1597,7 @@ EXTRACT section.
 Photovoltaic panels
 *******************
 
-Module efficiencies in 2010 for micro-Si and single-Si are from IEA_ Task 12
+Module efficiencies in 2010 for micro-Si and single-Si are from IEA_PV_ Task 12
 report. For multi-Si, CIGS, CIS and CdTe, they are from IEA2_ road map report
 on PV panels.
 

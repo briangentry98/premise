@@ -434,7 +434,7 @@ regions for a specific metal will be directly proportional to the country-level
 contributions to the global market. These shares are derived from various sources,
 mainly `BGS <https://www2.bgs.ac.uk/mineralsuk/statistics/worldStatistics.html>`_
 and `USGS <https://doi.org/https://doi.org/10.3133/mcs2023>`_, in addition to data from
-van den Brink_ et al. (2022) for Antimony refining.
+`van den Brink`_ et al. (2022) for Antimony refining.
 For certain markets where data was available, *premise* incorporates projections
 from `BNEF <https://about.bnef.com/>`_ regarding the development of future mining and refining projects to
 forecast the market shares' evolution up to 2030.
@@ -495,17 +495,17 @@ multiple treatment pathways for sulfidic tailings. These include:
 * **Surface impoundment**, which remains the default inventory in ecoinvent.
 
 * **Backfilling into underground voids**, based on [1], which builds upon operational data
-from [3]. The life cycle inventory for this process includes the consumption of materials such as
-cement binders, slags, and fuel, and accounting for the associated energy demands. Backfilling is assumed to involve
-cement stabilization of the residues, effectively preventing leaching emissions from the deposited material.
+  from [3]. The life cycle inventory for this process includes the consumption of materials such as
+  cement binders, slags, and fuel, and accounting for the associated energy demands. Backfilling is assumed to involve
+  cement stabilization of the residues, effectively preventing leaching emissions from the deposited material.
 
 * **Flocculation-flotation**, based on [4], where the sulfur-rich fraction from the tailings
-stream is separated using polyacrylamide and xanthate as flocculants and collector agents to improve pyrite separation.
-The valorized output can potentially be used downstream in the cement and ceramic tiles industries.
+  stream is separated using polyacrylamide and xanthate as flocculants and collector agents to improve pyrite separation.
+  The valorized output can potentially be used downstream in the cement and ceramic tiles industries.
 
 * **Roasting and leaching**, also based on [4], involves first removing the sulfur content of tailings
-through drying and roasting. Copper and zinc are then recovered using a combination of ammoniacal leaching, ion
-flotation, and chemical precipitation.
+  through drying and roasting. Copper and zinc are then recovered using a combination of ammoniacal leaching, ion
+  flotation, and chemical precipitation.
 
 In the default ecoinvent system, all sulfidic tailings are treated via impoundment. The table below presents regional
 estimates for the uptake of the various alternatives, along with the references used to approximate the data points or
@@ -621,8 +621,7 @@ Inventories
 
 *premise* provides several inventories regarding updated mining practices:
 
-* `Alternative treatment pathways for sulfidic tailings
- <https://github.com/polca/premise/blob/master/premise/data/additional_inventories/lci-sulfidic-tailings.xlsx>`_.
+* `Alternative treatment pathways for sulfidic tailings <https://github.com/polca/premise/blob/master/premise/data/additional_inventories/lci-sulfidic-tailings.xlsx>`_.
 
 The inventories are provided under `premise/data/additional_inventories <https://github.com/polca/premise/tree/master/premise/data/additional_inventories>`_
 
@@ -1221,7 +1220,7 @@ aluminium smelters with regional electricity markets is likely more
 accurate than retaining the current setup.
 
 In fact, such approach has been used by the International Aluminium Industry
-association itself, in their Aluminium Sector Greenhouse Gas Pathways to 2050 Roadmap_, where
+association itself, in their `Aluminium Sector Greenhouse Gas Pathways to 2050 Roadmap <https://international-aluminium.org/resource/aluminium-sector-greenhouse-gas-pathways-to-2050-2021/>`_, where
 they connected the electricity consumption of aluminium smelters to future
 regional mixes defined by the International Energy Agency (IEA).
 
@@ -1665,7 +1664,7 @@ Key outputs
 The modelling of future improvements in the steel sector is now based on
 multiple explicit production routes for both primary and secondary steel,
 rather than only modifying the two generic ecoinvent datasets.
-This allows ``premise` to represent different process configurations
+This allows *premise* to represent different process configurations
 (e.g., blast furnace–basic oxygen furnace, direct reduced iron with natural gas,
 electric arc furnace with varying scrap shares) and to adapt their energy
 requirements and emissions according to scenario projections.
@@ -1934,98 +1933,98 @@ truck transport datasets and the new ones replacing them:
 | Transport Type                                            | REMIND               | IMAGE                | TIAM-UCL             |
 +===========================================================+======================+======================+======================+
 | transport, freight, lorry 16-32 metric ton, EURO1         | 26t gross weight     | 18t gross weight     | 18t gross weight     |
-|                                                           | unspecified powertrain,| unspecified powertrain,| unspecified powertrain,|
+|                                                           | unspec. powertrain   | unspec. powertrain   | unspec. powertrain   |
 |                                                           | long haul            | long haul            | long haul            |
 +-----------------------------------------------------------+----------------------+----------------------+----------------------+
 | transport, freight, lorry 3.5-7.5 metric ton, EURO3       | 7.5t gross weight    | 18t gross weight     | 7.5t gross weight    |
-|                                                           | unspecified powertrain,| unspecified powertrain,| unspecified powertrain,|
+|                                                           | unspec. powertrain   | unspec. powertrain   | unspec. powertrain   |
 |                                                           | long haul            | long haul            | long haul            |
 +-----------------------------------------------------------+----------------------+----------------------+----------------------+
 | transport, freight, lorry 16-32 metric ton, EURO5         | 26t gross weight     | 18t gross weight     | 18t gross weight     |
-|                                                           | unspecified powertrain,| unspecified powertrain,| unspecified powertrain,|
+|                                                           | unspec. powertrain   | unspec. powertrain   | unspec. powertrain   |
 |                                                           | long haul            | long haul            | long haul            |
 +-----------------------------------------------------------+----------------------+----------------------+----------------------+
 | transport, freight, lorry >32 metric ton, EURO1           | 40t gross weight     | 40t gross weight     | 40t gross weight     |
-|                                                           | unspecified powertrain,| unspecified powertrain,| unspecified powertrain,|
+|                                                           | unspec. powertrain   | unspec. powertrain   | unspec. powertrain   |
 |                                                           | long haul            | long haul            | long haul            |
 +-----------------------------------------------------------+----------------------+----------------------+----------------------+
 | transport, freight, lorry 3.5-7.5 metric ton, EURO4       | 7.5t gross weight    | 18t gross weight     | 7.5t gross weight    |
-|                                                           | unspecified powertrain,| unspecified powertrain,| unspecified powertrain,|
+|                                                           | unspec. powertrain   | unspec. powertrain   | unspec. powertrain   |
 |                                                           | long haul            | long haul            | long haul            |
 +-----------------------------------------------------------+----------------------+----------------------+----------------------+
-| transport, freight, lorry, all sizes, EURO1 to market     | unspecified, long haul| unspecified, long haul| unspecified, long haul|
+| transport, freight, lorry, all sizes, EURO1 to market     | unspecified long haul| unspecified long haul| unspecified long haul|
 +-----------------------------------------------------------+----------------------+----------------------+----------------------+
 | transport, freight, lorry 7.5-16 metric ton, EURO6        | 18t gross weight     | 18t gross weight     | 18t gross weight     |
-|                                                           | unspecified powertrain,| unspecified powertrain,| unspecified powertrain,|
+|                                                           | unspec. powertrain   | unspec. powertrain   | unspec. powertrain   |
 |                                                           | long haul            | long haul            | long haul            |
 +-----------------------------------------------------------+----------------------+----------------------+----------------------+
 | transport, freight, lorry 7.5-16 metric ton, EURO1        | 18t gross weight     | 18t gross weight     | 18t gross weight     |
-|                                                           | unspecified powertrain,| unspecified powertrain,| unspecified powertrain,|
+|                                                           | unspec. powertrain   | unspec. powertrain   | unspec. powertrain   |
 |                                                           | long haul            | long haul            | long haul            |
 +-----------------------------------------------------------+----------------------+----------------------+----------------------+
-| transport, freight, lorry, all sizes, EURO3 to market     | unspecified, long haul| unspecified, long haul| unspecified, long haul|
+| transport, freight, lorry, all sizes, EURO3 to market     | unspecified long haul| unspecified long haul| unspecified long haul|
 +-----------------------------------------------------------+----------------------+----------------------+----------------------+
 | transport, freight, lorry 16-32 metric ton, EURO6         | 26t gross weight     | 18t gross weight     | 18t gross weight     |
-|                                                           | unspecified powertrain,| unspecified powertrain,| unspecified powertrain,|
+|                                                           | unspec. powertrain   | unspec. powertrain   | unspec. powertrain   |
 |                                                           | long haul            | long haul            | long haul            |
 +-----------------------------------------------------------+----------------------+----------------------+----------------------+
 | transport, freight, lorry 7.5-16 metric ton, EURO2        | 18t gross weight     | 18t gross weight     | 18t gross weight     |
-|                                                           | unspecified powertrain,| unspecified powertrain,| unspecified powertrain,|
+|                                                           | unspec. powertrain   | unspec. powertrain   | unspec. powertrain   |
 |                                                           | long haul            | long haul            | long haul            |
 +-----------------------------------------------------------+----------------------+----------------------+----------------------+
 | transport, freight, lorry 7.5-16 metric ton, EURO3        | 18t gross weight     | 18t gross weight     | 18t gross weight     |
-|                                                           | unspecified powertrain,| unspecified powertrain,| unspecified powertrain,|
+|                                                           | unspec. powertrain   | unspec. powertrain   | unspec. powertrain   |
 |                                                           | long haul            | long haul            | long haul            |
 +-----------------------------------------------------------+----------------------+----------------------+----------------------+
 | transport, freight, lorry 7.5-16 metric ton, EURO4        | 18t gross weight     | 18t gross weight     | 18t gross weight     |
-|                                                           | unspecified powertrain,| unspecified powertrain,| unspecified powertrain,|
+|                                                           | unspec. powertrain   | unspec. powertrain   | unspec. powertrain   |
 |                                                           | long haul            | long haul            | long haul            |
 +-----------------------------------------------------------+----------------------+----------------------+----------------------+
 | transport, freight, lorry 16-32 metric ton, EURO2         | 26t gross weight     | 18t gross weight     | 18t gross weight     |
-|                                                           | unspecified powertrain,| unspecified powertrain,| unspecified powertrain,|
+|                                                           | unspec. powertrain   | unspec. powertrain   | unspec. powertrain   |
 |                                                           | long haul            | long haul            | long haul            |
 +-----------------------------------------------------------+----------------------+----------------------+----------------------+
 | transport, freight, lorry >32 metric ton, EURO6           | 40t gross weight     | 40t gross weight     | 40t gross weight     |
-|                                                           | unspecified powertrain,| unspecified powertrain,| unspecified powertrain,|
+|                                                           | unspec. powertrain   | unspec. powertrain   | unspec. powertrain   |
 |                                                           | long haul            | long haul            | long haul            |
 +-----------------------------------------------------------+----------------------+----------------------+----------------------+
 | transport, freight, lorry 3.5-7.5 metric ton, EURO2       | 7.5t gross weight    | 18t gross weight     | 7.5t gross weight    |
-|                                                           | unspecified powertrain,| unspecified powertrain,| unspecified powertrain,|
+|                                                           | unspec. powertrain   | unspec. powertrain   | unspec. powertrain   |
 |                                                           | long haul            | long haul            | long haul            |
 +-----------------------------------------------------------+----------------------+----------------------+----------------------+
 | transport, freight, lorry 3.5-7.5 metric ton, EURO1       | 7.5t gross weight    | 18t gross weight     | 7.5t gross weight    |
-|                                                           | unspecified powertrain,| unspecified powertrain,| unspecified powertrain,|
+|                                                           | unspec. powertrain   | unspec. powertrain   | unspec. powertrain   |
 |                                                           | long haul            | long haul            | long haul            |
 +-----------------------------------------------------------+----------------------+----------------------+----------------------+
-| transport, freight, lorry, all sizes, EURO2 to market     | unspecified, long haul| unspecified, long haul| unspecified, long haul|
+| transport, freight, lorry, all sizes, EURO2 to market     | unspecified long haul| unspecified long haul| unspecified long haul|
 +-----------------------------------------------------------+----------------------+----------------------+----------------------+
 | transport, freight, lorry 16-32 metric ton, unregulated   | 26t gross weight     | 18t gross weight     | 18t gross weight     |
-|                                                           | unspecified powertrain,| unspecified powertrain,| unspecified powertrain,|
+|                                                           | unspec. powertrain   | unspec. powertrain   | unspec. powertrain   |
 |                                                           | long haul            | long haul            | long haul            |
 +-----------------------------------------------------------+----------------------+----------------------+----------------------+
 | transport, freight, lorry >32 metric ton, unregulated     | 40t gross weight     | 40t gross weight     | 40t gross weight     |
-|                                                           | unspecified powertrain,| unspecified powertrain,| unspecified powertrain,|
+|                                                           | unspec. powertrain   | unspec. powertrain   | unspec. powertrain   |
 |                                                           | long haul            | long haul            | long haul            |
 +-----------------------------------------------------------+----------------------+----------------------+----------------------+
 | transport, freight, lorry >32 metric ton, EURO3           | 40t gross weight     | 40t gross weight     | 40t gross weight     |
-|                                                           | unspecified powertrain,| unspecified powertrain,| unspecified powertrain,|
+|                                                           | unspec. powertrain   | unspec. powertrain   | unspec. powertrain   |
 |                                                           | long haul            | long haul            | long haul            |
 +-----------------------------------------------------------+----------------------+----------------------+----------------------+
 | transport, freight, lorry 3.5-7.5 metric ton, unregulated | 7.5t gross weight    | 18t gross weight     | 7.5t gross weight    |
-|                                                           | unspecified powertrain,| unspecified powertrain,| unspecified powertrain,|
+|                                                           | unspec. powertrain   | unspec. powertrain   | unspec. powertrain   |
 |                                                           | long haul            | long haul            | long haul            |
 +-----------------------------------------------------------+----------------------+----------------------+----------------------+
 | transport, freight, lorry 7.5-16 metric ton, EURO5        | 18t gross weight     | 18t gross weight     | 18t gross weight     |
-|                                                           | unspecified powertrain,| unspecified powertrain,| unspecified powertrain,|
+|                                                           | unspec. powertrain   | unspec. powertrain   | unspec. powertrain   |
 |                                                           | long haul            | long haul            | long haul            |
 +-----------------------------------------------------------+----------------------+----------------------+----------------------+
 | transport, freight, lorry 3.5-7.5 metric ton, EURO6       | 7.5t gross weight    | 18t gross weight     | 7.5t gross weight    |
-|                                                           | unspecified powertrain,| unspecified powertrain,| unspecified powertrain,|
+|                                                           | unspec. powertrain   | unspec. powertrain   | unspec. powertrain   |
 |                                                           | long haul            | long haul            | long haul            |
 +-----------------------------------------------------------+----------------------+----------------------+----------------------+
 | transport, freight, lorry 7.5-16 metric ton, unregulated  | 18t gross weight     | 18t gross weight     | 18t gross weight     |
-|                                                           | unspecified powertrain,| unspecified powertrain,| unspecified powertrain,|
-|
+|                                                           | unspec. powertrain   | unspec. powertrain   | unspec. powertrain   |
+|                                                           | long haul            | long haul            | long haul            |
 +-----------------------------------------------------------+----------------------+----------------------+----------------------+
 
 Carbon Dioxide Removal
@@ -2727,7 +2726,7 @@ The process begins with a dataset that requires processing.
    :local:
 
 Decision: Is the Exchange in Cache?
------------------------------------
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 - **Yes**
 
@@ -2740,8 +2739,7 @@ Decision: Is the Exchange in Cache?
 
   - Use :func:`process_uncached_exchange`.
 
-    Decision: Number of Possible Datasets
-    ------------------------------------
+    **Decision: Number of Possible Datasets**
 
     - **None**
 
@@ -2758,8 +2756,7 @@ Decision: Is the Exchange in Cache?
 
       - Use :func:`handle_multiple_possible_datasets`.
 
-        Decision: Does Dataset Location Match Possible Dataset Locations?
-        -----------------------------------------------------------------
+        **Decision: Does Dataset Location Match Possible Dataset Locations?**
 
         - **Yes**
 
@@ -2769,8 +2766,7 @@ Decision: Is the Exchange in Cache?
 
           - Use :func:`process_complex_matching_and_allocation`.
 
-            Decision: Dataset Location Type
-            --------------------------------
+            **Decision: Dataset Location Type**
 
             - **IAM Region**
 
@@ -2798,7 +2794,7 @@ Decision: Is the Exchange in Cache?
                 - Cache the new entry.
 
 Final Steps
------------
+~~~~~~~~~~~
 
 - If no match is found, use :func:`handle_default_option`.
 
@@ -2906,8 +2902,8 @@ if the year is superior to 2020.
 
 Two GAINS-IAM scenarios are available:
 
-* **CLE**: **C**urrent **LE**gislation scenario
-* **MFR**: **M**aximum **F**easible **R**eduction scenario
+* ``CLE``: current legislation scenario
+* ``MFR``: maximum feasible reduction scenario
 
 By default, the CLE scenario is used. To use the MFR scenario:
 

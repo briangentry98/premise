@@ -135,8 +135,9 @@ and their corresponding IAM regions, as shown below, and store it under
 premise/iam_variables_mapping/topologies, under the name: iamname-topology.json.
 
 .. code-block:: json
+
     {
-        ...
+        "EUR": ["AT", "BE", "CH", "DE", "FR"],
         "REF": ["AM", "AZ", "BY", "GE", "KZ", "KG", "MD", "RU", "TJ", "TM", "UA", "UZ"],
         "CAZ": ["AU", "CA", "NZ"],
         "CHA": ["CN", "HK", "MO", "TW"],

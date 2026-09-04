@@ -28,6 +28,90 @@ All notable changes to this project are documented in this file.
 - The compiled update reduces the measured median metals-sector runtime versus
   the pre-fix implementation.
 
+## [2.5.0]
+
+### Breaking changes
+- Removed direct access to the mutable `NewDatabase.database` list after
+  initialization. Use `get_inventory_store()` for read-only inspection,
+  `get_inventory_store(writable=True).transaction(...)` for controlled
+  mutations, or `materialize_inventory()` at integration boundaries that
+  require a real `list[dict]`.
+- Replaced the historical pipe-delimited change-log workbook with structured
+  change reports. `generate_change_report()` now returns
+  `ChangeReportArtifacts` and writes a review-oriented Excel workbook plus an
+  exhaustive Parquet audit file.
+
+### Added
+- Added the `InventoryStore` abstraction with immutable activity and exchange
+  snapshots, atomic transactions, indexed queries, copy-on-write scenario
+  forks, and explicit materialization. Both the compact production backend and
+  the dictionary-backed legacy compatibility backend implement the same
+  contract.
+- Added versioned compact inventory checkpoints backed by typed Arrow data and
+  checksummed metadata. Scenario stores can be reopened and streamed into
+  exporters without retaining a complete Python object graph in memory.
+- Added mandatory, read-only methodological validation during scenario updates
+  and exports. Incremental sector contracts cover transformation scope,
+  physical values, market composition, supplier links, and sector-specific
+  expectations; exhaustive graph validation remains available through
+  `NewDatabase.get_validation_report(exhaustive=True)`.
+- Exposed immutable validation results and errors through
+  `ValidationIssue`, `ValidationRuleResult`, `ValidationPhaseResult`,
+  `ValidationReport`, and `PremiseValidationError`.
+- Added structured V2 change reports with scenario and sector summaries,
+  important numeric changes, market/proxy decisions, validation findings,
+  methodology and provenance in Excel, with complete row-level differences in
+  Parquet.
+- Added `NewDatabase.update_and_write()` to update scenarios and immediately
+  export them to Brightway without the former intermediate dump/reload cycle.
+- Added reproducible profiling, output-equivalence, validation-performance,
+  and validation-warning tools under `benchmarks/`, together with a dedicated
+  validation-certification workflow.
+- Reorganized the examples into 12 self-contained, numbered notebooks covering
+  quickstarts, consequential scenarios, custom inputs, external scenarios,
+  export formats, scenario arrays, matrix LCAs, incremental databases,
+  reports, and score comparison.
+
+### Changed
+- Reworked scenario ownership, caching, proxy cloning, provider resolution,
+  relinking, emissions scaling, checkpointing, and export preparation to reduce
+  runtime and peak memory while preserving certified output equivalence.
+- Streamed compact inventories directly to Brightway exporters and combined
+  provider assignment with exporter validation to avoid redundant full-graph
+  processing.
+- Reused persisted scenario state across exports and retained a bounded
+  in-memory handoff for single-scenario update-and-write workflows.
+- Built diesel markets and their carbon-dioxide intensities from the dedicated
+  IAM diesel-blend shares, including the consequential marginal blend, rather
+  than generic production-volume shares.
+- Added deterministic provenance for transformation scope, algorithms, IAM
+  variables, configuration references, proxy choices, and geographic
+  fallbacks.
+
+### Fixed
+- Normalized mobile and stationary battery-market supplier shares after IAM
+  interpolation, preventing small rounding or interpolation residuals from
+  producing markets whose inputs do not sum to one.
+- Kept consequential diesel market suppliers and their calculated fossil
+  carbon-dioxide intensity aligned with the same marginal diesel blend.
+- Preserved strict semantic and exporter output equivalence across compact and
+  legacy inventory backends while optimizing mutation and serialization paths.
+
+### Documentation
+- Added guides for the InventoryStore API, structured change reports, runtime
+  and memory benchmarking, validation behavior, and the numbered example
+  notebooks.
+- Documented the migration from `NewDatabase.database`, explicit inventory
+  materialization, validation-report inspection, and report artifact handling.
+
+### Tests
+- Added unit, differential, and integration coverage for inventory stores,
+  transactions, checkpoints, migrations, provenance, validation contracts,
+  change reports, fast exports, battery markets, marginal diesel mixes, and
+  output equivalence.
+- Added release certification for IAM years that require interpolation between
+  available model time slices.
+
 ## [2.4.9.2]
 
 ### Added
