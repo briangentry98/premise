@@ -32,9 +32,14 @@ def configured_metal_products() -> frozenset[tuple[str, str]]:
     """Return provider name/product pairs covered by enabled material rules."""
 
     return frozenset(
-        (rule.provider.name, rule.provider.reference_product)
+        (provider.name, provider.reference_product)
         for rule in load_material_rules().enabled_rules
         if rule.provider is not None
+        for provider in (
+            rule.provider,
+            rule.provider.for_version("3.11"),
+            rule.provider.for_version("3.12"),
+        )
     )
 
 

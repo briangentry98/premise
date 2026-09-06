@@ -16,6 +16,12 @@ name and reference product, with the location preference ``World``, ``GLO``,
 then ``RoW``. If no configured provider exists, the rule is skipped and a
 validation warning and provenance decision are recorded.
 
+For ecoinvent 3.11 and 3.12, gallium material rules resolve the configured
+``gallium, semiconductor-grade`` market to ``gallium, high-grade``, following
+the packaged 3.10-to-3.11 migration. Earlier versions retain the original
+provider. Existing direct amounts and provenance use the resolved product,
+and the comparison tool includes both product names.
+
 EPR construction
 ----------------
 

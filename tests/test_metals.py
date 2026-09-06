@@ -23,7 +23,10 @@ from premise.metals_rules import (
     load_material_rules,
     load_technology_conversions,
 )
-from premise.metal_input_comparison import compare_direct_metal_inputs
+from premise.metal_input_comparison import (
+    compare_direct_metal_inputs,
+    configured_metal_products,
+)
 
 
 def test_yaml_material_configuration_is_complete_and_valid():
@@ -88,6 +91,7 @@ def test_update_exchanges_only_replaces_matching_technosphere_exchange():
 
 def _metals_for_material_rule_tests(technology, element, intensity):
     metals = object.__new__(Metals)
+    metals.version = "3.12"
     metals.precomputed_medians = xr.DataArray(
         [[[intensity, intensity, intensity]]],
         coords={
@@ -102,6 +106,85 @@ def _metals_for_material_rule_tests(technology, element, intensity):
     metals.material_decisions = []
     metals._validation_targets = {}
     return metals
+
+
+@pytest.mark.parametrize(
+    ("version", "grade"),
+    [
+        ("3.8", "semiconductor-grade"),
+        ("3.9", "semiconductor-grade"),
+        ("3.10", "semiconductor-grade"),
+        ("3.11", "high-grade"),
+        ("3.12", "high-grade"),
+    ],
+)
+def test_gallium_rule_updates_versioned_provider_and_records_existing_amount(
+    version, grade
+):
+    rule = next(
+        rule
+        for rule in load_material_rules().enabled_rules
+        if rule.technology == "CIGS" and rule.element == "Gallium"
+    )
+    metals = _metals_for_material_rule_tests("CIGS", "Gallium", 2)
+    metals.version = version
+    product = f"gallium, {grade}"
+    provider = market_dataset(f"market for {product}", product, "GLO", [])
+    metals.db_index = {provider["name"]: {product: [provider]}}
+    metals.is_in_index = lambda _dataset: True
+    dataset = {
+        "name": "photovoltaic laminate production, CIS",
+        "reference product": "photovoltaic laminate, CIS",
+        "location": "DE",
+        "unit": "square meter",
+        "exchanges": [technosphere_exchange(provider["name"], product, "GLO", 0.01098)],
+    }
+
+    metals._apply_material_rule(
+        dataset=dataset, technology="CIGS", rule=rule, conversion_factor=1
+    )
+
+    assert len(dataset["exchanges"]) == 1
+    exchange = dataset["exchanges"][0]
+    assert (exchange["name"], exchange["product"], exchange["amount"]) == (
+        provider["name"],
+        product,
+        6,
+    )
+    assert metals.material_update_diagnostics == []
+    (decision,) = metals.material_decisions
+    assert decision["status"] == "updated"
+    assert decision["provider product"] == product
+    assert decision["old direct amount"] == 0.01098
+    assert decision["target direct amount"] == 6
+    assert (provider["name"], product) in configured_metal_products()
+
+
+def test_unavailable_gallium_provider_still_records_warning():
+    rule = next(
+        rule
+        for rule in load_material_rules().enabled_rules
+        if rule.technology == "CIGS" and rule.element == "Gallium"
+    )
+    metals = _metals_for_material_rule_tests("CIGS", "Gallium", 2)
+    metals.db_index = {}
+    dataset = {
+        "name": "photovoltaic laminate production, CIS",
+        "location": "DE",
+        "exchanges": [],
+    }
+
+    metals._apply_material_rule(
+        dataset=dataset, technology="CIGS", rule=rule, conversion_factor=1
+    )
+
+    assert dataset["exchanges"] == []
+    (diagnostic,) = metals.material_update_diagnostics
+    assert diagnostic["provider product"] == "gallium, high-grade"
+    assert (
+        metals.material_decisions[0]["reason code"]
+        == "metals.material_rule.provider_missing"
+    )
 
 
 def test_epr_material_policy_preserves_source_exchanges():

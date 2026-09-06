@@ -14,6 +14,9 @@ All notable changes to this project are documented in this file.
   overlap with EPR components.
 
 ### Fixed
+- Resolved the renamed high-grade gallium market for material updates in
+  ecoinvent 3.11 and 3.12, fixing six missing-provider warnings in nightly
+  certification while retaining the supplier name used by older versions.
 - Applied all configured product rules for a material, including both cast and
   wrought aluminium for eligible nuclear-power datasets.
 - Restricted material replacement to technosphere exchanges so similarly named

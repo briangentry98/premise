@@ -1676,6 +1676,7 @@ class Metals(BaseTransformation):
 
         if rule.provider is None or rule.element is None:
             return
+        provider_selector = rule.provider.for_version(self.version)
         try:
             use_factors = self.precomputed_medians.sel(
                 metal=rule.element, origin_var=technology
@@ -1699,14 +1700,14 @@ class Metals(BaseTransformation):
             return
 
         old_amount = self._direct_material_amount(
-            dataset, rule.provider.reference_product
+            dataset, provider_selector.reference_product
         )
         values = {
             "material rule id": rule.id,
             "technology": technology,
             "element": rule.element,
-            "provider name": rule.provider.name,
-            "provider product": rule.provider.reference_product,
+            "provider name": provider_selector.name,
+            "provider product": provider_selector.reference_product,
             "intensity median": use_factors.sel(variable="median").item(),
             "intensity minimum": use_factors.sel(variable="min").item(),
             "intensity maximum": use_factors.sel(variable="max").item(),
@@ -1734,7 +1735,7 @@ class Metals(BaseTransformation):
 
         try:
             provider = self.get_metal_market_dataset(
-                rule.provider.name, rule.provider.reference_product
+                provider_selector.name, provider_selector.reference_product
             )
         except ws.NoResults as error:
             diagnostic = {
@@ -1773,7 +1774,7 @@ class Metals(BaseTransformation):
             status="updated",
             reason_code="metals.material_rule.applied",
             explanation=(
-                f"Set the direct {rule.provider.reference_product!r} input using "
+                f"Set the direct {provider_selector.reference_product!r} input using "
                 f"material rule {rule.id!r}."
             ),
             values=values,

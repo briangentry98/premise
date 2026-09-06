@@ -32,6 +32,24 @@ class ProviderSelector:
     name: str
     reference_product: str
 
+    def for_version(self, version: str | None) -> ProviderSelector:
+        """Resolve the gallium rename recorded in the 3.10 -> 3.11 migration."""
+
+        # See utils/import/migrations/cutoff/
+        # ecoinvent-3.10-cutoff-ecoinvent-3.11-cutoff.json. The renamed market
+        # also exists in 3.12; retain the configured provider in older sources.
+        if str(version) in {"3.11", "3.12"} and (
+            self.name,
+            self.reference_product,
+        ) == (
+            "market for gallium, semiconductor-grade",
+            "gallium, semiconductor-grade",
+        ):
+            return ProviderSelector(
+                "market for gallium, high-grade", "gallium, high-grade"
+            )
+        return self
+
 
 @dataclass(frozen=True, slots=True)
 class MaterialRule:
